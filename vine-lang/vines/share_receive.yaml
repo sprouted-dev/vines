@@ -1,0 +1,14 @@
+# Receive shared events: verify each envelope, write the good ones.
+# The caller holds the stream position; the vine holds none.
+vine: share_receive
+mode: stream
+input: { envelope: object }
+outputs:
+  accepted: { event: id }
+  rejected: { reason: text }
+steps:
+  - verify_envelope: { envelope: $in.envelope }
+    as: check
+  - guard: { when: $check.ok == false, out: rejected, with: { reason: $check.reason } }
+  - write: { artifact: $check.event.artifact, records: [$check.event] }
+  - out: { name: accepted, with: { event: $check.event.id } }

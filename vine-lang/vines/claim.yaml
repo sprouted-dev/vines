@@ -1,0 +1,24 @@
+# Claim an item for a claimant, guarded on the version the caller saw.
+vine: claim
+mode: once
+input: { item: id, claimant: text, version: int }
+outputs:
+  claimed: { item: id, claimant: text }
+  refused: { gate: text }
+steps:
+  - read: { artifact: $in.item }
+    as: item
+  - guard: { when: $item == null, out: refused, with: { gate: missing } }
+  - guard: { when: $item.state != "open", out: refused, with: { gate: state } }
+  - guard: { when: $item.holder != null, out: refused, with: { gate: held } }
+  - try:
+      do:
+        - write:
+            artifact: $in.item
+            expect_version: $in.version
+            records:
+              - { type: claimed, claimant: $in.claimant }
+        - out: { name: claimed, with: { item: $in.item, claimant: $in.claimant } }
+      catch:
+        conflict:
+          - out: { name: refused, with: { gate: version } }
