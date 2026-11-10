@@ -6,7 +6,14 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use vine_lang::{json, OpError, OperatorSpec, Registry, Shape, Ty, Value};
+use futures::stream::{BoxStream, StreamExt};
+use vine_lang::{
+    json, BoxFuture, Checkpoint, Emit, Memory, OpContext, OpError, OperatorSpec, Output, Registry,
+    Shape, StreamOperator, StreamOperatorSpec, StreamSink, Ty, Value,
+};
+
+/// A log several fakes write to, to show how calls interleave.
+pub type Journal = Arc<Mutex<Vec<String>>>;
 
 pub fn vine_source(name: &str) -> String {
     let path = format!("{}/vines/{name}.yaml", env!("CARGO_MANIFEST_DIR"));
@@ -28,6 +35,7 @@ struct FactsInner {
     fail_reads: bool,
     /// Writes left before every write fails. `None` means never fail.
     writes_before_failure: Option<usize>,
+    journal: Option<Journal>,
 }
 
 impl Facts {
@@ -69,6 +77,10 @@ impl Facts {
         self.inner.lock().unwrap().writes_before_failure = Some(n);
     }
 
+    pub fn set_journal(&self, journal: &Journal) {
+        self.inner.lock().unwrap().journal = Some(journal.clone());
+    }
+
     pub fn heal(&self) {
         let mut i = self.inner.lock().unwrap();
         i.fail_reads = false;
@@ -91,6 +103,10 @@ impl Facts {
     ) -> Result<Value, OpError> {
         let mut guard = self.inner.lock().unwrap();
         let i = &mut *guard;
+        if let Some(j) = &i.journal {
+            let ids: Vec<String> = records.iter().map(|r| r["id"].to_string()).collect();
+            j.lock().unwrap().push(format!("write {}", ids.join(",")));
+        }
         if let Some(left) = i.writes_before_failure.as_mut() {
             if *left == 0 {
                 return Err(OpError::new("unavailable", "fact store is down"));
@@ -365,13 +381,32 @@ pub fn register_agent(reg: &mut Registry, agent: &Arc<Agent>) {
 /// live outside the vine, so the operator touches `keys.read`.
 pub struct Keys {
     trusted: BTreeSet<String>,
+    journal: Option<Journal>,
+    in_flight: Mutex<(usize, usize)>,
 }
 
 impl Keys {
     pub fn new(trusted: &[&str]) -> Arc<Self> {
         Arc::new(Keys {
             trusted: trusted.iter().map(|s| s.to_string()).collect(),
+            journal: None,
+            in_flight: Mutex::default(),
         })
+    }
+
+    /// Logs each verification, and yields mid-call so overlapping calls
+    /// would show in [`Keys::most_at_once`].
+    pub fn with_journal(trusted: &[&str], journal: &Journal) -> Arc<Self> {
+        Arc::new(Keys {
+            trusted: trusted.iter().map(|s| s.to_string()).collect(),
+            journal: Some(journal.clone()),
+            in_flight: Mutex::default(),
+        })
+    }
+
+    /// The most verifications ever running at once.
+    pub fn most_at_once(&self) -> usize {
+        self.in_flight.lock().unwrap().1
     }
 }
 
@@ -400,6 +435,18 @@ pub fn register_keys(reg: &mut Registry, keys: &Arc<Keys>) {
             let k = k.clone();
             async move {
                 let env = &s["envelope"];
+                if let Some(j) = &k.journal {
+                    j.lock()
+                        .unwrap()
+                        .push(format!("verify {}", env["event"]["id"]));
+                    {
+                        let mut f = k.in_flight.lock().unwrap();
+                        f.0 += 1;
+                        f.1 = f.1.max(f.0);
+                    }
+                    tokio::task::yield_now().await;
+                    k.in_flight.lock().unwrap().0 -= 1;
+                }
                 let reject = |reason: &str| Ok(json!({ "ok": false, "reason": reason }));
                 let (Some(signer), Some(sig), Some(id), Some(_artifact)) = (
                     env["signer"].as_str(),
@@ -420,4 +467,327 @@ pub fn register_keys(reg: &mut Registry, keys: &Arc<Keys>) {
         },
     )
     .unwrap();
+}
+
+// ---------------------------------------------------------------- streams
+
+/// Stands in for whatever durably saves a stream run's results and
+/// checkpoints. Shared, so a test can look while the run is going.
+#[derive(Clone, Default)]
+pub struct Saver(Arc<Mutex<Saved>>);
+
+#[derive(Default)]
+pub struct Saved {
+    pub outputs: Vec<Output>,
+    pub checkpoints: Vec<Checkpoint>,
+}
+
+impl StreamSink for Saver {
+    fn output(&mut self, output: Output) {
+        self.0.lock().unwrap().outputs.push(output);
+    }
+    fn checkpoint(&mut self, checkpoint: &Checkpoint) {
+        self.0.lock().unwrap().checkpoints.push(checkpoint.clone());
+    }
+}
+
+impl Saver {
+    pub fn outputs(&self) -> Vec<Output> {
+        self.0.lock().unwrap().outputs.clone()
+    }
+    pub fn payloads(&self) -> Vec<Value> {
+        self.outputs().into_iter().map(|o| o.payload).collect()
+    }
+    pub fn checkpoints(&self) -> Vec<Checkpoint> {
+        self.0.lock().unwrap().checkpoints.clone()
+    }
+    pub fn positions(&self) -> Vec<u64> {
+        self.checkpoints().iter().map(|c| c.position).collect()
+    }
+    /// What a resume reads back: the last saved checkpoint.
+    pub fn last(&self) -> Checkpoint {
+        self.checkpoints().last().cloned().unwrap_or_default()
+    }
+}
+
+/// A source the test feeds by hand. Stays open until the sender drops.
+pub fn channel() -> (
+    tokio::sync::mpsc::UnboundedSender<Value>,
+    BoxStream<'static, Value>,
+) {
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let source = futures::stream::poll_fn(move |cx| rx.poll_recv(cx)).boxed();
+    (tx, source)
+}
+
+/// A finished source: these items, then the end.
+pub fn items(values: Vec<Value>) -> BoxStream<'static, Value> {
+    futures::stream::iter(values).boxed()
+}
+
+// ---------------------------------------------------------------- backup
+
+/// A key store `encrypt` reads from.
+pub struct KeyStore {
+    keys: BTreeSet<String>,
+}
+
+impl KeyStore {
+    pub fn new(keys: &[&str]) -> Arc<Self> {
+        Arc::new(KeyStore {
+            keys: keys.iter().map(|s| s.to_string()).collect(),
+        })
+    }
+}
+
+/// Reverse the fake encryption: the batch's items.
+pub fn unseal(sealed: &str) -> Vec<Value> {
+    let body = sealed.split_once("]:").expect("sealed text").1;
+    serde_json::from_str(body).expect("sealed json")
+}
+
+/// An outside backup provider. Batches are stored by name, so a store
+/// under a name already there replaces it.
+#[derive(Default)]
+pub struct Provider {
+    inner: Mutex<ProviderInner>,
+}
+
+#[derive(Default)]
+struct ProviderInner {
+    stored: BTreeMap<String, String>,
+    puts: Vec<String>,
+    fail_next: usize,
+    lose_ack_next: usize,
+}
+
+impl Provider {
+    pub fn new() -> Arc<Self> {
+        Arc::default()
+    }
+    /// Batch name to sealed contents.
+    pub fn stored(&self) -> BTreeMap<String, String> {
+        self.inner.lock().unwrap().stored.clone()
+    }
+    pub fn names(&self) -> Vec<String> {
+        self.stored().keys().cloned().collect()
+    }
+    /// Every store call that reached the provider, by name, in order.
+    pub fn puts(&self) -> Vec<String> {
+        self.inner.lock().unwrap().puts.clone()
+    }
+    /// Every `seq` across all stored batches, in name order.
+    pub fn seqs(&self) -> Vec<i64> {
+        let mut out = Vec::new();
+        for sealed in self.stored().values() {
+            out.extend(unseal(sealed).iter().map(|v| v["seq"].as_i64().unwrap()));
+        }
+        out
+    }
+    /// The next `n` stores fail before writing anything.
+    pub fn fail_next(&self, n: usize) {
+        self.inner.lock().unwrap().fail_next = n;
+    }
+    /// The next `n` stores write, then report a timeout: the ack is lost.
+    pub fn lose_ack_next(&self, n: usize) {
+        self.inner.lock().unwrap().lose_ack_next = n;
+    }
+}
+
+/// Register `encrypt` (touches `keys.read`) and `store` (touches
+/// `backup.write`). Both are ordinary operators: item in, item out.
+pub fn register_backup(reg: &mut Registry, keys: &Arc<KeyStore>, provider: &Arc<Provider>) {
+    let k = keys.clone();
+    reg.register(
+        OperatorSpec::new("encrypt")
+            .settings(
+                Shape::new()
+                    .required("key", Ty::Text)
+                    .required("data", Ty::List),
+            )
+            .returns(
+                Shape::new()
+                    .required("sealed", Ty::Text)
+                    .required("count", Ty::Int),
+            )
+            .touches(["keys.read"]),
+        move |s, _cx| {
+            let k = k.clone();
+            async move {
+                let key = s["key"].as_str().unwrap();
+                if !k.keys.contains(key) {
+                    return Err(OpError::new("no_key", format!("no key named {key}")));
+                }
+                let data = &s["data"];
+                Ok(json!({
+                    "sealed": format!("sealed[{key}]:{data}"),
+                    "count": data.as_array().unwrap().len(),
+                }))
+            }
+        },
+    )
+    .unwrap();
+
+    let p = provider.clone();
+    reg.register(
+        OperatorSpec::new("store")
+            .settings(
+                Shape::new()
+                    .required("to", Ty::Text)
+                    .required("first", Ty::Int)
+                    .required("last", Ty::Int)
+                    .required("sealed", Ty::Text)
+                    .required("count", Ty::Int),
+            )
+            .returns(
+                Shape::new()
+                    .required("name", Ty::Text)
+                    .required("first", Ty::Int)
+                    .required("last", Ty::Int)
+                    .required("count", Ty::Int),
+            )
+            .touches(["backup.write"]),
+        move |s, _cx| {
+            let p = p.clone();
+            async move {
+                let (first, last) = (s["first"].as_i64().unwrap(), s["last"].as_i64().unwrap());
+                let name = format!("{}/{first:06}-{last:06}", s["to"].as_str().unwrap());
+                let mut i = p.inner.lock().unwrap();
+                if i.fail_next > 0 {
+                    i.fail_next -= 1;
+                    return Err(OpError::new("unavailable", "provider is down"));
+                }
+                i.puts.push(name.clone());
+                i.stored
+                    .insert(name.clone(), s["sealed"].as_str().unwrap().to_owned());
+                if i.lose_ack_next > 0 {
+                    i.lose_ack_next -= 1;
+                    return Err(OpError::new("timeout", "no answer from provider"));
+                }
+                Ok(json!({ "name": name, "first": first, "last": last, "count": s["count"] }))
+            }
+        },
+    )
+    .unwrap();
+}
+
+/// `seq`-numbered backup records `from..=to`.
+pub fn records(from: i64, to: i64) -> Vec<Value> {
+    (from..=to)
+        .map(|n| json!({ "seq": n, "body": format!("record {n}") }))
+        .collect()
+}
+
+// ---------------------------------------------------------------- summary
+
+/// A provided stream operator with kept memory: the summary so far.
+/// Takes batches `{ items: [{ <field>: text }] }`, emits an updated summary
+/// per batch and a final one at end of stream. The digest is a running
+/// hash of every line in order, so a lost or repeated line changes it.
+struct Summarise {
+    field: String,
+    lines: u64,
+    digest: u64,
+    last: String,
+}
+
+impl Summarise {
+    fn summary(&self, final_: bool) -> Value {
+        json!({
+            "text": format!("{} lines, last {:?}, digest {:016x}", self.lines, self.last, self.digest),
+            "lines": self.lines,
+            "final": final_,
+        })
+    }
+}
+
+impl StreamOperator for Summarise {
+    fn push<'a>(
+        &'a mut self,
+        item: Value,
+        out: &'a mut Emit,
+        _cx: &'a OpContext,
+    ) -> BoxFuture<'a, Result<(), OpError>> {
+        Box::pin(async move {
+            for it in item["items"].as_array().into_iter().flatten() {
+                let Some(line) = it[&self.field].as_str() else {
+                    return Err(OpError::new(
+                        "bad_line",
+                        format!("item has no text `{}`: {it}", self.field),
+                    ));
+                };
+                for b in line.bytes().chain([b'\n']) {
+                    self.digest = (self.digest ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3);
+                }
+                self.lines += 1;
+                self.last = line.to_owned();
+            }
+            out.emit(self.summary(false));
+            Ok(())
+        })
+    }
+
+    fn end<'a>(
+        &'a mut self,
+        out: &'a mut Emit,
+        _cx: &'a OpContext,
+    ) -> BoxFuture<'a, Result<(), OpError>> {
+        out.emit(self.summary(true));
+        Box::pin(async { Ok(()) })
+    }
+
+    fn save(&self) -> Value {
+        json!({ "lines": self.lines, "digest": self.digest, "last": self.last })
+    }
+
+    fn restore(&mut self, memory: Value) -> Result<(), String> {
+        let (Some(lines), Some(digest), Some(last)) = (
+            memory["lines"].as_u64(),
+            memory["digest"].as_u64(),
+            memory["last"].as_str(),
+        ) else {
+            return Err(format!(
+                "expected {{ lines, digest, last }}, found {memory}"
+            ));
+        };
+        self.lines = lines;
+        self.digest = digest;
+        self.last = last.to_owned();
+        Ok(())
+    }
+}
+
+pub fn register_summarise(reg: &mut Registry) {
+    reg.register_stream(
+        StreamOperatorSpec::new("summarise")
+            .settings(Shape::new().required("field", Ty::Text))
+            .emits(
+                Shape::new()
+                    .required("text", Ty::Text)
+                    .required("lines", Ty::Int)
+                    .required("final", Ty::Bool),
+            )
+            .touches(["model"])
+            .memory(Memory::Kept),
+        |settings| {
+            let field = settings["field"].as_str().unwrap_or_default();
+            if field.is_empty() {
+                return Err("`field` must name the text field of each line".into());
+            }
+            Ok(Box::new(Summarise {
+                field: field.to_owned(),
+                lines: 0,
+                digest: 0xcbf2_9ce4_8422_2325,
+                last: String::new(),
+            }))
+        },
+    )
+    .unwrap();
+}
+
+/// Lines `from..=to` of one session.
+pub fn lines(session: &str, from: u64, to: u64) -> Vec<Value> {
+    (from..=to)
+        .map(|n| json!({ "line": format!("{session} line {n}") }))
+        .collect()
 }

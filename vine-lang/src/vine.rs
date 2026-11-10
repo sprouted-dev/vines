@@ -28,6 +28,40 @@
 //!
 //! Names bound inside a block are not visible after it. Every path through
 //! the top-level steps must end in an output.
+//!
+//! # Stream vines
+//!
+//! ```yaml
+//! vine: backup
+//! mode: stream
+//! input: { seq: int, body: text }    # the shape of each source item
+//! outputs:
+//!   stored: { name: text, first: int, last: int, count: int }
+//! steps:                             # a pipe, top to bottom
+//!   - collect: { size: 500, or_every: 60s }
+//!   - encrypt: { key: backup, data: $item.items }
+//!   - store: { to: provider, first: $span.first, last: $span.last, sealed: $item.sealed, count: $item.count }
+//! ```
+//!
+//! In a stream vine `steps` is a pipe: each step takes a stream and gives
+//! a stream (see [`crate::stream`]). A step is an ordinary operator,
+//! applied per item; a stream operator such as `collect`; or `each`. There
+//! is no `$in`: each step sees the item reaching it as `$item`, and the
+//! source positions it came from as `$span` (`{ first, last }`). `as:` is
+//! refused in a pipe: a step's result is simply the next step's `$item`.
+//!
+//! - `each: [steps]` holds once-style steps, run for each item in order,
+//!   one at a time. `guard`, `switch`, `try` and `out` stand only here.
+//!   Every path inside must end in `out` or `guard`, naming a declared
+//!   output. `each` must be the last step of the pipe.
+//! - A pipe that does not end in `each` names its output by declaring
+//!   exactly one: each result of its last step is that output. The last
+//!   step must declare the shape of its results, and that shape must fit
+//!   the output.
+//!
+//! Stream operator settings are fixed when the vine loads and cannot refer
+//! to `$item`. `each` and stream operators are refused in once vines and
+//! inside `each`.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -35,15 +69,16 @@ use serde_json::Value;
 
 use crate::error::LoadError;
 use crate::expr::{is_name, Cond, Operand, Ref, Template};
-use crate::registry::{construct_specs, Registered, Registry, COMPOSITION_WORDS, CONSTRUCTS};
+use crate::registry::{construct_specs, Registered, Registry, COMPOSITION_WORDS, CONSTRUCTS, EACH};
 use crate::shape::{Shape, Ty};
+use crate::stream::RegisteredStream;
 
 /// How a vine takes its input.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
     /// One input, one output.
     Once,
-    /// A stream of inputs, one output each.
+    /// A stream of inputs through a pipe of stream steps.
     Stream,
 }
 
@@ -62,7 +97,12 @@ pub struct Vine {
     pub(crate) mode: Mode,
     pub(crate) input: Shape,
     pub(crate) outputs: BTreeMap<String, Shape>,
+    /// Once mode: the steps.
     pub(crate) steps: Vec<Step>,
+    /// Stream mode: the pipe.
+    pub(crate) pipe: Vec<PipeStep>,
+    /// Stream mode, pipe not ending in `each`: the one output.
+    pub(crate) pipe_output: Option<String>,
     pub(crate) reach: BTreeSet<String>,
 }
 
@@ -130,6 +170,23 @@ pub(crate) enum Kind {
         catch: BTreeMap<String, Vec<Step>>,
         finally: Vec<Step>,
     },
+}
+
+pub(crate) struct PipeStep {
+    pub path: String,
+    pub kind: PipeKind,
+}
+
+pub(crate) enum PipeKind {
+    /// An ordinary operator, applied to each item.
+    Map { op: Registered, settings: Template },
+    /// A stream operator; `settings` are literal.
+    Flow {
+        op: RegisteredStream,
+        settings: Value,
+    },
+    /// Once-style steps per item. Always last.
+    Each { steps: Vec<Step> },
 }
 
 const TOP_KEYS: &[&str] = &["vine", "mode", "input", "outputs", "steps"];
@@ -210,14 +267,23 @@ pub(crate) fn load(reg: &Registry, yaml: &str) -> Result<Vine, LoadError> {
         outputs: &outputs,
         reach: BTreeSet::new(),
     };
-    let mut scope = Scope::new();
-    scope.insert("in".into(), Some(input.clone()));
-    let steps = cx.block(steps, "steps", &scope, false)?;
-    if !terminal(&steps) {
-        return Err(LoadError::MissingOutput {
-            path: "steps".into(),
-        });
-    }
+    let (steps, pipe, pipe_output) = match mode {
+        Mode::Once => {
+            let mut scope = Scope::new();
+            scope.insert("in".into(), Some(input.clone()));
+            let steps = cx.block(steps, "steps", &scope, false)?;
+            if !terminal(&steps) {
+                return Err(LoadError::MissingOutput {
+                    path: "steps".into(),
+                });
+            }
+            (steps, Vec::new(), None)
+        }
+        Mode::Stream => {
+            let (pipe, out) = cx.pipe(steps, &input)?;
+            (Vec::new(), pipe, out)
+        }
+    };
     let reach = cx.reach;
     Ok(Vine {
         name,
@@ -225,8 +291,25 @@ pub(crate) fn load(reg: &Registry, yaml: &str) -> Result<Vine, LoadError> {
         input,
         outputs,
         steps,
+        pipe,
+        pipe_output,
         reach,
     })
+}
+
+/// What a pipe step sees: the item reaching it and its source positions.
+fn pipe_scope(item: &Option<Shape>) -> Scope {
+    let mut scope = Scope::new();
+    scope.insert("item".into(), item.clone());
+    scope.insert(
+        "span".into(),
+        Some(
+            Shape::new()
+                .required("first", Ty::Int)
+                .required("last", Ty::Int),
+        ),
+    );
+    scope
 }
 
 struct Loader<'a> {
@@ -271,52 +354,13 @@ impl Loader<'_> {
         let Some(map) = v.as_object() else {
             return Err(malformed(path, "a step is a map with one operator key"));
         };
-        let mut bind = None;
-        let mut keys = Vec::new();
-        for (k, val) in map {
-            if k == "as" {
-                bind = Some(val);
-                continue;
-            }
-            if COMPOSITION_WORDS.contains(&k.as_str()) {
-                return Err(LoadError::Composition {
-                    path: path.into(),
-                    key: k.clone(),
-                });
-            }
-            keys.push(k.as_str());
+        let (op_name, bind) = self.op_key(map, path)?;
+        if op_name == EACH || self.reg.get_stream(op_name).is_some() {
+            return Err(LoadError::PipeOnly {
+                path: path.into(),
+                name: op_name.into(),
+            });
         }
-        let op_name = match keys.as_slice() {
-            [] => return Err(malformed(path, "a step needs an operator key")),
-            [one] => *one,
-            many => {
-                let known: Vec<&&str> = many.iter().filter(|k| self.reg.contains(k)).collect();
-                return Err(match known.as_slice() {
-                    [] => LoadError::UnknownOperator {
-                        path: path.into(),
-                        name: many[0].into(),
-                    },
-                    [_] => LoadError::UnknownKey {
-                        path: path.into(),
-                        key: many
-                            .iter()
-                            .find(|k| !self.reg.contains(k))
-                            .unwrap()
-                            .to_string(),
-                    },
-                    _ => malformed(
-                        path,
-                        &format!(
-                            "a step names one operator, found {}",
-                            many.iter()
-                                .map(|k| format!("`{k}`"))
-                                .collect::<Vec<_>>()
-                                .join(" and ")
-                        ),
-                    ),
-                });
-            }
-        };
         let settings = &map[op_name];
         let here = format!("{path}.{op_name}");
 
@@ -378,6 +422,189 @@ impl Loader<'_> {
                 bind,
             },
         })
+    }
+
+    /// The one operator key of a step, and its `as:` if any.
+    fn op_key<'v>(
+        &self,
+        map: &'v serde_json::Map<String, Value>,
+        path: &str,
+    ) -> Result<(&'v str, Option<&'v Value>), LoadError> {
+        let mut bind = None;
+        let mut keys = Vec::new();
+        for (k, val) in map {
+            if k == "as" {
+                bind = Some(val);
+                continue;
+            }
+            if COMPOSITION_WORDS.contains(&k.as_str()) {
+                return Err(LoadError::Composition {
+                    path: path.into(),
+                    key: k.clone(),
+                });
+            }
+            keys.push(k.as_str());
+        }
+        match keys.as_slice() {
+            [] => Err(malformed(path, "a step needs an operator key")),
+            [one] => Ok((*one, bind)),
+            many => {
+                let known: Vec<&&str> = many.iter().filter(|k| self.reg.contains(k)).collect();
+                Err(match known.as_slice() {
+                    [] => LoadError::UnknownOperator {
+                        path: path.into(),
+                        name: many[0].into(),
+                    },
+                    [_] => LoadError::UnknownKey {
+                        path: path.into(),
+                        key: many
+                            .iter()
+                            .find(|k| !self.reg.contains(k))
+                            .unwrap()
+                            .to_string(),
+                    },
+                    _ => malformed(
+                        path,
+                        &format!(
+                            "a step names one operator, found {}",
+                            many.iter()
+                                .map(|k| format!("`{k}`"))
+                                .collect::<Vec<_>>()
+                                .join(" and ")
+                        ),
+                    ),
+                })
+            }
+        }
+    }
+
+    /// A stream vine's pipe, and the one output if it does not end in
+    /// `each`.
+    fn pipe(
+        &mut self,
+        v: &Value,
+        input: &Shape,
+    ) -> Result<(Vec<PipeStep>, Option<String>), LoadError> {
+        let Some(list) = v.as_array() else {
+            return Err(malformed("steps", "a stream pipe is a list of steps"));
+        };
+        if list.is_empty() {
+            return Err(malformed("steps", "a stream pipe needs at least one step"));
+        }
+        let mut item: Option<Shape> = Some(input.clone());
+        let mut pipe = Vec::new();
+        let mut last = String::new();
+        for (i, sv) in list.iter().enumerate() {
+            let path = format!("steps[{i}]");
+            let Some(map) = sv.as_object() else {
+                return Err(malformed(&path, "a step is a map with one operator key"));
+            };
+            let (name, bind) = self.op_key(map, &path)?;
+            let here = format!("{path}.{name}");
+            if CONSTRUCTS.contains(&name) {
+                return Err(LoadError::OnceOnly {
+                    path,
+                    name: name.into(),
+                });
+            }
+            if bind.is_some() {
+                return Err(malformed(
+                    &format!("{path}.as"),
+                    "`as` binds a result inside `each`; in a pipe each step's result is the next step's `$item`",
+                ));
+            }
+            let settings = &map[name];
+            let scope = pipe_scope(&item);
+            if name == EACH {
+                if i + 1 != list.len() {
+                    return Err(LoadError::EachNotLast { path: here });
+                }
+                let steps = self.block(settings, &here, &scope, false)?;
+                if !terminal(&steps) {
+                    return Err(LoadError::MissingOutput { path: here });
+                }
+                pipe.push(PipeStep {
+                    path,
+                    kind: PipeKind::Each { steps },
+                });
+                return Ok((pipe, None));
+            }
+            if let Some(op) = self.reg.get_stream(name) {
+                let bad = |problem: String| LoadError::BadSettings {
+                    path: here.clone(),
+                    operator: name.into(),
+                    problem,
+                };
+                let template = Template::parse(settings).map_err(|p| malformed(&here, &p))?;
+                if let Some(r) = template.refs().first() {
+                    return Err(bad(format!(
+                        "`{r}`: a stream operator's settings are fixed when the vine loads and cannot refer to items"
+                    )));
+                }
+                op.spec.settings.check(settings).map_err(bad)?;
+                (op.factory)(settings).map(drop).map_err(bad)?;
+                self.reach.extend(op.spec.touches.iter().cloned());
+                item = op.spec.emits.clone();
+                pipe.push(PipeStep {
+                    path,
+                    kind: PipeKind::Flow {
+                        op: op.clone(),
+                        settings: settings.clone(),
+                    },
+                });
+            } else if let Some(op) = self.reg.get(name) {
+                let template = Template::parse(settings).map_err(|p| malformed(&here, &p))?;
+                check_refs(template.refs(), &scope, &here)?;
+                op.spec
+                    .settings
+                    .check_template(&template)
+                    .map_err(|problem| LoadError::BadSettings {
+                        path: here.clone(),
+                        operator: name.into(),
+                        problem,
+                    })?;
+                self.reach.extend(op.spec.touches.iter().cloned());
+                item = op.spec.returns.clone();
+                pipe.push(PipeStep {
+                    path,
+                    kind: PipeKind::Map {
+                        op: op.clone(),
+                        settings: template,
+                    },
+                });
+            } else {
+                return Err(LoadError::UnknownOperator {
+                    path,
+                    name: name.into(),
+                });
+            }
+            last = here;
+        }
+
+        // The pipe ends in an operator: its results are the one output.
+        let op = last.rsplit('.').next().unwrap_or_default().to_owned();
+        let unmatched = |problem: String| LoadError::UnmatchedOutput {
+            path: last.clone(),
+            problem,
+        };
+        let (out, shape) = match self.outputs.iter().collect::<Vec<_>>().as_slice() {
+            [(name, shape)] => ((*name).clone(), *shape),
+            many => {
+                return Err(unmatched(format!(
+                    "a pipe that does not end in `each` sends each result of its last step, `{op}`, to the vine's one output; declare exactly one output (found {}: {})",
+                    many.len(),
+                    many.iter().map(|(n, _)| format!("`{n}`")).collect::<Vec<_>>().join(", ")
+                )))
+            }
+        };
+        let Some(item) = item else {
+            return Err(unmatched(format!(
+                "`{op}` does not declare the shape of its results, so they cannot be checked against output `{out}`; declare it, or end the pipe in `each`"
+            )));
+        };
+        item.fits_into(shape)
+            .map_err(|p| unmatched(format!("results of `{op}` do not fit output `{out}`: {p}")))?;
+        Ok((pipe, Some(out)))
     }
 
     fn construct(

@@ -3,7 +3,7 @@ mod support;
 use std::sync::Arc;
 
 use support::{register_facts, vine_source, Facts};
-use vine_lang::{json, CancellationToken, Registry, RunError, Value, Vine};
+use vine_lang::{json, CancellationToken, Checkpoint, Registry, RunError, Stop, Value, Vine};
 
 fn setup() -> (Arc<Facts>, Vine) {
     let facts = Facts::new();
@@ -180,9 +180,22 @@ async fn reach_is_exactly_the_fact_store() {
 #[tokio::test]
 async fn a_once_vine_refuses_a_stream_run() {
     let (_facts, vine) = setup();
+    let mut saver = support::Saver::default();
     let report = vine
-        .run_stream(futures::stream::iter(vec![]), CancellationToken::new())
+        .run_stream(
+            support::items(vec![input("an-1", 1)]),
+            Checkpoint::start(),
+            &mut saver,
+            CancellationToken::new(),
+        )
         .await;
-    assert_eq!(report.consumed, 0);
-    assert!(matches!(report.stopped, Some(RunError::WrongMode { .. })));
+    assert_eq!(report.checkpoint.position, 0);
+    assert_eq!(
+        report.stop,
+        Stop::Failed(RunError::WrongMode {
+            vine: "claim".into(),
+            mode: "once"
+        })
+    );
+    assert!(saver.outputs().is_empty());
 }

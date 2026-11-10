@@ -197,6 +197,43 @@ impl Shape {
         Ok(())
     }
 
+    /// Whether every value of this shape is sure to fit `target`.
+    pub fn fits_into(&self, target: &Shape) -> Result<(), String> {
+        if self.open && !target.open {
+            return Err("its shape is open (it may hold fields the output does not list)".into());
+        }
+        for (name, want) in &target.fields {
+            match self.fields.get(name) {
+                None if want.required && want.ty != Ty::Any => {
+                    return Err(format!("missing required field `{name}` ({})", want.ty));
+                }
+                None => {}
+                Some(have) => {
+                    if want.required && !have.required && want.ty != Ty::Any {
+                        return Err(format!(
+                            "field `{name}` is optional there but required in the output"
+                        ));
+                    }
+                    let fits = have.ty == want.ty
+                        || want.ty == Ty::Any
+                        || (have.ty == Ty::Id && want.ty == Ty::Text);
+                    if !fits {
+                        return Err(format!(
+                            "field `{name}` is {}, the output wants {}",
+                            have.ty, want.ty
+                        ));
+                    }
+                }
+            }
+        }
+        if !target.open {
+            if let Some(extra) = self.fields.keys().find(|k| !target.fields.contains_key(*k)) {
+                return Err(format!("unexpected field `{extra}` (not in the output)"));
+            }
+        }
+        Ok(())
+    }
+
     /// Check an unresolved template as far as is knowable before running:
     /// field names, required fields, and the types of literal values.
     /// References are checked at run time, once resolved.

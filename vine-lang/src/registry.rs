@@ -9,6 +9,11 @@
 //! operators (`guard`, `switch`, `try`, `out`) hold blocks of steps, so the
 //! loader and runner handle them directly; they are listed here, touch
 //! nothing, and their names are reserved.
+//!
+//! Stream operators (see [`crate::stream`]) are registered with
+//! [`Registry::register_stream`]. The core one is `collect`. `each` holds
+//! once-style steps inside a stream pipe; the loader handles it and its
+//! name is reserved. Plain and stream operators share one namespace.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
@@ -21,6 +26,9 @@ use tokio_util::sync::CancellationToken;
 
 use crate::error::{LoadError, RegistryError};
 use crate::shape::{Shape, Ty};
+use crate::stream::{
+    collect_factory, collect_spec, Factory, RegisteredStream, StreamOperator, StreamOperatorSpec,
+};
 use crate::vine::Vine;
 
 /// The error an operator returns. `code` is what a `catch` block matches.
@@ -117,7 +125,11 @@ pub(crate) struct Registered {
 }
 
 /// The control-flow core operators. Handled by the loader and runner.
+/// They are once grammar: in a stream vine they stand only inside `each`.
 pub(crate) const CONSTRUCTS: &[&str] = &["guard", "switch", "try", "out"];
+
+/// The pipe construct: once-style steps run per item, last in a pipe.
+pub(crate) const EACH: &str = "each";
 
 /// Keys that would pull another vine or a piece of one into this one.
 /// Refused at the top level and as step keys, and never registrable.
@@ -140,6 +152,7 @@ pub(crate) const COMPOSITION_WORDS: &[&str] = &[
 #[derive(Clone)]
 pub struct Registry {
     ops: BTreeMap<String, Registered>,
+    stream_ops: BTreeMap<String, RegisteredStream>,
 }
 
 impl Default for Registry {
@@ -153,12 +166,14 @@ impl Registry {
     pub fn new() -> Self {
         let mut r = Registry {
             ops: BTreeMap::new(),
+            stream_ops: BTreeMap::new(),
         };
         // `set`: shape data. Binds its settings, resolved, as a map.
         r.insert(
             OperatorSpec::new("set").settings(Shape::open()),
             |settings, _cx| async move { Ok(settings) },
         );
+        r.insert_stream(collect_spec(), collect_factory);
         r
     }
 
@@ -168,24 +183,69 @@ impl Registry {
         F: Fn(Value, OpContext) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = Result<Value, OpError>> + Send + 'static,
     {
-        let name = spec.name.clone();
-        if !crate::expr::is_name(&name) {
-            return Err(RegistryError::BadName(name));
+        self.check_new(&spec.name, &spec.touches)?;
+        self.insert(spec, f);
+        Ok(())
+    }
+
+    /// Register a provided stream operator. `factory` builds a fresh
+    /// instance from the step's settings, or says why they do not fit.
+    pub fn register_stream<F>(
+        &mut self,
+        spec: StreamOperatorSpec,
+        factory: F,
+    ) -> Result<(), RegistryError>
+    where
+        F: Fn(&Value) -> Result<Box<dyn StreamOperator>, String> + Send + Sync + 'static,
+    {
+        self.check_new(&spec.name, &spec.touches)?;
+        self.insert_stream(spec, factory);
+        Ok(())
+    }
+
+    fn check_new(&self, name: &str, touches: &BTreeSet<String>) -> Result<(), RegistryError> {
+        if !crate::expr::is_name(name) {
+            return Err(RegistryError::BadName(name.into()));
         }
-        if CONSTRUCTS.contains(&name.as_str()) || COMPOSITION_WORDS.contains(&name.as_str()) {
-            return Err(RegistryError::Reserved(name));
+        if CONSTRUCTS.contains(&name) || name == EACH || COMPOSITION_WORDS.contains(&name) {
+            return Err(RegistryError::Reserved(name.into()));
         }
-        if self.ops.contains_key(&name) {
-            return Err(RegistryError::Duplicate(name));
+        if self.ops.contains_key(name) || self.stream_ops.contains_key(name) {
+            return Err(RegistryError::Duplicate(name.into()));
         }
-        if let Some(bad) = spec.touches.iter().find(|t| !is_touch(t)) {
+        if let Some(bad) = touches.iter().find(|t| !is_touch(t)) {
             return Err(RegistryError::BadTouch {
-                operator: name,
+                operator: name.into(),
                 touch: bad.clone(),
             });
         }
-        self.insert(spec, f);
         Ok(())
+    }
+
+    fn insert_stream<F>(&mut self, spec: StreamOperatorSpec, factory: F)
+    where
+        F: Fn(&Value) -> Result<Box<dyn StreamOperator>, String> + Send + Sync + 'static,
+    {
+        let factory: Factory = Arc::new(factory);
+        self.stream_ops.insert(
+            spec.name.clone(),
+            RegisteredStream {
+                spec: Arc::new(spec),
+                factory,
+            },
+        );
+    }
+
+    pub(crate) fn get_stream(&self, name: &str) -> Option<&RegisteredStream> {
+        self.stream_ops.get(name)
+    }
+
+    /// The specs of every registered stream operator.
+    pub fn stream_specs(&self) -> Vec<StreamOperatorSpec> {
+        self.stream_ops
+            .values()
+            .map(|r| (*r.spec).clone())
+            .collect()
     }
 
     fn insert<F, Fut>(&mut self, spec: OperatorSpec, f: F)
@@ -209,7 +269,10 @@ impl Registry {
 
     /// Whether a vine may name this operator.
     pub fn contains(&self, name: &str) -> bool {
-        self.ops.contains_key(name) || CONSTRUCTS.contains(&name)
+        self.ops.contains_key(name)
+            || self.stream_ops.contains_key(name)
+            || CONSTRUCTS.contains(&name)
+            || name == EACH
     }
 
     /// The specs of every registered operator, plus the control-flow core

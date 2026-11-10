@@ -1,0 +1,18 @@
+# Back up records in encrypted batches at an outside provider. A batch is
+# 500 records, or what has arrived 60 seconds after its first record,
+# whichever comes first. The provider names each batch by its position
+# range, so storing a batch again replaces it instead of duplicating it.
+vine: backup
+mode: stream
+input: { seq: int, body: text }
+outputs:
+  stored: { name: text, first: int, last: int, count: int }
+steps:
+  - collect: { size: 500, or_every: 60s }
+  - encrypt: { key: backup, data: $item.items }
+  - store:
+      to: backup_provider
+      first: $span.first
+      last: $span.last
+      sealed: $item.sealed
+      count: $item.count

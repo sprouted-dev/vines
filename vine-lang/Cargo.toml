@@ -19,6 +19,7 @@ futures = { version = "0.3.32", default-features = false, features = ["std", "as
 serde_json = "1.0.149"
 serde_yaml = "0.9.34"
 thiserror = "2.0.18"
+tokio = { version = "1.52.3", default-features = false, features = ["time", "macros"] }
 tokio-util = { version = "0.7.18", default-features = false }
 
 [dev-dependencies]

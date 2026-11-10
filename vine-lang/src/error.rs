@@ -65,6 +65,14 @@ pub enum LoadError {
     EndsInFinally { path: String },
     #[error("{path}: `cancelled` cannot be caught; use `finally` for cleanup")]
     CatchCancelled { path: String },
+    #[error("{path}: `{name}` is per-item grammar and cannot be a step of a stream pipe; put it inside `each`")]
+    OnceOnly { path: String, name: String },
+    #[error("{path}: `{name}` is a stream step; it may only stand in a stream vine's pipe (not in a once vine, nor inside `each`)")]
+    PipeOnly { path: String, name: String },
+    #[error("{path}: `each` must be the last step of the pipe; what its `out` steps name are the vine's outputs")]
+    EachNotLast { path: String },
+    #[error("{path}: the pipe's results cannot be matched to a declared output: {problem}")]
+    UnmatchedOutput { path: String, problem: String },
 }
 
 /// A run ended without a declared output.
@@ -109,4 +117,8 @@ pub enum RunError {
         message: String,
         masked: String,
     },
+    #[error("cannot resume from this checkpoint: {0}")]
+    ResumeMisfit(String),
+    #[error("{path}: stream operator `{operator}` was woken but its deadline is still due; `wake` must clear or move it")]
+    DeadlineNotMoved { path: String, operator: String },
 }
