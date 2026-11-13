@@ -1,0 +1,30 @@
+# Launch every job of a plan that can start now, two at a time. This vine
+# runs `job_launch` as one of its stages. It is one run: nothing between
+# the two vines is seen from outside. Use it where nobody else needs to
+# hear each launch being asked for.
+vine: plan_launch_all
+input: { plan: id, plan_branch: text, jobs: list }
+outputs:
+  launched: { plan: id, job: id, session: text }
+  not_launched: { plan: id, job: id, reason: text }
+pipe:
+  - split: $item.jobs
+    into: job
+  - filter: $item.job.state == "ready"
+  - filter: $item.job.waiting_on == 0
+  - each:
+      overlap: merge
+      at_once: 2
+      do:
+        - use: job_launch
+          with: { job: $item.job.id, plan_branch: $item.plan_branch, brief: $item.job.brief }
+          into: result
+          on:
+            started:
+              - emit:
+                  to: launched
+                  with: { plan: $item.plan, job: $item.job.id, session: $item.result.session }
+            failed:
+              - emit:
+                  to: not_launched
+                  with: { plan: $item.plan, job: $item.job.id, reason: $item.result.reason }

@@ -136,7 +136,8 @@ pub(crate) const CALL: &str = "call";
 
 /// The words of the pipe model. No operator may take one.
 pub(crate) const PIPE_WORDS: &[&str] = &[
-    "tap", "split", "filter", "take", "together", "attempt", "branch", "emit", "with", "into",
+    "tap", "split", "filter", "take", "together", "catch", "finalize", "retry", "timeout",
+    "branch", "emit", "with", "into", "on",
 ];
 
 /// Keys that would pull another vine or a piece of one into this one.
@@ -162,6 +163,7 @@ pub struct Registry {
     ops: BTreeMap<String, Registered>,
     stream_ops: BTreeMap<String, RegisteredStream>,
     acts: BTreeMap<String, Registered>,
+    vines: BTreeMap<String, crate::pipe::Pipe>,
 }
 
 impl Default for Registry {
@@ -177,6 +179,7 @@ impl Registry {
             ops: BTreeMap::new(),
             stream_ops: BTreeMap::new(),
             acts: BTreeMap::new(),
+            vines: BTreeMap::new(),
         };
         // `set`: shape data. Binds its settings, resolved, as a map.
         r.insert(
@@ -378,6 +381,21 @@ impl Registry {
     #[cfg(feature = "yaml")]
     pub fn load(&self, yaml: &str) -> Result<Vine, LoadError> {
         crate::vine::load(self, yaml)
+    }
+
+    /// Make a checked vine available to other vines, which run it with a
+    /// `use` stage. A vine can only use a vine that was added before it was
+    /// built, so two vines can never use each other.
+    pub fn add_vine(&mut self, vine: crate::pipe::Pipe) -> Result<(), RegistryError> {
+        if self.vines.contains_key(vine.name()) {
+            return Err(RegistryError::Duplicate(vine.name().to_owned()));
+        }
+        self.vines.insert(vine.name().to_owned(), vine);
+        Ok(())
+    }
+
+    pub(crate) fn get_vine(&self, name: &str) -> Option<&crate::pipe::Pipe> {
+        self.vines.get(name)
     }
 
     /// Check a vine built as a pipe in Rust and return it ready to run.

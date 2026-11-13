@@ -36,6 +36,8 @@ pub enum LoadError {
     UnknownOperator { path: String, name: String },
     #[error("{path}: unknown act `{name}` (not registered)")]
     UnknownAct { path: String, name: String },
+    #[error("{path}: unknown vine `{name}` (not added to the registry)")]
+    UnknownVine { path: String, name: String },
     #[error("{path}: settings do not fit operator `{operator}`: {problem}")]
     BadSettings {
         path: String,

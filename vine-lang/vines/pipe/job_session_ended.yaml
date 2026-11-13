@@ -1,5 +1,5 @@
 # A job's agent session has ended. Commit the work if the agent finished,
-# and remove the working copy `job_launch` made.
+# and always remove the working copy `job_launch` made.
 vine: job_session_ended
 input: { job: id, tree: text, status: text }
 outputs:
@@ -7,29 +7,18 @@ outputs:
   stopped: { job: id, reason: text }
   failed: { job: id, reason: text }
 pipe:
-  - attempt:
-      do:
-        - branch:
-            on: $item.status
-            cases:
-              finished:
-                - call: git.commit
-                  with: { dir: $item.tree, message: $item.job }
-                  into: commit
-                - tap: git.worktree_remove
-                  with: { path: $item.tree }
-                - emit: { to: implemented, with: { job: $item.job, commit: $item.commit.sha } }
-            else:
-              - tap: git.worktree_remove
-                with: { path: $item.tree }
-              - emit: { to: stopped, with: { job: $item.job, reason: $item.status } }
-      on_error:
-        # A failed commit leaves the working copy behind. Remove it. If the
-        # removal itself is what failed, do not try it again.
-        - branch:
-            on: $item.error.from
-            cases:
-              git.commit:
-                - tap: git.worktree_remove
-                  with: { path: $item.tree }
-        - emit: { to: failed, with: { job: $item.job, reason: $item.error.message } }
+  - branch:
+      on: $item.status
+      cases:
+        finished:
+          - call: git.commit
+            with: { dir: $item.tree, message: $item.job }
+            into: commit
+          - emit: { to: implemented, with: { job: $item.job, commit: $item.commit.sha } }
+      else:
+        - emit: { to: stopped, with: { job: $item.job, reason: $item.status } }
+  - catch:
+      - emit: { to: failed, with: { job: $item.job, reason: $item.error.message } }
+  - finalize:
+      - tap: git.worktree_remove
+        with: { path: $item.tree }

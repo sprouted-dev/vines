@@ -18,9 +18,17 @@ The stages are in `src/pipe.rs`. Worked examples are in `vines/pipe/`.
 
 **Use `tap` for an act you run only for its effect.** The item passes through unchanged. Without `tap` or `into`, an act's result replaces the item and everything you were carrying is gone.
 
-**Handle a failure inside the pipe that can fail.** Wrap the stages in `attempt`. One item failing then becomes one `failed` output, and the items after it still run. A failure nothing handles ends the whole stream.
+**Catch a failure in the pipe that can fail.** Put `catch` after the stages it covers. One item failing then becomes one `failed` output, and the items after it still run. A failure nothing catches ends the whole stream. This is the oldest trap in RxJS and in redux-observable: an uncaught error kills the listener for good.
 
-**Clean up in `on_error`, using the item as it was.** `on_error` gets the item as it was when the stage failed, plus the failure as `$item.error`. Branch on `$item.error.from` to see which stage failed, and undo only what had been done by then. See `vines/pipe/job_launch.yaml`.
+**Undo in `catch`, using the item as it was.** `catch` gets the item as it was when the stage failed, plus the failure as `$item.error`. Branch on `$item.error.from` to see which stage failed, and undo only what had been done by then. See `vines/pipe/job_launch.yaml`.
+
+**Clean up in `finalize` when the cleanup always happens.** `finalize` runs after the stages it covers, whether they worked, failed or were caught. It gets the item as it arrived. Put it last, after `catch`. See `vines/pipe/job_session_ended.yaml`.
+
+**Order the covering stages by what each should see.** `catch`, `finalize`, `retry` and `timeout` each cover everything before them in their pipe. So `retry` then `catch` means "try three times, then handle the failure". `catch` then `retry` means the retry never sees a failure, because the catch already handled it.
+
+**Give `retry` a wait, and a `timeout` to anything that can hang.** A timeout fails the item with the code `timeout`, and a `catch` after it can handle that like any other failure.
+
+**Run another vine with `use` when the two are one piece of work.** `use: job_launch` runs that vine as a stage, and `on:` says what to do with each thing it emits. The checker makes you handle every output. See `vines/pipe/plan_launch_all.yaml`.
 
 **Say `take: 1` when a vine must give exactly one answer.** A vine may emit none, one or many. If the caller needs one, the vine says so itself.
 
@@ -59,25 +67,36 @@ The stages are in `src/pipe.rs`. Worked examples are in `vines/pipe/`.
 
 **Don't rely on `else` to hide a mistake.** A `branch` with no matching case passes the item through unchanged. If every item must be handled, give the branch an `else` and the checker will hold you to it.
 
-**Don't repeat cleanup you cannot keep in step.** There is no `finally` yet. `job_session_ended` removes the working copy in three places. If you add a fourth path, add the cleanup too.
+**Don't put `take`, or an `each` that merges, switches or exhausts, before a covering stage.** Those work across the whole stream, and a covering stage works one item at a time. The checker refuses it. Put the stream-wide stage after.
+
+**Don't emit from `finalize`.** It is for cleanup. The checker refuses it.
+
+**Don't `retry` an act that is not safe to repeat.** A retry runs every covered stage again from the item as it arrived.
+
+**Don't `use` a vine when others need to hear what happens between the two.** A used vine runs inside the outer vine's run. Nothing it emits is seen from outside unless the outer vine emits it again. When a step should be visible, be something others can react to, or take hours, emit an output and let a separate vine pick it up.
+
+**Don't `use` a vine from another trellis.** A trellis has one version, so the vines in it change together. A vine used across trellises could change under you.
 
 ## What the checker catches before a vine runs
 
 - A stage that names an operator or act nobody registered.
 - Input to an act that does not fit what the act declares.
 - A reference to anything but `$item`, or to a field the item is known not to have.
+- A vine used before it exists, an output of a used vine that nothing handles, or input that cannot fit it.
+- A covering stage with nothing before it, or with a stream-wide stage before it.
 - An output nobody declared, or a payload that cannot fit it.
 - A path through the pipe that could end without emitting.
 - A stage that can never run because everything before it already emitted.
 
 ## What it does not catch
 
-- A field read from an item whose shape is not known at that point. After `split` with no `into`, inside `on_error`, and after `each`, `attempt` or `branch`, the checker no longer knows the item's fields. A misspelt field reads as nothing.
+- A field read from an item whose shape is not known at that point. After `split` with no `into`, inside `catch` and `finalize`, and after `each`, `use`, `branch` or any covering stage, the checker no longer knows the item's fields. A misspelt field reads as nothing.
 - A `branch` case that is misspelt. It never matches.
 - An act that lies about what it touches.
 
 ## Not built yet
 
 - Saved positions, memory across a restart, and resuming after a crash.
-- `finally`, timeouts, retries and waiting (`debounce`).
+- Waiting stages such as `debounce`, and `take_until` to stop work when a cancel arrives.
+- `finalize` when the caller drops the stream partway.
 - A name for the reach each stage uses, such as "GitHub as reviewer".

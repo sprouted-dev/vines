@@ -10,27 +10,25 @@ outputs:
   started: { job: id, session: text, tree: text }
   failed: { job: id, reason: text }
 pipe:
-  - attempt:
-      do:
-        - tap: git.refresh_branch
-          with: { branch: $item.plan_branch }
-        - call: git.worktree_add
-          with: { name: $item.job, from: $item.plan_branch }
-          into: tree
-        - call: agent.start
-          with: { dir: $item.tree.path, brief: $item.brief }
-          into: session
-        - emit:
-            to: started
-            with: { job: $item.job, session: $item.session.id, tree: $item.tree.path }
-      on_error:
-        # The item is as it was when the stage failed. If the agent failed
-        # to start, the working copy exists and nothing will ever report
-        # the agent's end, so remove it here.
-        - branch:
-            on: $item.error.from
-            cases:
-              agent.start:
-                - tap: git.worktree_remove
-                  with: { path: $item.tree.path }
-        - emit: { to: failed, with: { job: $item.job, reason: $item.error.message } }
+  - tap: git.refresh_branch
+    with: { branch: $item.plan_branch }
+  - call: git.worktree_add
+    with: { name: $item.job, from: $item.plan_branch }
+    into: tree
+  - call: agent.start
+    with: { dir: $item.tree.path, brief: $item.brief }
+    into: session
+  - emit:
+      to: started
+      with: { job: $item.job, session: $item.session.id, tree: $item.tree.path }
+  - catch:
+      # The item is as it was when the stage failed. If the agent failed
+      # to start, the working copy exists and nothing will ever report
+      # the agent's end, so remove it here.
+      - branch:
+          on: $item.error.from
+          cases:
+            agent.start:
+              - tap: git.worktree_remove
+                with: { path: $item.tree.path }
+      - emit: { to: failed, with: { job: $item.job, reason: $item.error.message } }

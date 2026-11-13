@@ -186,22 +186,47 @@ async fn a_commit_that_fails_emits_failed_and_still_removes_the_working_copy() {
 }
 
 #[tokio::test]
-async fn a_removal_that_fails_emits_failed_and_is_not_tried_again() {
-    for status in ["finished", "cancelled"] {
+async fn a_removal_that_fails_is_a_run_error_after_the_output_and_is_tried_once() {
+    for (status, output) in [("finished", "implemented"), ("cancelled", "stopped")] {
         let world = with_tree();
         world.fail("git.worktree_remove", "locked", "working copy is locked");
-        let (name, payload) = one(&load(&world, "job_session_ended"), ended(status)).await;
-        assert_eq!(name, "failed");
-        assert_eq!(
-            payload,
-            json!({ "job": "job-1", "reason": "working copy is locked" })
+        let vine = load(&world, "job_session_ended");
+        let results: Vec<_> = vine.run(stream::iter([ended(status)])).collect().await;
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].as_ref().unwrap().name, output);
+        assert!(
+            matches!(results[1], Err(RunError::Unhandled { ref operator, .. })
+                if operator == "git.worktree_remove"),
+            "{:?}",
+            results[1]
         );
         assert_eq!(world.trees(), ["/trees/job-1"]);
-        assert!(!world
-            .log()
-            .iter()
-            .any(|l| l.starts_with("git.worktree_remove")));
     }
+}
+
+#[tokio::test]
+async fn a_stream_of_ended_sessions_cleans_up_after_each_one() {
+    let world = World::new();
+    let vine = load(&world, "job_session_ended");
+    let sessions: Vec<Value> = [
+        ("job-1", "finished"),
+        ("job-2", "failed"),
+        ("job-3", "finished"),
+    ]
+    .iter()
+    .map(|(job, status)| {
+        let tree = format!("/trees/{job}");
+        world.add_tree(&tree);
+        json!({ "job": job, "tree": tree, "status": status })
+    })
+    .collect();
+    let names: Vec<String> = vine
+        .run(stream::iter(sessions))
+        .map(|r| r.unwrap().name)
+        .collect()
+        .await;
+    assert_eq!(names, ["implemented", "stopped", "implemented"]);
+    assert!(world.trees().is_empty());
 }
 
 // --------------------------------------------------------- plan_activate
@@ -459,15 +484,159 @@ fn each_reads_its_overlap_rule_and_refuses_one_it_does_not_know() {
 }
 
 #[test]
-fn attempt_needs_both_pipes_and_branch_needs_its_cases() {
-    let err = bad("  - attempt: { do: [ { emit: out } ] }\n");
-    assert!(
-        matches!(err, LoadError::Malformed { ref path, .. } if path == "pipe[0].attempt"),
-        "{err}"
-    );
+fn branch_needs_its_cases_and_catch_and_finalize_take_a_list() {
     let err = bad("  - branch: { on: $item.n }\n  - emit: out\n");
     assert!(
         matches!(err, LoadError::Malformed { ref path, .. } if path == "pipe[0].branch"),
+        "{err}"
+    );
+    let err = bad("  - emit: out\n  - catch: out\n");
+    assert!(
+        matches!(err, LoadError::Malformed { ref path, .. } if path == "pipe[1].catch"),
+        "{err}"
+    );
+    let err = bad("  - emit: out\n  - finalize: { tap: git.commit }\n");
+    assert!(
+        matches!(err, LoadError::Malformed { ref path, .. } if path == "pipe[1].finalize"),
+        "{err}"
+    );
+}
+
+#[test]
+fn retry_and_timeout_read_their_times() {
+    let err = bad("  - set: { n: 1 }\n  - retry: { wait: 5s }\n  - emit: out\n");
+    assert!(
+        matches!(err, LoadError::Malformed { ref path, .. } if path == "pipe[1].retry"),
+        "{err}"
+    );
+    let err = bad("  - set: { n: 1 }\n  - retry: { times: 2, wait: soon }\n  - emit: out\n");
+    assert!(
+        matches!(err, LoadError::Malformed { ref path, .. } if path == "pipe[1].retry.wait"),
+        "{err}"
+    );
+    let err = bad("  - set: { n: 1 }\n  - retry: { times: 2, pause: 5s }\n  - emit: out\n");
+    assert_eq!(
+        err,
+        LoadError::UnknownKey {
+            path: "pipe[1].retry".into(),
+            key: "pause".into()
+        }
+    );
+    let err = bad("  - set: { n: 1 }\n  - timeout: 30\n  - emit: out\n");
+    assert!(
+        matches!(err, LoadError::Malformed { ref path, .. } if path == "pipe[1].timeout"),
+        "{err}"
+    );
+    let world = World::new();
+    let doc = "vine: v\ninput: { n: int }\noutputs: { out: { n: int } }\npipe:\n  - set: { n: $item.n }\n  - retry: { times: 2, wait: 5s }\n  - timeout: 30s\n  - emit: out\n";
+    registry(&world).load_pipe(doc).unwrap();
+}
+
+#[test]
+fn on_goes_only_with_use_and_is_a_map_of_outputs() {
+    let err = bad("  - emit: out\n    on: { out: [] }\n");
+    assert_eq!(
+        err,
+        LoadError::UnknownKey {
+            path: "pipe[0]".into(),
+            key: "on".into()
+        }
+    );
+    let err = bad("  - use: job_launch\n    on: started\n");
+    assert!(
+        matches!(err, LoadError::Malformed { ref path, .. } if path == "pipe[0].on"),
+        "{err}"
+    );
+    let err = bad("  - use: nobody\n    on: { done: [ { emit: out } ] }\n");
+    assert_eq!(
+        err,
+        LoadError::UnknownVine {
+            path: "pipe[0]".into(),
+            name: "nobody".into()
+        }
+    );
+}
+
+// ------------------------------------------------- one vine runs another
+
+/// A registry that holds `job_launch`, and `plan_launch_all` built on it.
+fn launch_all(world: &Arc<World>) -> Pipe {
+    let mut reg = registry(world);
+    let launch = reg.load_pipe(&text("job_launch")).unwrap();
+    reg.add_vine(launch).unwrap();
+    reg.load_pipe(&text("plan_launch_all")).unwrap()
+}
+
+fn plan(jobs: Value) -> Value {
+    json!({ "plan": "p-1", "plan_branch": "plan/p-1", "jobs": jobs })
+}
+
+fn ready(id: &str) -> Value {
+    json!({ "id": id, "state": "ready", "waiting_on": 0, "brief": "work" })
+}
+
+#[tokio::test]
+async fn plan_launch_all_launches_every_job_that_can_start() {
+    let world = World::new();
+    let vine = launch_all(&world);
+    let jobs = json!([
+        ready("j-1"),
+        { "id": "j-2", "state": "ready", "waiting_on": 1, "brief": "work" },
+        ready("j-3"),
+        { "id": "j-4", "state": "done", "waiting_on": 0, "brief": "work" },
+    ]);
+    let out = vine.run_one(plan(jobs)).await.unwrap();
+    let mut got: Vec<(&str, &Value)> = out
+        .iter()
+        .map(|o| (o.name.as_str(), &o.payload["job"]))
+        .collect();
+    got.sort_by_key(|(_, job)| job.to_string());
+    assert_eq!(
+        got,
+        [("launched", &json!("j-1")), ("launched", &json!("j-3"))]
+    );
+    assert_eq!(world.trees(), ["/trees/j-1", "/trees/j-3"]);
+    // It reaches what `job_launch` reaches.
+    assert_eq!(
+        vine.reach().iter().map(String::as_str).collect::<Vec<_>>(),
+        ["agent", "git"]
+    );
+}
+
+#[tokio::test]
+async fn plan_launch_all_reports_a_job_that_did_not_launch_and_launches_the_rest() {
+    let world = World::new();
+    world.fail("agent.start", "unavailable", "no agent host");
+    let vine = launch_all(&world);
+    let out = vine
+        .run_one(plan(json!([ready("j-1"), ready("j-2")])))
+        .await
+        .unwrap();
+    let mut names: Vec<&str> = out.iter().map(|o| o.name.as_str()).collect();
+    names.sort_unstable();
+    assert_eq!(names, ["launched", "not_launched"]);
+    let failed = out.iter().find(|o| o.name == "not_launched").unwrap();
+    assert_eq!(failed.payload["reason"], "no agent host");
+    // The job that did not launch left no working copy behind.
+    assert_eq!(world.trees().len(), 1);
+}
+
+#[tokio::test]
+async fn plan_launch_all_emits_nothing_for_a_plan_with_nothing_to_start() {
+    let world = World::new();
+    let out = launch_all(&world).run_one(plan(json!([]))).await.unwrap();
+    assert!(out.is_empty());
+    assert!(world.log().is_empty());
+}
+
+#[test]
+fn plan_launch_all_cannot_load_before_the_vine_it_uses() {
+    let world = World::new();
+    let err = registry(&world)
+        .load_pipe(&text("plan_launch_all"))
+        .unwrap_err();
+    assert!(
+        matches!(err, LoadError::UnknownVine { ref name, .. } if name == "job_launch"),
         "{err}"
     );
 }

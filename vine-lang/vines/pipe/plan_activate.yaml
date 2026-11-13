@@ -6,16 +6,14 @@ outputs:
   activated: { plan: id, branch: text, lane: text }
   failed: { plan: id, reason: text }
 pipe:
-  - attempt:
-      do:
-        - call: git.branch_cut
-          with: { name: $item.plan, from: $item.base }
-          into: branch
-        - call: git.worktree_add
-          with: { name: $item.plan, from: $item.branch.name }
-          into: lane
-        - emit:
-            to: activated
-            with: { plan: $item.plan, branch: $item.branch.name, lane: $item.lane.path }
-      on_error:
-        - emit: { to: failed, with: { plan: $item.plan, reason: $item.error.message } }
+  - call: git.branch_cut
+    with: { name: $item.plan, from: $item.base }
+    into: branch
+  - call: git.worktree_add
+    with: { name: $item.plan, from: $item.branch.name }
+    into: lane
+  - emit:
+      to: activated
+      with: { plan: $item.plan, branch: $item.branch.name, lane: $item.lane.path }
+  - catch:
+      - emit: { to: failed, with: { plan: $item.plan, reason: $item.error.message } }

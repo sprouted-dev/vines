@@ -45,21 +45,39 @@
 //!   item, and go on when all of them are done.
 //! - [`each`]: run a pipe for each item. [`Overlap`] says what happens
 //!   when a new item arrives while the last one is still running.
-//! - [`attempt`]: run a pipe for each item. If a stage in it fails, run a
-//!   second pipe with the item as it was when it failed, plus the failure
-//!   as `$item.error`.
+//! - [`use_vine`]: run another vine for each item, and say what to do
+//!   with each thing it emits.
 //! - [`branch`]: run the pipe whose key equals a value of the item.
 //! - [`emit`]: send the item to one of the vine's named outputs.
+//!
+//! # Stages that cover the ones before them
+//!
+//! Four stages do not act on the item. They stand after the stages they
+//! cover, as `catchError` and `finalize` do in RxJS, and they work one
+//! item at a time:
+//!
+//! - [`catch`]: if a covered stage fails, run these stages instead. They
+//!   get the item as it was when it failed, plus the failure as
+//!   `$item.error`.
+//! - [`finalize`]: run these stages afterwards, however the work ended.
+//! - [`retry`]: if a covered stage fails, wait and run them again.
+//! - [`timeout`]: fail the item if the covered stages take too long.
+//!
+//! One failing item does not stop the items after it, as long as a
+//! `catch` covers the stage that failed. A failure nothing catches ends
+//! the whole stream.
 //!
 //! # What this module leaves out
 //!
 //! Saved positions, memory across a restart, and resuming after a crash.
 //! The older stream runner in [`crate::run`] has them. This module is the
-//! shape of the one model, not yet its durability.
+//! shape of the one model, not yet its durability. `finalize` does not
+//! run when the caller drops the stream partway: Rust has no async drop.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::Arc;
 use std::task::Poll;
+use std::time::Duration;
 
 use futures::future::{join_all, ready, BoxFuture};
 use futures::stream::{self, BoxStream};
@@ -127,9 +145,25 @@ pub enum Stage {
         at_once: Option<usize>,
         pipe: Vec<Stage>,
     },
-    Attempt {
-        pipe: Vec<Stage>,
-        on_error: Vec<Stage>,
+    /// Covers the stages before it in its pipe: if one of them fails for
+    /// an item, run these stages instead.
+    Catch(Vec<Stage>),
+    /// Covers the stages before it: run these afterwards, however the
+    /// item's work ended.
+    Finalize(Vec<Stage>),
+    /// Covers the stages before it: if one fails, run them again.
+    Retry {
+        times: u32,
+        wait: Duration,
+    },
+    /// Covers the stages before it: fail if they take longer than this.
+    Timeout(Duration),
+    /// Run another vine for each item.
+    Use {
+        vine: String,
+        with: Option<Value>,
+        keep: Keep,
+        on: Vec<(String, Vec<Stage>)>,
     },
     Branch {
         on: Value,
@@ -148,11 +182,20 @@ impl Stage {
     /// under `name`.
     pub fn into(mut self, name: &str) -> Self {
         match &mut self {
-            Stage::Op { keep, .. } | Stage::Call { keep, .. } => {
+            Stage::Op { keep, .. } | Stage::Call { keep, .. } | Stage::Use { keep, .. } => {
                 *keep = Keep::Into(name.to_owned())
             }
             Stage::Split { into, .. } => *into = Some(name.to_owned()),
             _ => {}
+        }
+        self
+    }
+
+    /// For [`use_vine`]: the stages to run for what the other vine sends
+    /// to this output. Every output of the other vine needs one.
+    pub fn on(mut self, output: &str, stages: impl IntoIterator<Item = Stage>) -> Self {
+        if let Stage::Use { on, .. } = &mut self {
+            on.push((output.to_owned(), stages.into_iter().collect()));
         }
         self
     }
@@ -229,14 +272,42 @@ pub fn each(overlap: Overlap, pipe: impl IntoIterator<Item = Stage>) -> Stage {
     }
 }
 
-/// Run a pipe for each item, and a second pipe if a stage in it fails.
-pub fn attempt(
-    pipe: impl IntoIterator<Item = Stage>,
-    on_error: impl IntoIterator<Item = Stage>,
-) -> Stage {
-    Stage::Attempt {
-        pipe: pipe.into_iter().collect(),
-        on_error: on_error.into_iter().collect(),
+/// If a stage before this one fails for an item, run these stages
+/// instead. They get the item as it was when it failed, with the failure
+/// added as `$item.error`: its `code`, its `message`, and `from`, the
+/// operator or act that failed.
+pub fn catch(stages: impl IntoIterator<Item = Stage>) -> Stage {
+    Stage::Catch(stages.into_iter().collect())
+}
+
+/// Run these stages after the stages before this one, however the item's
+/// work ended. They get the item as it was when it arrived. They are for
+/// cleanup: what they give back is dropped, and they may not emit.
+pub fn finalize(stages: impl IntoIterator<Item = Stage>) -> Stage {
+    Stage::Finalize(stages.into_iter().collect())
+}
+
+/// If a stage before this one fails for an item, wait and run them again,
+/// up to `times` more times. Every act they run must be safe to repeat.
+pub fn retry(times: u32, wait: Duration) -> Stage {
+    Stage::Retry { times, wait }
+}
+
+/// Fail an item with the code `timeout` if the stages before this one
+/// take longer than `limit`.
+pub fn timeout(limit: Duration) -> Stage {
+    Stage::Timeout(limit)
+}
+
+/// Run another vine for each item. `with` builds its input. With no
+/// `with`, the item is its input. Add an [`on`](Stage::on) for each of
+/// its outputs.
+pub fn use_vine(vine: &str, with: Option<Value>) -> Stage {
+    Stage::Use {
+        vine: vine.to_owned(),
+        with,
+        keep: Keep::Replace,
+        on: Vec::new(),
     }
 }
 
@@ -428,6 +499,19 @@ impl Pipe {
                 ready(next)
             })
             .boxed()
+    }
+
+    /// Run as a stage of another vine.
+    fn flow(&self, items: Items) -> Items {
+        let shape = self.input.clone();
+        let checked = items.map(move |flow| match flow {
+            Ok(Flowing::Value(v)) => match shape.check(&v) {
+                Ok(()) => Ok(Flowing::Value(v)),
+                Err(p) => Err(fatal(RunError::InputMisfit(p))),
+            },
+            other => other,
+        });
+        (self.transform)(checked.boxed())
     }
 
     /// Feed the vine one item and collect everything it emits. A vine that
@@ -647,18 +731,102 @@ pub(crate) fn assemble(reg: &Registry, def: PipeDef) -> Result<Pipe, LoadError> 
 
 /// Whether every item that enters these stages is sure to be emitted.
 fn emits(stages: &[Stage]) -> bool {
-    // `take` counts what flows past it, emitted or not, so it may follow
-    // the stage that emits.
-    let last = stages.iter().rev().find(|s| !matches!(s, Stage::Take(_)));
+    let Some((last, before)) = stages.split_last() else {
+        return false;
+    };
     match last {
-        Some(Stage::Emit { .. }) => true,
-        Some(Stage::Each { pipe, .. }) => emits(pipe),
-        Some(Stage::Attempt { pipe, on_error }) => emits(pipe) && emits(on_error),
-        Some(Stage::Branch {
+        // These let what was emitted before them go by.
+        Stage::Take(_) | Stage::Finalize(_) | Stage::Retry { .. } | Stage::Timeout(_) => {
+            emits(before)
+        }
+        Stage::Catch(handler) => emits(before) && emits(handler),
+        Stage::Emit { .. } => true,
+        Stage::Each { pipe, .. } => emits(pipe),
+        Stage::Use { on, .. } => on.iter().all(|(_, p)| emits(p)),
+        Stage::Branch {
             cases, otherwise, ..
-        }) => otherwise.as_deref().is_some_and(emits) && cases.iter().all(|(_, p)| emits(p)),
+        } => otherwise.as_deref().is_some_and(emits) && cases.iter().all(|(_, p)| emits(p)),
         _ => false,
     }
+}
+
+/// Whether a stage may stand after stages that already emit.
+fn follows_emit(stage: &Stage) -> bool {
+    matches!(
+        stage,
+        Stage::Take(_)
+            | Stage::Catch(_)
+            | Stage::Finalize(_)
+            | Stage::Retry { .. }
+            | Stage::Timeout(_)
+    )
+}
+
+/// Whether a stage covers the stages before it, one item at a time.
+fn covers(stage: &Stage) -> Option<&'static str> {
+    match stage {
+        Stage::Catch(_) => Some("catch"),
+        Stage::Finalize(_) => Some("finalize"),
+        Stage::Retry { .. } => Some("retry"),
+        Stage::Timeout(_) => Some("timeout"),
+        _ => None,
+    }
+}
+
+/// Whether a stage works across the whole stream, not one item at a time.
+fn stream_wide(stage: &Stage) -> Option<&'static str> {
+    match stage {
+        Stage::Take(_) => Some("take"),
+        Stage::Each { overlap, .. } if *overlap != Overlap::Concat => Some("each"),
+        _ => None,
+    }
+}
+
+/// Whether these stages emit anywhere, at any depth.
+fn emits_anywhere(stages: &[Stage]) -> bool {
+    stages.iter().any(|s| match s {
+        Stage::Emit { .. } => true,
+        Stage::Each { pipe, .. } | Stage::Catch(pipe) | Stage::Finalize(pipe) => {
+            emits_anywhere(pipe)
+        }
+        Stage::Use { on, .. } => on.iter().any(|(_, p)| emits_anywhere(p)),
+        Stage::Branch {
+            cases, otherwise, ..
+        } => {
+            cases.iter().any(|(_, p)| emits_anywhere(p))
+                || otherwise.as_deref().is_some_and(emits_anywhere)
+        }
+        _ => false,
+    })
+}
+
+/// Run `f` for each value still being worked on, and send on everything
+/// it gives back. Outputs and failures from upstream pass through.
+fn covering<F>(f: F) -> Transform
+where
+    F: Fn(Value) -> BoxFuture<'static, Vec<Flow>> + Send + Sync + 'static,
+{
+    let f = Arc::new(f);
+    Arc::new(move |items: Items| {
+        let f = f.clone();
+        items
+            .then(move |flow| {
+                let f = f.clone();
+                async move {
+                    match flow {
+                        Ok(Flowing::Value(item)) => f(item).await,
+                        other => vec![other],
+                    }
+                }
+            })
+            .flat_map(stream::iter)
+            .boxed()
+    })
+}
+
+/// Whether a result is a failure a vine may handle. Cancellation is not.
+fn handleable(flow: &Flow) -> bool {
+    matches!(flow, Err(Fault::Op(f)) if f.error.code != OpError::CANCELLED)
 }
 
 impl Checker<'_> {
@@ -674,8 +842,31 @@ impl Checker<'_> {
         let mut transforms: Vec<Transform> = Vec::new();
         for (i, stage) in stages.iter().enumerate() {
             let here = format!("{path}[{i}]");
-            if emits(&stages[..i]) && !matches!(stage, Stage::Take(_)) {
+            if emits(&stages[..i]) && !follows_emit(stage) {
                 return Err(LoadError::Unreachable { path: here });
+            }
+            if let Some(word) = covers(stage) {
+                // It wraps everything before it in this pipe, per item.
+                if i == 0 {
+                    return Err(malformed(
+                        &here,
+                        &format!("`{word}` covers the stages before it, and there are none"),
+                    ));
+                }
+                if let Some(wide) = stages[..i].iter().find_map(stream_wide) {
+                    return Err(malformed(
+                        &here,
+                        &format!(
+                            "`{word}` covers the stages before it one item at a time, but `{wide}` works across the whole stream; put `{wide}` after `{word}`"
+                        ),
+                    ));
+                }
+                let before = std::mem::take(&mut transforms);
+                let body: Transform =
+                    Arc::new(move |items: Items| before.iter().fold(items, |items, t| t(items)));
+                transforms.push(self.cover(stage, &here, body)?);
+                known = None;
+                continue;
             }
             let (t, next) = self.stage(stage, &here, known)?;
             transforms.push(t);
@@ -684,6 +875,141 @@ impl Checker<'_> {
         let all: Transform =
             Arc::new(move |items: Items| transforms.iter().fold(items, |items, t| t(items)));
         Ok((all, known))
+    }
+
+    /// A stage that covers the stages before it, `body`, one item at a
+    /// time.
+    fn cover(
+        &mut self,
+        stage: &Stage,
+        path: &str,
+        body: Transform,
+    ) -> Result<Transform, LoadError> {
+        match stage {
+            Stage::Catch(stages) => {
+                // The item as it was when it failed is not known here.
+                let (handler, _) = self.pipe(stages, &format!("{path}.catch"), None)?;
+                Ok(covering(move |item| {
+                    let (body, handler) = (body.clone(), handler.clone());
+                    async move {
+                        let mut out = Vec::new();
+                        let mut run = body(one(Ok(Flowing::Value(item))));
+                        while let Some(flow) = run.next().await {
+                            if !handleable(&flow) {
+                                out.push(flow);
+                                continue;
+                            }
+                            let Err(Fault::Op(fault)) = flow else {
+                                unreachable!("a handleable result is a failed operator")
+                            };
+                            let OpFault {
+                                from, error, item, ..
+                            } = *fault;
+                            let failure = json!({
+                                "code": error.code,
+                                "message": error.message,
+                                "from": from,
+                            });
+                            let failed = match item {
+                                Value::Object(mut map) => {
+                                    map.insert("error".into(), failure);
+                                    Value::Object(map)
+                                }
+                                other => json!({ "item": other, "error": failure }),
+                            };
+                            let rescue = handler(one(Ok(Flowing::Value(failed))));
+                            out.extend(rescue.collect::<Vec<_>>().await);
+                            break;
+                        }
+                        out
+                    }
+                    .boxed()
+                }))
+            }
+            Stage::Finalize(stages) => {
+                let here = format!("{path}.finalize");
+                if emits_anywhere(stages) {
+                    return Err(malformed(
+                        &here,
+                        "`finalize` is for cleanup and may not emit",
+                    ));
+                }
+                let (cleanup, _) = self.pipe(stages, &here, None)?;
+                Ok(covering(move |item| {
+                    let (body, cleanup) = (body.clone(), cleanup.clone());
+                    async move {
+                        let mut out: Vec<Flow> =
+                            body(one(Ok(Flowing::Value(item.clone())))).collect().await;
+                        let mut tidy = cleanup(one(Ok(Flowing::Value(item))));
+                        while let Some(flow) = tidy.next().await {
+                            // What cleanup gives back is dropped. Its failure is not.
+                            if flow.is_err() {
+                                out.push(flow);
+                                break;
+                            }
+                        }
+                        out
+                    }
+                    .boxed()
+                }))
+            }
+            Stage::Retry { times, wait } => {
+                let (times, wait) = (*times, *wait);
+                if times == 0 {
+                    return Err(malformed(
+                        &format!("{path}.retry"),
+                        "`retry` tries again at least once",
+                    ));
+                }
+                Ok(covering(move |item| {
+                    let body = body.clone();
+                    async move {
+                        let mut left = times;
+                        loop {
+                            let out: Vec<Flow> =
+                                body(one(Ok(Flowing::Value(item.clone())))).collect().await;
+                            if left == 0 || !out.iter().any(handleable) {
+                                return out;
+                            }
+                            left -= 1;
+                            tokio::time::sleep(wait).await;
+                        }
+                    }
+                    .boxed()
+                }))
+            }
+            Stage::Timeout(limit) => {
+                let limit = *limit;
+                if limit.is_zero() {
+                    return Err(malformed(
+                        &format!("{path}.timeout"),
+                        "`timeout` is longer than nothing",
+                    ));
+                }
+                let at = path.to_owned();
+                Ok(covering(move |item| {
+                    let (body, at) = (body.clone(), at.clone());
+                    async move {
+                        let run =
+                            body(one(Ok(Flowing::Value(item.clone())))).collect::<Vec<Flow>>();
+                        match tokio::time::timeout(limit, run).await {
+                            Ok(out) => out,
+                            Err(_) => vec![Err(Fault::Op(Box::new(OpFault {
+                                path: at,
+                                from: "timeout".into(),
+                                error: OpError::new(
+                                    "timeout",
+                                    format!("took longer than {}s", limit.as_secs_f64()),
+                                ),
+                                item,
+                            })))],
+                        }
+                    }
+                    .boxed()
+                }))
+            }
+            _ => unreachable!("only covering stages get here"),
+        }
     }
 
     fn unit(
@@ -920,54 +1246,120 @@ impl Checker<'_> {
                 });
                 Ok((t, None))
             }
-            Stage::Attempt { pipe, on_error } => {
-                let here = format!("{path}.attempt");
-                let (body, _) = self.pipe(pipe, &format!("{here}.do"), known)?;
-                // The item as it was when it failed is not known here.
-                let (handler, _) = self.pipe(on_error, &format!("{here}.on_error"), None)?;
-                let t: Transform = Arc::new(move |items: Items| {
-                    let (body, handler) = (body.clone(), handler.clone());
-                    items
-                        .then(move |flow| {
-                            let (body, handler) = (body.clone(), handler.clone());
-                            async move {
-                                let item = match flow {
-                                    Ok(Flowing::Value(item)) => item,
-                                    other => return vec![other],
-                                };
-                                let mut out = Vec::new();
-                                let mut run = body(one(Ok(Flowing::Value(item))));
-                                while let Some(flow) = run.next().await {
-                                    match flow {
-                                        Err(Fault::Op(fault))
-                                            if fault.error.code != OpError::CANCELLED =>
-                                        {
-                                            let OpFault {
-                                                from, error, item, ..
-                                            } = *fault;
-                                            let failure = json!({
-                                                "code": error.code,
-                                                "message": error.message,
-                                                "from": from,
-                                            });
-                                            let failed = match item {
-                                                Value::Object(mut map) => {
-                                                    map.insert("error".into(), failure);
-                                                    Value::Object(map)
-                                                }
-                                                other => json!({ "item": other, "error": failure }),
-                                            };
-                                            let rescue = handler(one(Ok(Flowing::Value(failed))));
-                                            out.extend(rescue.collect::<Vec<_>>().await);
-                                            break;
-                                        }
-                                        other => out.push(other),
-                                    }
-                                }
-                                out
+            Stage::Catch(_) | Stage::Finalize(_) | Stage::Retry { .. } | Stage::Timeout(_) => {
+                unreachable!("covering stages are handled where the pipe is put together")
+            }
+            Stage::Use {
+                vine,
+                with,
+                keep,
+                on,
+            } => {
+                let Some(other) = self.reg.get_vine(vine).cloned() else {
+                    return Err(LoadError::UnknownVine {
+                        path: path.into(),
+                        name: vine.clone(),
+                    });
+                };
+                let with = match with {
+                    Some(w) => {
+                        let at = format!("{path}.with");
+                        let t = Template::parse(w).map_err(|p| malformed(&at, &p))?;
+                        check_refs(t.refs(), &known, &at)?;
+                        other.input().check_template(&t).map_err(|problem| {
+                            LoadError::BadSettings {
+                                path: at,
+                                operator: vine.clone(),
+                                problem,
                             }
+                        })?;
+                        Some(t)
+                    }
+                    None => {
+                        if let Some(item) = &known {
+                            item.fits_into(other.input()).map_err(|problem| {
+                                LoadError::BadSettings {
+                                    path: path.into(),
+                                    operator: vine.clone(),
+                                    problem,
+                                }
+                            })?;
+                        }
+                        None
+                    }
+                };
+                if let Keep::Into(field) = keep {
+                    if !is_name(field) {
+                        return Err(malformed(
+                            &format!("{path}.into"),
+                            "`into` is a name, lower snake_case",
+                        ));
+                    }
+                }
+                let mut arms: BTreeMap<String, Transform> = BTreeMap::new();
+                for (output, stages) in on {
+                    let at = format!("{path}.on.{output}");
+                    if !other.outputs().contains_key(output) {
+                        return Err(LoadError::UndeclaredOutput {
+                            path: at,
+                            name: output.clone(),
+                        });
+                    }
+                    if arms.contains_key(output) {
+                        return Err(malformed(&at, "this output is listed twice"));
+                    }
+                    arms.insert(output.clone(), self.pipe(stages, &at, None)?.0);
+                }
+                if let Some(missing) = other.outputs().keys().find(|o| !arms.contains_key(*o)) {
+                    return Err(malformed(
+                        &format!("{path}.on"),
+                        &format!(
+                            "vine `{vine}` can send to `{missing}`, and nothing here says what to do with it"
+                        ),
+                    ));
+                }
+                self.reach.extend(other.reach().iter().cloned());
+                let (keep, at) = (keep.clone(), path.to_owned());
+                let t: Transform = Arc::new(move |items: Items| {
+                    let (other, with, keep, arms, at) = (
+                        other.clone(),
+                        with.clone(),
+                        keep.clone(),
+                        arms.clone(),
+                        at.clone(),
+                    );
+                    items
+                        .map(move |flow| {
+                            let item = match flow {
+                                Ok(Flowing::Value(item)) => item,
+                                other => return one(other),
+                            };
+                            let input = match &with {
+                                Some(t) => t.resolve(&env_of(&item)),
+                                None => item.clone(),
+                            };
+                            let (keep, arms, at) = (keep.clone(), arms.clone(), at.clone());
+                            other
+                                .flow(one(Ok(Flowing::Value(input))))
+                                .map(move |flow| match flow {
+                                    Ok(Flowing::Out(out)) => {
+                                        let next = match &keep {
+                                            Keep::Into(field) => {
+                                                add_field(&at, item.clone(), field, out.payload)
+                                            }
+                                            _ => Ok(out.payload),
+                                        };
+                                        match next {
+                                            Ok(v) => arms[&out.name](one(Ok(Flowing::Value(v)))),
+                                            Err(fault) => one(Err(fault)),
+                                        }
+                                    }
+                                    other => one(other),
+                                })
+                                .flatten()
+                                .boxed()
                         })
-                        .flat_map(stream::iter)
+                        .flatten()
                         .boxed()
                 });
                 Ok((t, None))
@@ -1181,14 +1573,15 @@ fn read_pipe(v: &Value, path: &str) -> Result<Vec<Stage>, LoadError> {
 #[cfg(feature = "yaml")]
 fn read_stage(v: &Value, path: &str) -> Result<Stage, LoadError> {
     const WORDS: &[&str] = &[
-        "call", "tap", "split", "filter", "take", "together", "each", "attempt", "branch", "emit",
+        "call", "tap", "split", "filter", "take", "together", "each", "catch", "finalize", "retry",
+        "timeout", "use", "branch", "emit",
     ];
     let Some(map) = v.as_object() else {
         return Err(malformed(path, "a stage is a map with one key"));
     };
     let mut main: Vec<&String> = map
         .keys()
-        .filter(|k| !["with", "into"].contains(&k.as_str()))
+        .filter(|k| !["with", "into", "on"].contains(&k.as_str()))
         .collect();
     let key = match (main.pop(), main.pop()) {
         (Some(key), None) => key.as_str(),
@@ -1221,6 +1614,7 @@ fn read_stage(v: &Value, path: &str) -> Result<Stage, LoadError> {
         for (present, allowed, key) in [
             (map.contains_key("with"), with, "with"),
             (into.is_some(), into_ok, "into"),
+            (map.contains_key("on"), key == "use", "on"),
         ] {
             if present && !allowed {
                 return Err(LoadError::UnknownKey {
@@ -1318,15 +1712,66 @@ fn read_stage(v: &Value, path: &str) -> Result<Stage, LoadError> {
                 pipe: read_pipe(body, &format!("{here}.do"))?,
             }
         }
-        "attempt" => {
+        "catch" => {
             takes(false, false)?;
-            let m = fields(&["do", "on_error"])?;
-            let (Some(body), Some(rescue)) = (m.get("do"), m.get("on_error")) else {
-                return Err(malformed(&here, "`attempt` needs `do` and `on_error`"));
+            Stage::Catch(read_pipe(body, &here)?)
+        }
+        "finalize" => {
+            takes(false, false)?;
+            Stage::Finalize(read_pipe(body, &here)?)
+        }
+        "retry" => {
+            takes(false, false)?;
+            let m = fields(&["times", "wait"])?;
+            let times = m
+                .get("times")
+                .and_then(Value::as_u64)
+                .and_then(|n| u32::try_from(n).ok())
+                .ok_or_else(|| malformed(&here, "`retry` needs `times`, a whole number"))?;
+            let wait = match m.get("wait") {
+                None => Duration::ZERO,
+                Some(v) => v
+                    .as_str()
+                    .and_then(crate::stream::parse_duration)
+                    .ok_or_else(|| {
+                        malformed(&format!("{here}.wait"), "`wait` is a time such as `5s`")
+                    })?,
             };
-            Stage::Attempt {
-                pipe: read_pipe(body, &format!("{here}.do"))?,
-                on_error: read_pipe(rescue, &format!("{here}.on_error"))?,
+            Stage::Retry { times, wait }
+        }
+        "timeout" => {
+            takes(false, false)?;
+            Stage::Timeout(
+                body.as_str()
+                    .and_then(crate::stream::parse_duration)
+                    .ok_or_else(|| malformed(&here, "`timeout` is a time such as `30s`"))?,
+            )
+        }
+        "use" => {
+            takes(true, true)?;
+            let mut on = Vec::new();
+            match map.get("on") {
+                None => {}
+                Some(Value::Object(arms)) => {
+                    for (output, stages) in arms {
+                        on.push((
+                            output.clone(),
+                            read_pipe(stages, &format!("{path}.on.{output}"))?,
+                        ));
+                    }
+                }
+                Some(_) => {
+                    return Err(malformed(
+                        &format!("{path}.on"),
+                        "`on` is a map of output name to stages",
+                    ))
+                }
+            }
+            Stage::Use {
+                vine: text(body, "`use` names one vine")?,
+                with: map.get("with").cloned(),
+                keep: keep(into),
+                on,
             }
         }
         "branch" => {

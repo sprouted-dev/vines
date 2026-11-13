@@ -12,8 +12,8 @@ use acts::{job_launch_pipe, ready_job, registry, World};
 use futures::{stream, StreamExt};
 use tokio::time::{sleep, Instant};
 use vine_lang::pipe::{
-    attempt, branch, call, each, emit, emit_with, filter, op, pipe, split, take, tap, together,
-    Overlap, Pipe, PipeDef, Stage,
+    branch, call, catch, each, emit, emit_with, filter, finalize, op, pipe, retry, split, take,
+    tap, timeout, together, use_vine, Overlap, Pipe, PipeDef, Stage,
 };
 use vine_lang::{json, LoadError, OpError, OperatorSpec, Registry, RunError, Shape, Ty, Value};
 
@@ -367,10 +367,11 @@ async fn together_fails_when_one_of_them_fails_and_attempt_can_handle_it() {
     );
 
     let handled = reg
-        .build_pipe(numbers([attempt(
-            [both(), emit("out")],
-            [emit_with("out", json!({ "failed": "$item.error.from" }))],
-        )]))
+        .build_pipe(numbers([
+            both(),
+            emit("out"),
+            catch([emit_with("out", json!({ "failed": "$item.error.from" }))]),
+        ]))
         .unwrap();
     let out = handled.run_one(json!({ "n": 1 })).await.unwrap();
     assert_eq!(out[0].payload, json!({ "failed": "work.slow" }));
@@ -517,7 +518,7 @@ fn at_once_goes_with_merge_only_and_is_at_least_one() {
     assert!(matches!(err, LoadError::Malformed { .. }), "{err}");
 }
 
-// ----------------------------------------------------------------- attempt
+// ------------------------------------------------------------------- catch
 
 fn failing(code: &'static str) -> Registry {
     let mut reg = Registry::new();
@@ -536,14 +537,15 @@ fn failing(code: &'static str) -> Registry {
 }
 
 #[tokio::test]
-async fn attempt_hands_the_failure_to_on_error_as_part_of_the_item() {
-    let def = numbers([attempt(
-        [call("store.put", json!({})), emit("out")],
-        [emit_with(
+async fn catch_gets_the_failure_as_part_of_the_item() {
+    let def = numbers([
+        call("store.put", json!({})),
+        emit("out"),
+        catch([emit_with(
             "out",
             json!({ "n": "$item.n", "error": "$item.error" }),
-        )],
-    )]);
+        )]),
+    ]);
     let out = failing("full")
         .build_pipe(def)
         .unwrap()
@@ -557,7 +559,7 @@ async fn attempt_hands_the_failure_to_on_error_as_part_of_the_item() {
 }
 
 #[tokio::test]
-async fn on_error_sees_the_item_as_it_was_when_the_stage_failed() {
+async fn catch_sees_the_item_as_it_was_when_the_stage_failed() {
     let reg = {
         let mut reg = failing("full");
         reg.register(
@@ -567,14 +569,12 @@ async fn on_error_sees_the_item_as_it_was_when_the_stage_failed() {
         .unwrap();
         reg
     };
-    let def = numbers([attempt(
-        [
-            op("mark", json!({ "step": "one" })).into("progress"),
-            call("store.put", json!({})),
-            emit("out"),
-        ],
-        [emit_with("out", json!({ "got_to": "$item.progress.step" }))],
-    )]);
+    let def = numbers([
+        op("mark", json!({ "step": "one" })).into("progress"),
+        call("store.put", json!({})),
+        emit("out"),
+        catch([emit_with("out", json!({ "got_to": "$item.progress.step" }))]),
+    ]);
     let out = reg
         .build_pipe(def)
         .unwrap()
@@ -584,8 +584,8 @@ async fn on_error_sees_the_item_as_it_was_when_the_stage_failed() {
     assert_eq!(out[0].payload, json!({ "got_to": "one" }));
 }
 
-#[tokio::test]
-async fn one_item_failing_does_not_stop_the_items_after_it() {
+/// `store.put` fails for the item whose `n` is 2.
+fn fails_on_two() -> Registry {
     let mut reg = Registry::new();
     reg.register_act(
         OperatorSpec::new("store.put")
@@ -600,11 +600,17 @@ async fn one_item_failing_does_not_stop_the_items_after_it() {
         },
     )
     .unwrap();
-    let def = numbers([attempt(
-        [call("store.put", json!({ "n": "$item.n" })), emit("out")],
-        [emit_with("out", json!({ "skipped": "$item.n" }))],
-    )]);
-    let (outs, err) = all(&reg.build_pipe(def).unwrap(), nums(&[1, 2, 3])).await;
+    reg
+}
+
+#[tokio::test]
+async fn one_item_failing_does_not_stop_the_items_after_it() {
+    let def = numbers([
+        call("store.put", json!({ "n": "$item.n" })),
+        emit("out"),
+        catch([emit_with("out", json!({ "skipped": "$item.n" }))]),
+    ]);
+    let (outs, err) = all(&fails_on_two().build_pipe(def).unwrap(), nums(&[1, 2, 3])).await;
     assert!(err.is_none());
     let got: Vec<&Value> = outs.iter().map(|(_, v)| v).collect();
     assert_eq!(
@@ -618,10 +624,11 @@ async fn one_item_failing_does_not_stop_the_items_after_it() {
 }
 
 #[tokio::test]
-async fn a_failure_nothing_handles_ends_the_stream_with_a_run_error() {
-    let def = numbers([call("store.put", json!({})), emit("out")]);
-    let (outs, err) = all(&failing("full").build_pipe(def).unwrap(), nums(&[1, 2])).await;
-    assert!(outs.is_empty());
+async fn a_failure_nothing_catches_ends_the_stream_with_a_run_error() {
+    let def = numbers([call("store.put", json!({ "n": "$item.n" })), emit("out")]);
+    let (outs, err) = all(&fails_on_two().build_pipe(def).unwrap(), nums(&[1, 2, 3])).await;
+    // The first item got through. The third never ran.
+    assert_eq!(outs.len(), 1);
     assert!(
         matches!(err, Some(RunError::Unhandled { ref operator, .. }) if operator == "store.put"),
         "{err:?}"
@@ -629,11 +636,12 @@ async fn a_failure_nothing_handles_ends_the_stream_with_a_run_error() {
 }
 
 #[tokio::test]
-async fn attempt_does_not_swallow_cancellation() {
-    let def = numbers([attempt(
-        [call("store.put", json!({})), emit("out")],
-        [emit("out")],
-    )]);
+async fn catch_does_not_swallow_cancellation() {
+    let def = numbers([
+        call("store.put", json!({})),
+        emit("out"),
+        catch([emit("out")]),
+    ]);
     let err = failing("cancelled")
         .build_pipe(def)
         .unwrap()
@@ -644,11 +652,12 @@ async fn attempt_does_not_swallow_cancellation() {
 }
 
 #[tokio::test]
-async fn a_failure_inside_on_error_is_a_run_error() {
-    let def = numbers([attempt(
-        [call("store.put", json!({})), emit("out")],
-        [call("store.put", json!({})), emit("out")],
-    )]);
+async fn a_failure_inside_catch_is_a_run_error() {
+    let def = numbers([
+        call("store.put", json!({})),
+        emit("out"),
+        catch([call("store.put", json!({})), emit("out")]),
+    ]);
     let err = failing("full")
         .build_pipe(def)
         .unwrap()
@@ -656,9 +665,413 @@ async fn a_failure_inside_on_error_is_a_run_error() {
         .await
         .unwrap_err();
     assert!(
-        matches!(err, RunError::Unhandled { ref path, .. } if path.contains("on_error")),
+        matches!(err, RunError::Unhandled { ref path, .. } if path.contains("catch")),
         "{err}"
     );
+}
+
+#[tokio::test]
+async fn catch_covers_only_the_stages_before_it() {
+    // The failing act stands after the catch, so nothing catches it.
+    let def = numbers([
+        op("set", json!({ "n": "$item.n" })),
+        catch([emit("out")]),
+        call("store.put", json!({})),
+        emit("out"),
+    ]);
+    let err = failing("full")
+        .build_pipe(def)
+        .unwrap()
+        .run_one(json!({ "n": 1 }))
+        .await
+        .unwrap_err();
+    assert!(matches!(err, RunError::Unhandled { .. }), "{err}");
+}
+
+#[test]
+fn a_covering_stage_needs_stages_before_it_and_none_that_span_the_stream() {
+    for stage in [
+        catch([emit("out")]),
+        finalize([op("set", json!({}))]),
+        retry(1, Duration::ZERO),
+        timeout(Duration::from_secs(1)),
+    ] {
+        let first = refused(numbers([stage.clone(), emit("out")]));
+        assert!(
+            matches!(first, LoadError::Malformed { ref path, .. } if path == "pipe[0]"),
+            "{first}"
+        );
+        let after_take = refused(numbers([emit("out"), take(1), stage.clone()]));
+        assert!(
+            matches!(after_take, LoadError::Malformed { ref path, ref problem }
+                if path == "pipe[2]" && problem.contains("`take`")),
+            "{after_take}"
+        );
+        let after_merge = refused(numbers([each(Overlap::Merge, [emit("out")]), stage]));
+        assert!(
+            matches!(after_merge, LoadError::Malformed { ref problem, .. } if problem.contains("`each`")),
+            "{after_merge}"
+        );
+    }
+}
+
+// ---------------------------------------------------------------- finalize
+
+fn tidy(world: &Arc<World>, fail: &'static str) -> Pipe {
+    let mut reg = registry(world);
+    reg.register_act(
+        OperatorSpec::new("store.put").touches(["store"]),
+        move |_v, _cx| async move {
+            match fail {
+                "" => Ok(json!({})),
+                code => Err(OpError::new(code, "no room")),
+            }
+        },
+    )
+    .unwrap();
+    let def = pipe("v")
+        .input(Shape::new().required("tree", Ty::Text))
+        .output("out", Shape::open())
+        .stages([
+            tap("store.put", json!({})),
+            emit("out"),
+            finalize([tap("git.worktree_remove", json!({ "path": "$item.tree" }))]),
+        ]);
+    reg.build_pipe(def).unwrap()
+}
+
+#[tokio::test]
+async fn finalize_runs_after_the_work_succeeds() {
+    let world = World::new();
+    world.add_tree("/trees/a");
+    let out = tidy(&world, "")
+        .run_one(json!({ "tree": "/trees/a" }))
+        .await
+        .unwrap();
+    assert_eq!(out.len(), 1);
+    assert!(world.trees().is_empty());
+}
+
+#[tokio::test]
+async fn finalize_runs_after_the_work_fails_and_the_failure_still_comes_out() {
+    let world = World::new();
+    world.add_tree("/trees/a");
+    let err = tidy(&world, "full")
+        .run_one(json!({ "tree": "/trees/a" }))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, RunError::Unhandled { ref code, .. } if code == "full"),
+        "{err}"
+    );
+    assert!(world.trees().is_empty());
+}
+
+#[tokio::test]
+async fn a_cleanup_that_fails_is_a_run_error_after_what_was_emitted() {
+    let world = World::new();
+    world.add_tree("/trees/a");
+    world.fail("git.worktree_remove", "locked", "working copy is locked");
+    let vine = tidy(&world, "");
+    let (outs, err) = all(&vine, vec![json!({ "tree": "/trees/a" })]).await;
+    assert_eq!(outs.len(), 1);
+    assert!(
+        matches!(err, Some(RunError::Unhandled { ref operator, .. }) if operator == "git.worktree_remove"),
+        "{err:?}"
+    );
+}
+
+#[test]
+fn finalize_may_not_emit() {
+    let def = numbers([emit("out"), finalize([emit("out")])]);
+    let err = refused(def);
+    assert!(
+        matches!(err, LoadError::Malformed { ref path, .. } if path == "pipe[1].finalize"),
+        "{err}"
+    );
+}
+
+// ------------------------------------------------------- retry and timeout
+
+/// `store.put` fails this many times, then works.
+fn flaky(failures: u32, start: Instant) -> (Arc<Mutex<Vec<u64>>>, Registry) {
+    let tries = Arc::new(Mutex::new(Vec::new()));
+    let mut reg = Registry::new();
+    let t = tries.clone();
+    reg.register_act(
+        OperatorSpec::new("store.put").touches(["store"]),
+        move |_v, _cx| {
+            let t = t.clone();
+            async move {
+                let mut tries = t.lock().unwrap();
+                tries.push(start.elapsed().as_secs());
+                if tries.len() as u32 <= failures {
+                    Err(OpError::new("busy", "try later"))
+                } else {
+                    Ok(json!({ "stored": true }))
+                }
+            }
+        },
+    )
+    .unwrap();
+    (tries, reg)
+}
+
+fn retried(times: u32) -> PipeDef {
+    numbers([
+        call("store.put", json!({})),
+        retry(times, Duration::from_secs(5)),
+        emit("out"),
+        catch([emit_with("out", json!({ "gave_up": "$item.error.code" }))]),
+    ])
+}
+
+#[tokio::test(start_paused = true)]
+async fn retry_runs_the_stages_again_after_waiting() {
+    let (tries, reg) = flaky(2, Instant::now());
+    let out = reg
+        .build_pipe(retried(3))
+        .unwrap()
+        .run_one(json!({ "n": 1 }))
+        .await
+        .unwrap();
+    assert_eq!(out[0].payload, json!({ "stored": true }));
+    assert_eq!(*tries.lock().unwrap(), [0, 5, 10]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn retry_gives_up_after_its_count_and_the_failure_can_be_caught() {
+    let (tries, reg) = flaky(10, Instant::now());
+    let out = reg
+        .build_pipe(retried(2))
+        .unwrap()
+        .run_one(json!({ "n": 1 }))
+        .await
+        .unwrap();
+    assert_eq!(out[0].payload, json!({ "gave_up": "busy" }));
+    // The first try, then two more.
+    assert_eq!(tries.lock().unwrap().len(), 3);
+}
+
+#[test]
+fn retry_tries_again_at_least_once_and_timeout_is_longer_than_nothing() {
+    let err = refused(numbers([
+        op("set", json!({})),
+        retry(0, Duration::ZERO),
+        emit("out"),
+    ]));
+    assert!(
+        matches!(err, LoadError::Malformed { ref path, .. } if path == "pipe[1].retry"),
+        "{err}"
+    );
+    let err = refused(numbers([
+        op("set", json!({})),
+        timeout(Duration::ZERO),
+        emit("out"),
+    ]));
+    assert!(
+        matches!(err, LoadError::Malformed { ref path, .. } if path == "pipe[1].timeout"),
+        "{err}"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn timeout_fails_an_item_whose_work_takes_too_long() {
+    let start = Instant::now();
+    let (clock, reg) = timed(start);
+    let def = numbers([
+        call("work.slow", json!({ "id": "$item.n", "secs": "$item.n" })),
+        timeout(Duration::from_secs(5)),
+        emit("out"),
+        catch([emit_with(
+            "out",
+            json!({ "n": "$item.n", "why": "$item.error.code" }),
+        )]),
+    ]);
+    let (outs, err) = all(&reg.build_pipe(def).unwrap(), nums(&[2, 9])).await;
+    assert!(err.is_none());
+    let got: Vec<&Value> = outs.iter().map(|(_, v)| v).collect();
+    assert_eq!(
+        got,
+        [&json!({ "id": 2 }), &json!({ "n": 9, "why": "timeout" })]
+    );
+    // The slow one was stopped at five seconds, not left to finish.
+    assert_eq!(start.elapsed().as_secs(), 7);
+    assert!(!clock.log().contains(&"done 9 @11".to_owned()));
+}
+
+// --------------------------------------------------- one vine runs another
+
+/// A registry holding `double_it`, a vine that doubles `n` or refuses.
+fn with_vine() -> Registry {
+    let mut reg = with_double();
+    let inner = pipe("double_it")
+        .input(n(Shape::new()))
+        .output("doubled", Shape::new().required("twice", Ty::Int))
+        .output("too_big", n(Shape::new()))
+        .stages([branch(
+            "$item.n",
+            [("9", [emit("too_big")])],
+            Some(vec![
+                op("double", json!({ "n": "$item.n" })),
+                emit("doubled"),
+            ]),
+        )]);
+    let inner = reg.build_pipe(inner).unwrap();
+    reg.add_vine(inner).unwrap();
+    reg
+}
+
+fn outer() -> PipeDef {
+    numbers([use_vine("double_it", None)
+        .into("result")
+        .on(
+            "doubled",
+            [emit_with(
+                "out",
+                json!({ "n": "$item.n", "twice": "$item.result.twice" }),
+            )],
+        )
+        .on(
+            "too_big",
+            [emit_with("out", json!({ "n": "$item.n", "skipped": true }))],
+        )])
+}
+
+#[tokio::test]
+async fn a_vine_runs_another_vine_and_handles_each_of_its_outputs() {
+    let vine = with_vine().build_pipe(outer()).unwrap();
+    let (outs, err) = all(&vine, nums(&[2, 9, 4])).await;
+    assert!(err.is_none());
+    let got: Vec<&Value> = outs.iter().map(|(_, v)| v).collect();
+    assert_eq!(
+        got,
+        [
+            &json!({ "n": 2, "twice": 4 }),
+            &json!({ "n": 9, "skipped": true }),
+            &json!({ "n": 4, "twice": 8 }),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn with_builds_the_other_vines_input_and_no_into_replaces_the_item() {
+    let def = pipe("v")
+        .input(Shape::new().required("count", Ty::Int))
+        .output("out", Shape::open())
+        .stages([use_vine("double_it", Some(json!({ "n": "$item.count" })))
+            .on("doubled", [emit("out")])
+            .on("too_big", [emit("out")])]);
+    let out = with_vine()
+        .build_pipe(def)
+        .unwrap()
+        .run_one(json!({ "count": 3 }))
+        .await
+        .unwrap();
+    assert_eq!(out[0].payload, json!({ "twice": 6 }));
+}
+
+#[test]
+fn every_output_of_the_other_vine_must_be_handled_and_no_other() {
+    let reg = with_vine();
+    let missing = numbers([use_vine("double_it", None).on("doubled", [emit("out")])]);
+    let err = reg.build_pipe(missing).unwrap_err();
+    assert!(
+        matches!(err, LoadError::Malformed { ref path, ref problem }
+            if path == "pipe[0].on" && problem.contains("`too_big`")),
+        "{err}"
+    );
+    let extra = numbers([use_vine("double_it", None)
+        .on("doubled", [emit("out")])
+        .on("too_big", [emit("out")])
+        .on("tripled", [emit("out")])]);
+    assert_eq!(
+        reg.build_pipe(extra).unwrap_err(),
+        LoadError::UndeclaredOutput {
+            path: "pipe[0].on.tripled".into(),
+            name: "tripled".into()
+        }
+    );
+}
+
+#[test]
+fn a_vine_that_was_not_added_cannot_be_used_and_a_name_is_added_once() {
+    let err = Registry::new().build_pipe(outer()).unwrap_err();
+    assert_eq!(
+        err,
+        LoadError::UnknownVine {
+            path: "pipe[0]".into(),
+            name: "double_it".into()
+        }
+    );
+    let mut reg = with_vine();
+    let again = reg.build_pipe(numbers([emit("out")]).clone()).unwrap();
+    reg.add_vine(again.clone()).unwrap();
+    assert_eq!(
+        reg.add_vine(again),
+        Err(vine_lang::RegistryError::Duplicate("numbers".into()))
+    );
+}
+
+#[test]
+fn input_that_cannot_fit_the_other_vine_is_refused_before_it_runs() {
+    let reg = with_vine();
+    let def = numbers([use_vine("double_it", Some(json!({ "n": "two" })))
+        .on("doubled", [emit("out")])
+        .on("too_big", [emit("out")])]);
+    let err = reg.build_pipe(def).unwrap_err();
+    assert!(
+        matches!(err, LoadError::BadSettings { ref path, .. } if path == "pipe[0].with"),
+        "{err}"
+    );
+}
+
+#[tokio::test]
+async fn the_outer_vines_reach_includes_the_reach_of_the_vine_it_uses() {
+    let world = World::new();
+    let mut reg = registry(&world);
+    let launch = reg.build_pipe(job_launch_pipe()).unwrap();
+    reg.add_vine(launch).unwrap();
+    let def = pipe("launch_one")
+        .input(
+            Shape::new()
+                .required("job", Ty::Id)
+                .required("plan_branch", Ty::Text)
+                .required("brief", Ty::Text),
+        )
+        .output("out", Shape::open())
+        .stages([use_vine("job_launch", None)
+            .on("started", [emit("out")])
+            .on("failed", [emit("out")])]);
+    let vine = reg.build_pipe(def).unwrap();
+    assert_eq!(
+        vine.reach().iter().map(String::as_str).collect::<Vec<_>>(),
+        ["agent", "git"]
+    );
+    let out = vine.run_one(ready_job()).await.unwrap();
+    assert_eq!(out[0].payload["session"], "session-1");
+}
+
+#[tokio::test]
+async fn a_failure_the_other_vine_does_not_catch_can_be_caught_by_the_outer_one() {
+    let mut reg = failing("full");
+    let inner = pipe("store_it")
+        .input(n(Shape::new()))
+        .output("stored", Shape::open())
+        .stages([call("store.put", json!({})), emit("stored")]);
+    let inner = reg.build_pipe(inner).unwrap();
+    reg.add_vine(inner).unwrap();
+    let def = numbers([
+        use_vine("store_it", None).on("stored", [emit("out")]),
+        catch([emit_with("out", json!({ "failed_in": "$item.error.from" }))]),
+    ]);
+    let out = reg
+        .build_pipe(def)
+        .unwrap()
+        .run_one(json!({ "n": 1 }))
+        .await
+        .unwrap();
+    assert_eq!(out[0].payload, json!({ "failed_in": "store.put" }));
 }
 
 // ------------------------------------------------------------------ branch
@@ -827,7 +1240,8 @@ fn an_act_handed_input_that_does_not_fit_is_refused_before_it_runs() {
 #[test]
 fn no_operator_can_take_a_word_of_the_pipe() {
     for word in [
-        "tap", "split", "filter", "take", "together", "attempt", "branch", "emit", "into",
+        "tap", "split", "filter", "take", "together", "catch", "finalize", "retry", "timeout",
+        "use", "branch", "emit", "with", "into", "on",
     ] {
         let mut reg = Registry::new();
         let err = reg
