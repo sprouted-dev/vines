@@ -20,6 +20,8 @@
 //! - Expressions (`$in.x`, `==`, `!=`, null): [`expr`] module docs.
 //! - Running, cancellation, pause and resume: [`run`] module docs.
 //! - Stream vines and writing stream operators: [`stream`] module docs.
+//! - Pipes, stream acts and `fork`: [`pipe`] module docs.
+//! - Saving a pipe run and resuming it after a restart: [`journal`] module docs.
 //!
 //! A vine holds no state, names no other vine, and knows nothing about what
 //! starts it. Its reach, [`Vine::reach`], is everything its operators touch.
@@ -27,6 +29,7 @@
 pub mod def;
 pub mod error;
 pub mod expr;
+pub mod journal;
 pub mod pipe;
 pub mod registry;
 pub mod run;
@@ -35,8 +38,9 @@ pub mod stream;
 pub mod vine;
 
 pub use error::{LoadError, RegistryError, RunError};
+pub use journal::{Entry, Event, Journal};
 pub use pipe::Pipe;
-pub use registry::{OpContext, OpError, OperatorSpec, Registry};
+pub use registry::{ActStream, OpContext, OpError, OperatorSpec, Part, Registry};
 pub use run::Output;
 pub use shape::{Shape, Ty};
 pub use stream::{

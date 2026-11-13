@@ -131,6 +131,10 @@ pub enum RunError {
     ItemMisfit { path: String, problem: String },
     #[error("cannot resume from this checkpoint: {0}")]
     ResumeMisfit(String),
+    #[error("cannot resume from this journal: {problem}")]
+    ReplayMisfit { problem: String },
+    #[error("vine `{vine}` cannot be resumed: {why}")]
+    NotResumable { vine: String, why: String },
     #[error("{path}: stream operator `{operator}` was woken but its deadline is still due; `wake` must clear or move it")]
     DeadlineNotMoved { path: String, operator: String },
 }

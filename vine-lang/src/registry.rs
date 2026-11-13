@@ -20,7 +20,8 @@ use std::future::Future;
 use std::sync::Arc;
 
 use futures::future::BoxFuture;
-use futures::FutureExt;
+use futures::stream::BoxStream;
+use futures::{FutureExt, Stream, StreamExt};
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
@@ -59,11 +60,26 @@ impl OpError {
 #[derive(Debug, Clone, Default)]
 pub struct OpContext {
     cancel: CancellationToken,
+    resume_from: u64,
 }
 
 impl OpContext {
     pub(crate) fn new(cancel: CancellationToken) -> Self {
-        OpContext { cancel }
+        OpContext {
+            cancel,
+            resume_from: 0,
+        }
+    }
+
+    pub(crate) fn resuming(mut self, from: u64) -> Self {
+        self.resume_from = from;
+        self
+    }
+
+    /// For a stream act: how many items this same call gave in an earlier
+    /// run that was saved. Start after them. It is 0 on a fresh start.
+    pub fn resume_from(&self) -> u64 {
+        self.resume_from
     }
 
     /// The run's cancellation token. A long operator should watch it and
@@ -79,6 +95,8 @@ pub struct OperatorSpec {
     pub name: String,
     pub settings: Shape,
     pub returns: Option<Shape>,
+    /// For a stream act: the shape of the value it ends with.
+    pub ends: Option<Shape>,
     pub touches: BTreeSet<String>,
 }
 
@@ -89,6 +107,7 @@ impl OperatorSpec {
             name: name.to_owned(),
             settings: Shape::new(),
             returns: None,
+            ends: None,
             touches: BTreeSet::new(),
         }
     }
@@ -105,6 +124,13 @@ impl OperatorSpec {
         self
     }
 
+    /// For a stream act: declare the shape of the value it ends with. A
+    /// stream act that declares one must end with [`Part::End`].
+    pub fn ends(mut self, shape: Shape) -> Self {
+        self.ends = Some(shape);
+        self
+    }
+
     pub fn touches<I, S>(mut self, names: I) -> Self
     where
         I: IntoIterator<Item = S>,
@@ -113,6 +139,29 @@ impl OperatorSpec {
         self.touches.extend(names.into_iter().map(Into::into));
         self
     }
+}
+
+/// One thing a stream act gives.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Part {
+    /// One more item. It is checked against the act's `returns` shape.
+    Item(Value),
+    /// The act is done, and this is how it ended, such as
+    /// `{ status: finished }`. It is checked against the act's `ends`
+    /// shape. Nothing after it is read.
+    End(Value),
+}
+
+/// What a stream act gives back: parts, then the end of the stream. An
+/// `Err` is a failure, and nothing after it is read.
+pub type ActStream = BoxStream<'static, Result<Part, OpError>>;
+
+pub(crate) type StreamHandler = Arc<dyn Fn(Value, OpContext) -> ActStream + Send + Sync>;
+
+#[derive(Clone)]
+pub(crate) struct RegisteredStreamAct {
+    pub spec: Arc<OperatorSpec>,
+    pub handler: StreamHandler,
 }
 
 pub(crate) type Handler =
@@ -135,9 +184,13 @@ pub(crate) const EACH: &str = "each";
 pub(crate) const CALL: &str = "call";
 
 /// The words of the pipe model. No operator may take one.
+///
+/// `collect` is a word of the pipe too. It is not listed here because the
+/// core stream operator of the same name already holds it, so no operator
+/// can take it either way.
 pub(crate) const PIPE_WORDS: &[&str] = &[
     "tap", "split", "filter", "take", "together", "catch", "finalize", "retry", "timeout",
-    "branch", "emit", "with", "into", "on",
+    "branch", "emit", "with", "into", "on", "fork", "last", "end",
 ];
 
 /// Keys that would pull another vine or a piece of one into this one.
@@ -163,6 +216,7 @@ pub struct Registry {
     ops: BTreeMap<String, Registered>,
     stream_ops: BTreeMap<String, RegisteredStream>,
     acts: BTreeMap<String, Registered>,
+    stream_acts: BTreeMap<String, RegisteredStreamAct>,
     vines: BTreeMap<String, crate::pipe::Pipe>,
 }
 
@@ -179,6 +233,7 @@ impl Registry {
             ops: BTreeMap::new(),
             stream_ops: BTreeMap::new(),
             acts: BTreeMap::new(),
+            stream_acts: BTreeMap::new(),
             vines: BTreeMap::new(),
         };
         // `set`: shape data. Binds its settings, resolved, as a map.
@@ -239,21 +294,7 @@ impl Registry {
         F: Fn(Value, OpContext) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = Result<Value, OpError>> + Send + 'static,
     {
-        if !is_touch(&spec.name) {
-            return Err(RegistryError::BadActName(spec.name));
-        }
-        if self.acts.contains_key(&spec.name) {
-            return Err(RegistryError::Duplicate(spec.name));
-        }
-        if spec.touches.is_empty() {
-            return Err(RegistryError::ActTouchesNothing(spec.name));
-        }
-        if let Some(bad) = spec.touches.iter().find(|t| !is_touch(t)) {
-            return Err(RegistryError::BadTouch {
-                operator: spec.name.clone(),
-                touch: bad.clone(),
-            });
-        }
+        self.check_act(&spec)?;
         let handler: Handler = Arc::new(move |v, cx| f(v, cx).boxed());
         self.acts.insert(
             spec.name.clone(),
@@ -263,6 +304,70 @@ impl Registry {
             },
         );
         Ok(())
+    }
+
+    /// Register a stream act: an act whose result is a stream. One item in
+    /// becomes one item per [`Part::Item`] it gives, and the stream may end
+    /// with a [`Part::End`] that says how it ended. An `Err` is an ordinary
+    /// failure, which a `catch` can handle.
+    ///
+    /// A run that is resumed calls the act again for the same input. The
+    /// act reads [`OpContext::resume_from`] and gives only the items after
+    /// those it already gave. So an act that starts long work should start
+    /// it the first time and attach to it after that.
+    ///
+    /// Names follow the rules of [`Registry::register_act`], and acts and
+    /// stream acts share one namespace.
+    pub fn register_stream_act<F, S>(
+        &mut self,
+        spec: OperatorSpec,
+        f: F,
+    ) -> Result<(), RegistryError>
+    where
+        F: Fn(Value, OpContext) -> S + Send + Sync + 'static,
+        S: Stream<Item = Result<Part, OpError>> + Send + 'static,
+    {
+        self.check_act(&spec)?;
+        let handler: StreamHandler = Arc::new(move |v, cx| f(v, cx).boxed());
+        self.stream_acts.insert(
+            spec.name.clone(),
+            RegisteredStreamAct {
+                spec: Arc::new(spec),
+                handler,
+            },
+        );
+        Ok(())
+    }
+
+    fn check_act(&self, spec: &OperatorSpec) -> Result<(), RegistryError> {
+        if !is_touch(&spec.name) {
+            return Err(RegistryError::BadActName(spec.name.clone()));
+        }
+        if self.acts.contains_key(&spec.name) || self.stream_acts.contains_key(&spec.name) {
+            return Err(RegistryError::Duplicate(spec.name.clone()));
+        }
+        if spec.touches.is_empty() {
+            return Err(RegistryError::ActTouchesNothing(spec.name.clone()));
+        }
+        if let Some(bad) = spec.touches.iter().find(|t| !is_touch(t)) {
+            return Err(RegistryError::BadTouch {
+                operator: spec.name.clone(),
+                touch: bad.clone(),
+            });
+        }
+        Ok(())
+    }
+
+    pub(crate) fn get_stream_act(&self, name: &str) -> Option<&RegisteredStreamAct> {
+        self.stream_acts.get(name)
+    }
+
+    /// The specs of every registered stream act.
+    pub fn stream_act_specs(&self) -> Vec<OperatorSpec> {
+        self.stream_acts
+            .values()
+            .map(|r| (*r.spec).clone())
+            .collect()
     }
 
     pub(crate) fn get_act(&self, name: &str) -> Option<&Registered> {
