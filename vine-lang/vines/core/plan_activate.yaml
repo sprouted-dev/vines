@@ -1,14 +1,13 @@
-# Activate a ready plan: cut its branch from the base and make the working
-# copy the plan's jobs are merged into.
+# Activate a plan: cut its branch from the base and make the working copy
+# the plan's jobs are merged into. Whether the plan may be activated is
+# declared on the move, not here.
 vine: plan_activate
 mode: once
-input: { plan: id, state: text, base: text }
+input: { plan: id, base: text }
 outputs:
   activated: { plan: id, branch: text, lane: text }
-  refused: { gate: text }
   failed: { plan: id, reason: text }
 steps:
-  - guard: { when: $in.state != "ready", out: refused, with: { gate: state } }
   - try:
       do:
         - call: git.branch_cut

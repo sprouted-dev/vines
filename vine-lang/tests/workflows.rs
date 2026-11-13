@@ -6,7 +6,7 @@
 
 mod acts;
 
-use acts::{ready_job, registry, with, World};
+use acts::{ready_job, registry, World};
 use vine_lang::{json, LoadError, Value, Vine};
 
 fn load(world: &std::sync::Arc<World>, name: &str) -> Vine {
@@ -44,36 +44,6 @@ async fn job_launch_starts_the_agent_and_ends_without_waiting_for_it() {
             "agent.start /trees/job-1"
         ]
     );
-}
-
-#[tokio::test]
-async fn job_launch_refuses_each_gate_by_name_and_touches_nothing() {
-    let gates = [
-        (json!({ "state": "in_progress" }), "state"),
-        (json!({ "plan_state": "paused" }), "plan"),
-        (json!({ "waiting_on": 3 }), "dependencies"),
-        (json!({ "live_session": "session-0" }), "session"),
-    ];
-    for (change, gate) in gates {
-        let world = World::new();
-        let vine = load(&world, "job_launch");
-        let (name, payload) = run(&vine, with(ready_job(), change)).await;
-        assert_eq!(name, "refused");
-        assert_eq!(payload, json!({ "gate": gate }));
-        assert!(
-            world.log().is_empty(),
-            "gate {gate} touched {:?}",
-            world.log()
-        );
-    }
-}
-
-#[tokio::test]
-async fn job_launch_checks_its_gates_in_order() {
-    let world = World::new();
-    let vine = load(&world, "job_launch");
-    let both = with(ready_job(), json!({ "state": "done", "waiting_on": 3 }));
-    assert_eq!(run(&vine, both).await.1, json!({ "gate": "state" }));
 }
 
 #[tokio::test]
@@ -215,7 +185,7 @@ async fn a_cleanup_that_fails_is_a_run_error_that_names_what_it_masked() {
 async fn plan_activate_cuts_the_branch_and_makes_the_plans_working_copy() {
     let world = World::new();
     let vine = load(&world, "plan_activate");
-    let input = json!({ "plan": "p-1", "state": "ready", "base": "origin/main" });
+    let input = json!({ "plan": "p-1", "base": "origin/main" });
     let (name, payload) = run(&vine, input).await;
     assert_eq!(name, "activated");
     assert_eq!(
@@ -226,25 +196,12 @@ async fn plan_activate_cuts_the_branch_and_makes_the_plans_working_copy() {
 }
 
 #[tokio::test]
-async fn plan_activate_refuses_a_plan_that_is_not_ready_and_touches_nothing() {
-    for state in ["draft", "active", "done"] {
-        let world = World::new();
-        let vine = load(&world, "plan_activate");
-        let input = json!({ "plan": "p-1", "state": state, "base": "origin/main" });
-        let (name, payload) = run(&vine, input).await;
-        assert_eq!(name, "refused");
-        assert_eq!(payload, json!({ "gate": "state" }));
-        assert!(world.log().is_empty());
-    }
-}
-
-#[tokio::test]
 async fn plan_activate_is_output_failed_when_either_git_act_fails() {
     for act in ["git.branch_cut", "git.worktree_add"] {
         let world = World::new();
         world.fail(act, "broken", "it broke");
         let vine = load(&world, "plan_activate");
-        let input = json!({ "plan": "p-1", "state": "ready", "base": "origin/main" });
+        let input = json!({ "plan": "p-1", "base": "origin/main" });
         let (name, payload) = run(&vine, input).await;
         assert_eq!(name, "failed", "{act}");
         assert_eq!(payload, json!({ "plan": "p-1", "reason": "it broke" }));
@@ -268,7 +225,7 @@ async fn plan_launch_ready_names_the_jobs_that_can_start_now() {
         job("j-4", "done", 0, false),  // not ready
         job("j-5", "ready", 0, false),
     ]);
-    let input = json!({ "plan": "p-1", "state": "active", "jobs": jobs });
+    let input = json!({ "plan": "p-1", "jobs": jobs });
     let (name, payload) = run(&vine, input).await;
     assert_eq!(name, "ready");
     assert_eq!(
@@ -285,22 +242,11 @@ async fn plan_launch_ready_says_so_when_nothing_can_start() {
     let world = World::new();
     let vine = load(&world, "plan_launch_ready");
     for jobs in [json!([]), json!([job("j-2", "ready", 1, false)])] {
-        let input = json!({ "plan": "p-1", "state": "active", "jobs": jobs });
+        let input = json!({ "plan": "p-1", "jobs": jobs });
         let (name, payload) = run(&vine, input).await;
         assert_eq!(name, "nothing_ready");
         assert_eq!(payload, json!({ "plan": "p-1" }));
     }
-}
-
-#[tokio::test]
-async fn plan_launch_ready_refuses_a_plan_that_is_not_active() {
-    let world = World::new();
-    let vine = load(&world, "plan_launch_ready");
-    let input =
-        json!({ "plan": "p-1", "state": "paused", "jobs": [job("j-1", "ready", 0, false)] });
-    let (name, payload) = run(&vine, input).await;
-    assert_eq!(name, "refused");
-    assert_eq!(payload, json!({ "gate": "state" }));
 }
 
 // ------------------------------------------- `call` and `on_error`, YAML

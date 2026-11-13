@@ -5,14 +5,46 @@
 
 mod acts;
 
-use acts::{claim_def, job_launch_def, ready_job, registry, with, World};
-use vine_lang::def::{attempt, call, each, guard, once, op, out, stream, switch};
+use acts::{job_launch_def, ready_job, registry, World};
+use vine_lang::def::{attempt, call, each, guard, once, op, out, stream, switch, VineDef};
 use vine_lang::{
     json, LoadError, OpError, OperatorSpec, Registry, RegistryError, RunError, Shape, Ty,
 };
 
 fn gate() -> Shape {
     Shape::new().required("gate", Ty::Text)
+}
+
+/// A vine that judges its input and reaches nothing: keep a note that is
+/// a draft nobody owns, and say why any other note is skipped.
+fn claim_def() -> VineDef {
+    once("keep_note")
+        .input(
+            Shape::new()
+                .required("item", Ty::Id)
+                .required("claimant", Ty::Text)
+                .required("state", Ty::Text)
+                .optional("holder", Ty::Text),
+        )
+        .output(
+            "claimed",
+            Shape::new()
+                .required("item", Ty::Id)
+                .required("claimant", Ty::Text),
+        )
+        .output("refused", gate())
+        .steps([
+            guard(
+                r#"$in.state != "open""#,
+                "refused",
+                json!({ "gate": "state" }),
+            ),
+            guard("$in.holder != null", "refused", json!({ "gate": "held" })),
+            out(
+                "claimed",
+                json!({ "item": "$in.item", "claimant": "$in.claimant" }),
+            ),
+        ])
 }
 
 #[tokio::test]
@@ -453,16 +485,4 @@ async fn job_launch_built_in_rust_starts_the_agent_and_ends() {
             "agent.start /trees/job-1"
         ]
     );
-}
-
-#[tokio::test]
-async fn job_launch_built_in_rust_refuses_before_it_touches_anything() {
-    let world = World::new();
-    let vine = registry(&world).build(job_launch_def()).unwrap();
-    let out = vine
-        .run(with(ready_job(), json!({ "waiting_on": 2 })))
-        .await
-        .unwrap();
-    assert_eq!(out.payload, json!({ "gate": "dependencies" }));
-    assert!(world.log().is_empty());
 }

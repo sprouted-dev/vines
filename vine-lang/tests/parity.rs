@@ -6,9 +6,9 @@
 
 mod acts;
 
-use acts::{claim_def, job_launch_def, ready_job, registry, with, World};
+use acts::{job_launch_def, job_session_ended_def, ready_job, registry, World};
 use vine_lang::def::{call, once, out};
-use vine_lang::{json, Registry, Shape, Ty, Value, Vine};
+use vine_lang::{json, Shape, Ty, Value, Vine};
 
 fn yaml(name: &str) -> String {
     let path = format!("{}/vines/core/{name}.yaml", env!("CARGO_MANIFEST_DIR"));
@@ -24,26 +24,59 @@ fn same_description(a: &Vine, b: &Vine) {
 }
 
 #[tokio::test]
-async fn claim_is_the_same_vine_in_rust_and_in_yaml() {
-    let reg = Registry::new();
-    let from_rust = reg.build(claim_def()).unwrap();
-    let from_yaml = reg.load(&yaml("claim")).unwrap();
-    same_description(&from_rust, &from_yaml);
-
-    let inputs = [
-        json!({ "item": "an-1", "claimant": "ana", "state": "open" }),
-        json!({ "item": "an-1", "claimant": "ana", "state": "closed" }),
-        json!({ "item": "an-1", "claimant": "ana", "state": "open", "holder": "bo" }),
-        json!({ "item": "an-1", "claimant": "ana", "state": "closed", "holder": "bo" }),
+async fn job_session_ended_is_the_same_vine_in_rust_and_in_yaml() {
+    let ended = |status: &str| json!({ "job": "job-1", "tree": "/trees/job-1", "status": status });
+    let cases: Vec<(Value, Option<&str>)> = vec![
+        (ended("finished"), None),
+        (ended("failed"), None),
+        (ended("cancelled"), None),
+        (ended("finished"), Some("git.commit")),
         // Does not fit the input shape: both must refuse it the same way.
-        json!({ "item": "an-1" }),
-        json!({ "item": "", "claimant": "ana", "state": "open" }),
+        (json!({ "job": "job-1" }), None),
+        (
+            json!({ "job": "", "tree": "/trees/job-1", "status": "finished" }),
+            None,
+        ),
     ];
-    for input in inputs {
+    for (input, failing) in cases {
+        let (rust_world, yaml_world) = (World::new(), World::new());
+        let from_rust = registry(&rust_world)
+            .build(job_session_ended_def())
+            .unwrap();
+        let from_yaml = registry(&yaml_world)
+            .load(&yaml("job_session_ended"))
+            .unwrap();
+        same_description(&from_rust, &from_yaml);
+        for world in [&rust_world, &yaml_world] {
+            world.add_tree("/trees/job-1");
+            if let Some(act) = failing {
+                world.fail(act, "broken", "it broke");
+            }
+        }
         let a = from_rust.run(input.clone()).await;
         let b = from_yaml.run(input.clone()).await;
-        assert_eq!(a, b, "input {input}");
+        assert_eq!(a, b, "input {input}, failing {failing:?}");
+        assert_eq!(rust_world.log(), yaml_world.log(), "input {input}");
+        assert_eq!(rust_world.trees(), yaml_world.trees(), "input {input}");
     }
+}
+
+#[tokio::test]
+async fn a_cleanup_failure_is_the_same_run_error_in_rust_and_in_yaml() {
+    let (rust_world, yaml_world) = (World::new(), World::new());
+    let from_rust = registry(&rust_world)
+        .build(job_session_ended_def())
+        .unwrap();
+    let from_yaml = registry(&yaml_world)
+        .load(&yaml("job_session_ended"))
+        .unwrap();
+    for world in [&rust_world, &yaml_world] {
+        world.fail("git.worktree_remove", "locked", "working copy is locked");
+    }
+    let input = json!({ "job": "job-1", "tree": "/trees/job-1", "status": "finished" });
+    let a = from_rust.run(input.clone()).await.unwrap_err();
+    let b = from_yaml.run(input).await.unwrap_err();
+    assert_eq!(a, b);
 }
 
 /// Run `job_launch` once in a fresh world, with one act set to fail.
@@ -60,13 +93,6 @@ async fn launch(
 async fn job_launch_is_the_same_vine_in_rust_and_in_yaml() {
     let cases: Vec<(Value, Option<&str>)> = vec![
         (ready_job(), None),
-        (with(ready_job(), json!({ "state": "done" })), None),
-        (with(ready_job(), json!({ "plan_state": "paused" })), None),
-        (with(ready_job(), json!({ "waiting_on": 1 })), None),
-        (
-            with(ready_job(), json!({ "live_session": "session-0" })),
-            None,
-        ),
         (ready_job(), Some("git.refresh_branch")),
         (ready_job(), Some("git.worktree_add")),
         (ready_job(), Some("agent.start")),

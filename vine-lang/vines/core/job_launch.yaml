@@ -1,26 +1,18 @@
-# Launch a ready job: bring the plan branch up to date, make the job a
-# working copy, and start an agent in it. The vine ends as soon as the
-# agent has started. It does not wait for the agent to finish.
-# `job_session_ended` picks up from there.
+# Launch a job: bring the plan branch up to date, make the job a working
+# copy, and start an agent in it. The vine ends as soon as the agent has
+# started. It does not wait for the agent to finish. `job_session_ended`
+# picks up from there.
+#
+# The vine has no gates. Whether the job may be launched at all (it is
+# ready, its plan is active, its dependencies are done, no session is
+# live) is declared on the move and checked by whoever runs the vine.
 vine: job_launch
 mode: once
-input:
-  job: id
-  state: text           # the job's state
-  plan_state: text      # the state of the plan the job belongs to
-  waiting_on: int       # how many of the job's dependencies are not done
-  live_session: text?   # a session already running this job, if any
-  plan_branch: text
-  brief: text
+input: { job: id, plan_branch: text, brief: text }
 outputs:
   started: { job: id, session: text, tree: text }
-  refused: { gate: text }
   failed: { job: id, reason: text }
 steps:
-  - guard: { when: $in.state != "ready", out: refused, with: { gate: state } }
-  - guard: { when: $in.plan_state != "active", out: refused, with: { gate: plan } }
-  - guard: { when: $in.waiting_on != 0, out: refused, with: { gate: dependencies } }
-  - guard: { when: $in.live_session != null, out: refused, with: { gate: session } }
   - try:
       do:
         - call: git.refresh_branch
