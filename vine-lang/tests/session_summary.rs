@@ -1,3 +1,5 @@
+#![cfg(feature = "yaml")]
+
 //! session_summary: collect 50 lines or 30 seconds, then a provided stream
 //! operator that keeps "summary so far" as must-keep memory.
 mod support;

@@ -1,3 +1,5 @@
+#![cfg(feature = "yaml")]
+
 mod support;
 
 use std::sync::Arc;

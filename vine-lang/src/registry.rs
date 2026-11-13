@@ -131,6 +131,9 @@ pub(crate) const CONSTRUCTS: &[&str] = &["guard", "switch", "try", "out"];
 /// The pipe construct: once-style steps run per item, last in a pipe.
 pub(crate) const EACH: &str = "each";
 
+/// The step that runs a named act: `call: git.worktree_add`.
+pub(crate) const CALL: &str = "call";
+
 /// Keys that would pull another vine or a piece of one into this one.
 /// Refused at the top level and as step keys, and never registrable.
 pub(crate) const COMPOSITION_WORDS: &[&str] = &[
@@ -153,6 +156,7 @@ pub(crate) const COMPOSITION_WORDS: &[&str] = &[
 pub struct Registry {
     ops: BTreeMap<String, Registered>,
     stream_ops: BTreeMap<String, RegisteredStream>,
+    acts: BTreeMap<String, Registered>,
 }
 
 impl Default for Registry {
@@ -167,11 +171,38 @@ impl Registry {
         let mut r = Registry {
             ops: BTreeMap::new(),
             stream_ops: BTreeMap::new(),
+            acts: BTreeMap::new(),
         };
         // `set`: shape data. Binds its settings, resolved, as a map.
         r.insert(
             OperatorSpec::new("set").settings(Shape::open()),
             |settings, _cx| async move { Ok(settings) },
+        );
+        // `select`: keep the items of a list whose fields equal every field
+        // of `where`. Pure data, like a filter over a list.
+        r.insert(
+            OperatorSpec::new("select")
+                .settings(
+                    Shape::new()
+                        .required("from", Ty::List)
+                        .required("where", Ty::Object),
+                )
+                .returns(
+                    Shape::new()
+                        .required("items", Ty::List)
+                        .required("count", Ty::Int),
+                ),
+            |settings, _cx| async move {
+                let want = settings["where"].as_object().cloned().unwrap_or_default();
+                let items: Vec<Value> = settings["from"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter(|item| want.iter().all(|(k, v)| item.get(k) == Some(v)))
+                    .cloned()
+                    .collect();
+                Ok(serde_json::json!({ "count": items.len(), "items": items }))
+            },
         );
         r.insert_stream(collect_spec(), collect_factory);
         r
@@ -186,6 +217,53 @@ impl Registry {
         self.check_new(&spec.name, &spec.touches)?;
         self.insert(spec, f);
         Ok(())
+    }
+
+    /// Register an act: something that reaches outside, run by a `call`
+    /// step. The library ships none. Whoever uses the library supplies the
+    /// Rust behind each name, so the library never learns what `git` is.
+    ///
+    /// The name is dot-separated, such as `git.worktree_add`. An act must
+    /// declare what it touches: a step that touches nothing is an
+    /// operator, not an act.
+    pub fn register_act<F, Fut>(&mut self, spec: OperatorSpec, f: F) -> Result<(), RegistryError>
+    where
+        F: Fn(Value, OpContext) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<Value, OpError>> + Send + 'static,
+    {
+        if !is_touch(&spec.name) {
+            return Err(RegistryError::BadActName(spec.name));
+        }
+        if self.acts.contains_key(&spec.name) {
+            return Err(RegistryError::Duplicate(spec.name));
+        }
+        if spec.touches.is_empty() {
+            return Err(RegistryError::ActTouchesNothing(spec.name));
+        }
+        if let Some(bad) = spec.touches.iter().find(|t| !is_touch(t)) {
+            return Err(RegistryError::BadTouch {
+                operator: spec.name.clone(),
+                touch: bad.clone(),
+            });
+        }
+        let handler: Handler = Arc::new(move |v, cx| f(v, cx).boxed());
+        self.acts.insert(
+            spec.name.clone(),
+            Registered {
+                spec: Arc::new(spec),
+                handler,
+            },
+        );
+        Ok(())
+    }
+
+    pub(crate) fn get_act(&self, name: &str) -> Option<&Registered> {
+        self.acts.get(name)
+    }
+
+    /// The specs of every registered act.
+    pub fn act_specs(&self) -> Vec<OperatorSpec> {
+        self.acts.values().map(|r| (*r.spec).clone()).collect()
     }
 
     /// Register a provided stream operator. `factory` builds a fresh
@@ -207,7 +285,11 @@ impl Registry {
         if !crate::expr::is_name(name) {
             return Err(RegistryError::BadName(name.into()));
         }
-        if CONSTRUCTS.contains(&name) || name == EACH || COMPOSITION_WORDS.contains(&name) {
+        if CONSTRUCTS.contains(&name)
+            || name == EACH
+            || name == CALL
+            || COMPOSITION_WORDS.contains(&name)
+        {
             return Err(RegistryError::Reserved(name.into()));
         }
         if self.ops.contains_key(name) || self.stream_ops.contains_key(name) {
@@ -273,6 +355,7 @@ impl Registry {
             || self.stream_ops.contains_key(name)
             || CONSTRUCTS.contains(&name)
             || name == EACH
+            || name == CALL
     }
 
     /// The specs of every registered operator, plus the control-flow core
@@ -284,9 +367,16 @@ impl Registry {
         out
     }
 
-    /// Check a vine document and return it ready to run.
+    /// Check a vine written in YAML and return it ready to run. The YAML
+    /// layer builds the same description [`Registry::build`] takes.
+    #[cfg(feature = "yaml")]
     pub fn load(&self, yaml: &str) -> Result<Vine, LoadError> {
         crate::vine::load(self, yaml)
+    }
+
+    /// Check a vine built in Rust and return it ready to run.
+    pub fn build(&self, def: crate::def::VineDef) -> Result<Vine, LoadError> {
+        def.assemble(self)
     }
 }
 
@@ -318,6 +408,7 @@ pub(crate) fn construct_specs() -> Vec<OperatorSpec> {
             Shape::new()
                 .required("do", Ty::List)
                 .optional("catch", Ty::Object)
+                .optional("on_error", Ty::List)
                 .optional("finally", Ty::List),
         ),
     ]

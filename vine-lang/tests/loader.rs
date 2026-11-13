@@ -1,3 +1,5 @@
+#![cfg(feature = "yaml")]
+
 //! Every refusal the loader makes before a vine runs.
 mod support;
 

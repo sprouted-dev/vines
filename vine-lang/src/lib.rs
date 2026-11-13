@@ -1,9 +1,19 @@
 //! An executable proof of the vine language.
 //!
 //! Two kinds of thing. **Operators** are Rust: the library registers core
-//! ones, anyone registers more through [`Registry::register`]. **Vines** are
-//! YAML documents that string operators together; [`Registry::load`] checks
-//! one and returns a [`Vine`], which runs nothing until asked to.
+//! ones, anyone registers more through [`Registry::register`]. **Vines**
+//! string operators together. A vine is built in Rust with [`def`] and
+//! checked by [`Registry::build`], which returns a [`Vine`] that runs
+//! nothing until asked to.
+//!
+//! YAML is a layer on top, behind the `yaml` feature. `Registry::load`
+//! reads a vine written as a document and hands the same description to
+//! the same checker. With the feature off, no YAML parser is compiled in.
+//!
+//! The library reaches nothing outside by itself. An **act** is something
+//! that does, such as `git.worktree_add`. The caller registers the Rust
+//! behind each name with [`Registry::register_act`], and a vine runs it
+//! with a `call` step.
 //!
 //! - Document format and control flow: [`vine`] module docs.
 //! - Shapes: [`shape`] module docs.
@@ -14,6 +24,7 @@
 //! A vine holds no state, names no other vine, and knows nothing about what
 //! starts it. Its reach, [`Vine::reach`], is everything its operators touch.
 
+pub mod def;
 pub mod error;
 pub mod expr;
 pub mod registry;
@@ -30,6 +41,7 @@ pub use stream::{
     Checkpoint, Emit, Memory, Stop, StreamOperator, StreamOperatorSpec, StreamReport, StreamSink,
 };
 pub use vine::{Mode, Vine};
+// `Step` and the builder functions stay under [`def`].
 
 // Operators need these to build values and watch cancellation.
 pub use serde_json::{json, Value};

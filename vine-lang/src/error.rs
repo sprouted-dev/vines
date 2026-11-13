@@ -13,6 +13,12 @@ pub enum RegistryError {
     Duplicate(String),
     #[error("operator `{operator}` declares it touches `{touch}`: touches are dot-separated lower snake_case words such as `facts.read`")]
     BadTouch { operator: String, touch: String },
+    #[error(
+        "act name `{0}` must be dot-separated lower snake_case words such as `git.worktree_add`"
+    )]
+    BadActName(String),
+    #[error("act `{0}` declares it touches nothing; an act reaches outside and must say what it touches")]
+    ActTouchesNothing(String),
 }
 
 /// A vine document was refused before it ran.
@@ -28,6 +34,8 @@ pub enum LoadError {
     Composition { path: String, key: String },
     #[error("{path}: unknown operator `{name}` (not registered)")]
     UnknownOperator { path: String, name: String },
+    #[error("{path}: unknown act `{name}` (not registered)")]
+    UnknownAct { path: String, name: String },
     #[error("{path}: settings do not fit operator `{operator}`: {problem}")]
     BadSettings {
         path: String,

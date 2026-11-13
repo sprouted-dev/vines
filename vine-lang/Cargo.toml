@@ -14,10 +14,16 @@ publish = false
 name = "vine_lang"
 path = "src/lib.rs"
 
+[features]
+# The YAML layer. With it off, the crate is the Rust core alone: vines are
+# built with `vine_lang::def` and no YAML parser is compiled in.
+default = ["yaml"]
+yaml = ["dep:serde_yaml"]
+
 [dependencies]
 futures = { version = "0.3.32", default-features = false, features = ["std", "async-await"] }
 serde_json = "1.0.149"
-serde_yaml = "0.9.34"
+serde_yaml = { version = "0.9.34", optional = true }
 thiserror = "2.0.18"
 tokio = { version = "1.52.3", default-features = false, features = ["time", "macros"] }
 tokio-util = { version = "0.7.18", default-features = false }

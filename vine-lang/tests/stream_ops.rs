@@ -1,3 +1,5 @@
+#![cfg(feature = "yaml")]
+
 //! Stream operators written outside the library, and how the runner moves
 //! the position and kept memory around them.
 mod support;

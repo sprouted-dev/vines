@@ -1,3 +1,5 @@
+#![cfg(feature = "yaml")]
+
 //! Every refusal the loader makes for stream vines, and the registry's
 //! rules for stream operators.
 mod support;

@@ -1,0 +1,13 @@
+# Claim an item for a claimant. The vine reads nothing: whoever runs it
+# hands over the item's state. It writes nothing: it ends with an output,
+# and the caller decides what that output becomes.
+vine: claim
+mode: once
+input: { item: id, claimant: text, state: text, holder: text? }
+outputs:
+  claimed: { item: id, claimant: text }
+  refused: { gate: text }
+steps:
+  - guard: { when: $in.state != "open", out: refused, with: { gate: state } }
+  - guard: { when: $in.holder != null, out: refused, with: { gate: held } }
+  - out: { name: claimed, with: { item: $in.item, claimant: $in.claimant } }

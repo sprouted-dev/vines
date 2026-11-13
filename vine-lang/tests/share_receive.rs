@@ -1,3 +1,5 @@
+#![cfg(feature = "yaml")]
+
 //! share_receive: a stream pipe of one `each`. Verify each envelope,
 //! reject bad ones as `rejected`, write good ones, output `accepted`.
 mod support;

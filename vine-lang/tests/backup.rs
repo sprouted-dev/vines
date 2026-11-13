@@ -1,3 +1,5 @@
+#![cfg(feature = "yaml")]
+
 //! backup: collect batches, encrypt each, store it at an outside provider.
 //! Time is tokio's paused clock: it moves only when every task is idle.
 mod support;

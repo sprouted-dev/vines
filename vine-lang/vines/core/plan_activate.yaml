@@ -1,0 +1,24 @@
+# Activate a ready plan: cut its branch from the base and make the working
+# copy the plan's jobs are merged into.
+vine: plan_activate
+mode: once
+input: { plan: id, state: text, base: text }
+outputs:
+  activated: { plan: id, branch: text, lane: text }
+  refused: { gate: text }
+  failed: { plan: id, reason: text }
+steps:
+  - guard: { when: $in.state != "ready", out: refused, with: { gate: state } }
+  - try:
+      do:
+        - call: git.branch_cut
+          with: { name: $in.plan, from: $in.base }
+          as: branch
+        - call: git.worktree_add
+          with: { name: $in.plan, from: $branch.name }
+          as: lane
+        - out:
+            name: activated
+            with: { plan: $in.plan, branch: $branch.name, lane: $lane.path }
+      on_error:
+        - out: { name: failed, with: { plan: $in.plan, reason: $error.message } }

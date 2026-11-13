@@ -1,0 +1,27 @@
+# A job's agent session has ended. Commit the work if the agent finished,
+# and always remove the working copy `job_launch` made.
+vine: job_session_ended
+mode: once
+input: { job: id, tree: text, status: text }
+outputs:
+  implemented: { job: id, commit: text }
+  stopped: { job: id, reason: text }
+  failed: { job: id, reason: text }
+steps:
+  - try:
+      do:
+        - switch:
+            on: $in.status
+            cases:
+              finished:
+                - call: git.commit
+                  with: { dir: $in.tree, message: $in.job }
+                  as: commit
+                - out: { name: implemented, with: { job: $in.job, commit: $commit.sha } }
+            else:
+              - out: { name: stopped, with: { job: $in.job, reason: $in.status } }
+      on_error:
+        - out: { name: failed, with: { job: $in.job, reason: $error.message } }
+      finally:
+        - call: git.worktree_remove
+          with: { path: $in.tree }

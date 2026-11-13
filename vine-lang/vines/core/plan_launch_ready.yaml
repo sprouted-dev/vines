@@ -1,0 +1,18 @@
+# Say which of an active plan's jobs can be launched now: ready, waiting
+# on nothing, and not yet asked for. The vine names them. It launches
+# nothing.
+vine: plan_launch_ready
+mode: once
+input: { plan: id, state: text, jobs: list }
+outputs:
+  ready: { plan: id, jobs: list }
+  nothing_ready: { plan: id }
+  refused: { gate: text }
+steps:
+  - guard: { when: $in.state != "active", out: refused, with: { gate: state } }
+  - select:
+      from: $in.jobs
+      where: { state: ready, waiting_on: 0, asked: false }
+    as: launchable
+  - guard: { when: $launchable.count == 0, out: nothing_ready, with: { plan: $in.plan } }
+  - out: { name: ready, with: { plan: $in.plan, jobs: $launchable.items } }

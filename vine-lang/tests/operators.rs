@@ -1,3 +1,5 @@
+#![cfg(feature = "yaml")]
+
 //! The registry from the outside, and the core operators.
 use vine_lang::{
     json, LoadError, OpError, OperatorSpec, Registry, RegistryError, Shape, Ty, Value,
@@ -104,7 +106,7 @@ fn registration_refuses_bad_names_reserved_names_duplicates_and_bad_touches() {
 fn core_operators_are_listed_and_touch_nothing() {
     let specs = Registry::new().specs();
     let names: Vec<&str> = specs.iter().map(|s| s.name.as_str()).collect();
-    assert_eq!(names, ["guard", "out", "set", "switch", "try"]);
+    assert_eq!(names, ["guard", "out", "select", "set", "switch", "try"]);
     assert!(specs.iter().all(|s| s.touches.is_empty()));
 }
 

@@ -182,11 +182,26 @@ async fn exec_step(
         Kind::Try {
             body,
             catch,
+            on_error,
             finally,
         } => {
             let mut result = exec_block(body, env.clone(), cx, outputs).await;
-            if let Err(Fault::Op { error, .. }) = &result {
-                if let Some(handler) = catch.get(&error.code) {
+            if let Err(Fault::Op {
+                error, operator, ..
+            }) = &result
+            {
+                if let Some(handler) = on_error
+                    .as_ref()
+                    .filter(|_| error.code != OpError::CANCELLED)
+                {
+                    // The failure reaches the vine as data. The vine decides.
+                    let mut caught = env.clone();
+                    caught.insert(
+                        "error".into(),
+                        json!({ "code": error.code, "message": error.message, "from": operator }),
+                    );
+                    result = exec_block(handler, caught, cx, outputs).await;
+                } else if let Some(handler) = catch.get(&error.code) {
                     let mut caught = env.clone();
                     caught.insert(
                         "error".into(),

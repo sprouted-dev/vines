@@ -1,4 +1,8 @@
-//! The vine document and the loader that checks it before it runs.
+//! The vine, the one checker every vine passes through, and the YAML
+//! layer that writes a vine down as a document.
+//!
+//! A vine is built in Rust with [`crate::def`]. The document below is the
+//! same vine written in YAML: each construct maps to one function there.
 //!
 //! ```yaml
 //! vine: claim                 # name, lower snake_case
@@ -25,6 +29,14 @@
 //!   A `catch` block runs when a step in `do` fails with that error code,
 //!   and sees `$error.code` and `$error.message`. `finally` always runs,
 //!   even when the run is cancelled, and must not end the run.
+//!
+//! - `try` takes `on_error: [steps]` in place of `catch`. That one block
+//!   runs for any failure and sees it as data: `$error.code`,
+//!   `$error.message` and `$error.from`, the step that failed. It must
+//!   cover every failure, so a `switch` on the code needs an `else`.
+//! - `call: <act>` with `with: { ... }` runs a registered act, such as
+//!   `git.worktree_add`. The library ships no acts. See
+//!   [`Registry::register_act`](crate::Registry::register_act).
 //!
 //! Names bound inside a block are not visible after it. Every path through
 //! the top-level steps must end in an output.
@@ -69,7 +81,9 @@ use serde_json::Value;
 
 use crate::error::LoadError;
 use crate::expr::{is_name, Cond, Operand, Ref, Template};
-use crate::registry::{construct_specs, Registered, Registry, COMPOSITION_WORDS, CONSTRUCTS, EACH};
+use crate::registry::{
+    construct_specs, Registered, Registry, CALL, COMPOSITION_WORDS, CONSTRUCTS, EACH,
+};
 use crate::shape::{Shape, Ty};
 use crate::stream::RegisteredStream;
 
@@ -168,6 +182,8 @@ pub(crate) enum Kind {
     Try {
         body: Vec<Step>,
         catch: BTreeMap<String, Vec<Step>>,
+        /// One block for any failure, which sees the failure as `$error`.
+        on_error: Option<Vec<Step>>,
         finally: Vec<Step>,
     },
 }
@@ -189,11 +205,15 @@ pub(crate) enum PipeKind {
     Each { steps: Vec<Step> },
 }
 
+#[cfg(feature = "yaml")]
 const TOP_KEYS: &[&str] = &["vine", "mode", "input", "outputs", "steps"];
 
 /// What a name in scope is known to hold: a shape, or unknown.
 type Scope = BTreeMap<String, Option<Shape>>;
 
+/// The YAML layer. It turns the text into the same description a Rust
+/// caller builds with [`crate::def`], and hands it to the one checker.
+#[cfg(feature = "yaml")]
 pub(crate) fn load(reg: &Registry, yaml: &str) -> Result<Vine, LoadError> {
     // Parse to YAML's own value first: it refuses duplicate keys (a second
     // `steps:` must not silently replace the first) and keeps tags visible.
@@ -201,6 +221,16 @@ pub(crate) fn load(reg: &Registry, yaml: &str) -> Result<Vine, LoadError> {
         serde_yaml::from_str(yaml).map_err(|e| LoadError::Yaml(e.to_string()))?;
     refuse_tags(&raw)?;
     let doc: Value = serde_json::to_value(raw).map_err(|e| LoadError::Yaml(e.to_string()))?;
+    let (name, mode, input, outputs, steps) = read_head(&doc)?;
+    assemble(reg, name, mode, input, outputs, steps)
+}
+
+#[cfg(feature = "yaml")]
+type Head<'d> = (String, Mode, Shape, BTreeMap<String, Shape>, &'d Value);
+
+/// The top of a vine document: its name, mode, shapes and steps.
+#[cfg(feature = "yaml")]
+fn read_head(doc: &Value) -> Result<Head<'_>, LoadError> {
     let Some(map) = doc.as_object() else {
         return Err(malformed("vine", "a vine document is a map"));
     };
@@ -261,7 +291,34 @@ pub(crate) fn load(reg: &Registry, yaml: &str) -> Result<Vine, LoadError> {
     let Some(steps) = map.get("steps") else {
         return Err(malformed("vine", "missing `steps`"));
     };
+    Ok((name, mode, input, outputs, steps))
+}
 
+/// The one checker. A vine built in Rust and a vine loaded from YAML both
+/// pass through here, so they get the same checks and the same result.
+pub(crate) fn assemble(
+    reg: &Registry,
+    name: String,
+    mode: Mode,
+    input: Shape,
+    outputs: BTreeMap<String, Shape>,
+    steps: &Value,
+) -> Result<Vine, LoadError> {
+    if !is_name(&name) {
+        return Err(malformed("vine", "`vine` is the name, lower snake_case"));
+    }
+    if outputs.is_empty() {
+        return Err(malformed(
+            "outputs",
+            "outputs is a non-empty map of output name to shape",
+        ));
+    }
+    if let Some(bad) = outputs.keys().find(|k| !is_name(k)) {
+        return Err(malformed(
+            &format!("outputs.{bad}"),
+            "output names are lower snake_case",
+        ));
+    }
     let mut cx = Loader {
         reg,
         outputs: &outputs,
@@ -354,7 +411,19 @@ impl Loader<'_> {
         let Some(map) = v.as_object() else {
             return Err(malformed(path, "a step is a map with one operator key"));
         };
-        let (op_name, bind) = self.op_key(map, path)?;
+        let (op_name, bind, with) = self.op_key(map, path)?;
+        if op_name == CALL {
+            let (op, template) = self.call(&map[CALL], with, path, scope)?;
+            let bind = self.bind(bind, path, scope, &op)?;
+            return Ok(Step {
+                path: path.into(),
+                kind: Kind::Op {
+                    op,
+                    settings: template,
+                    bind,
+                },
+            });
+        }
         if op_name == EACH || self.reg.get_stream(op_name).is_some() {
             return Err(LoadError::PipeOnly {
                 path: path.into(),
@@ -394,8 +463,29 @@ impl Loader<'_> {
                 operator: op_name.into(),
                 problem,
             })?;
-        let bind = match bind {
-            None => None,
+        let op = op.clone();
+        let bind = self.bind(bind, path, scope, &op)?;
+        self.reach.extend(op.spec.touches.iter().cloned());
+        Ok(Step {
+            path: path.into(),
+            kind: Kind::Op {
+                op,
+                settings: template,
+                bind,
+            },
+        })
+    }
+
+    /// Bind a step's result to the name in `as:`.
+    fn bind(
+        &self,
+        bind: Option<&Value>,
+        path: &str,
+        scope: &mut Scope,
+        op: &Registered,
+    ) -> Result<Option<String>, LoadError> {
+        match bind {
+            None => Ok(None),
             Some(Value::String(b)) if is_name(b) => {
                 if b == "in" || b == "error" || scope.contains_key(b) {
                     return Err(LoadError::DuplicateBinding {
@@ -404,24 +494,54 @@ impl Loader<'_> {
                     });
                 }
                 scope.insert(b.clone(), op.spec.returns.clone());
-                Some(b.clone())
+                Ok(Some(b.clone()))
             }
-            Some(_) => {
-                return Err(malformed(
-                    &format!("{path}.as"),
-                    "`as` is a name, lower snake_case",
-                ))
-            }
+            Some(_) => Err(malformed(
+                &format!("{path}.as"),
+                "`as` is a name, lower snake_case",
+            )),
+        }
+    }
+
+    /// A `call` step: `call: <act name>`, with the act's input in `with:`.
+    /// The library knows the act's name, shapes and what it touches. The
+    /// caller of the library supplied the Rust behind the name.
+    fn call(
+        &mut self,
+        act: &Value,
+        with: Option<&Value>,
+        path: &str,
+        scope: &Scope,
+    ) -> Result<(Registered, Template), LoadError> {
+        let here = format!("{path}.{CALL}");
+        let Some(name) = act.as_str() else {
+            return Err(malformed(
+                &here,
+                "`call` names one act, such as `git.worktree_add`",
+            ));
         };
+        let Some(op) = self.reg.get_act(name) else {
+            return Err(LoadError::UnknownAct {
+                path: path.into(),
+                name: name.into(),
+            });
+        };
+        let op = op.clone();
+        let empty = Value::Object(serde_json::Map::new());
+        let with_path = format!("{path}.with");
+        let template =
+            Template::parse(with.unwrap_or(&empty)).map_err(|p| malformed(&with_path, &p))?;
+        check_refs(template.refs(), scope, &with_path)?;
+        op.spec
+            .settings
+            .check_template(&template)
+            .map_err(|problem| LoadError::BadSettings {
+                path: with_path,
+                operator: name.into(),
+                problem,
+            })?;
         self.reach.extend(op.spec.touches.iter().cloned());
-        Ok(Step {
-            path: path.into(),
-            kind: Kind::Op {
-                op: op.clone(),
-                settings: template,
-                bind,
-            },
-        })
+        Ok((op, template))
     }
 
     /// The one operator key of a step, and its `as:` if any.
@@ -429,12 +549,17 @@ impl Loader<'_> {
         &self,
         map: &'v serde_json::Map<String, Value>,
         path: &str,
-    ) -> Result<(&'v str, Option<&'v Value>), LoadError> {
+    ) -> Result<(&'v str, Option<&'v Value>, Option<&'v Value>), LoadError> {
         let mut bind = None;
         let mut keys = Vec::new();
+        // `with:` belongs to a `call` step and to no other.
+        let with = map.get(CALL).and_then(|_| map.get("with"));
         for (k, val) in map {
             if k == "as" {
                 bind = Some(val);
+                continue;
+            }
+            if k == "with" && with.is_some() {
                 continue;
             }
             if COMPOSITION_WORDS.contains(&k.as_str()) {
@@ -447,7 +572,7 @@ impl Loader<'_> {
         }
         match keys.as_slice() {
             [] => Err(malformed(path, "a step needs an operator key")),
-            [one] => Ok((*one, bind)),
+            [one] => Ok((*one, bind, with)),
             many => {
                 let known: Vec<&&str> = many.iter().filter(|k| self.reg.contains(k)).collect();
                 Err(match known.as_slice() {
@@ -499,7 +624,7 @@ impl Loader<'_> {
             let Some(map) = sv.as_object() else {
                 return Err(malformed(&path, "a step is a map with one operator key"));
             };
-            let (name, bind) = self.op_key(map, &path)?;
+            let (name, bind, with) = self.op_key(map, &path)?;
             let here = format!("{path}.{name}");
             if CONSTRUCTS.contains(&name) {
                 return Err(LoadError::OnceOnly {
@@ -529,7 +654,17 @@ impl Loader<'_> {
                 });
                 return Ok((pipe, None));
             }
-            if let Some(op) = self.reg.get_stream(name) {
+            if name == CALL {
+                let (op, template) = self.call(&map[CALL], with, &path, &scope)?;
+                item = op.spec.returns.clone();
+                pipe.push(PipeStep {
+                    path,
+                    kind: PipeKind::Map {
+                        op,
+                        settings: template,
+                    },
+                });
+            } else if let Some(op) = self.reg.get_stream(name) {
                 let bad = |problem: String| LoadError::BadSettings {
                     path: here.clone(),
                     operator: name.into(),
@@ -707,6 +842,28 @@ impl Loader<'_> {
                     }
                     catch.insert(code.clone(), self.block(b, &p, &err_scope, in_finally)?);
                 }
+                let on_error = match field("on_error") {
+                    Some(_) if !catch.is_empty() => {
+                        return Err(malformed(
+                            here,
+                            "a `try` has `catch` or `on_error`, not both",
+                        ))
+                    }
+                    Some(b) => {
+                        let mut scope = err_scope.clone();
+                        scope.insert(
+                            "error".into(),
+                            Some(
+                                Shape::new()
+                                    .required("code", Ty::Text)
+                                    .required("message", Ty::Text)
+                                    .required("from", Ty::Text),
+                            ),
+                        );
+                        Some(self.block(b, &format!("{here}.on_error"), &scope, in_finally)?)
+                    }
+                    None => None,
+                };
                 let finally = match field("finally") {
                     Some(b) => self.block(b, &format!("{here}.finally"), scope, true)?,
                     None => Vec::new(),
@@ -714,6 +871,7 @@ impl Loader<'_> {
                 Ok(Kind::Try {
                     body,
                     catch,
+                    on_error,
                     finally,
                 })
             }
@@ -791,10 +949,20 @@ fn terminal_step(s: &Step) -> bool {
         Kind::Switch {
             cases, otherwise, ..
         } => otherwise.as_deref().is_some_and(terminal) && cases.values().all(|b| terminal(b)),
-        Kind::Try { body, catch, .. } => terminal(body) && catch.values().all(|b| terminal(b)),
+        Kind::Try {
+            body,
+            catch,
+            on_error,
+            ..
+        } => {
+            terminal(body)
+                && catch.values().all(|b| terminal(b))
+                && on_error.as_deref().is_none_or(terminal)
+        }
     }
 }
 
+#[cfg(feature = "yaml")]
 /// YAML tags (`!include file.yaml`) are how YAML tools splice documents
 /// together. The vine language has none, so any tag is refused.
 fn refuse_tags(v: &serde_yaml::Value) -> Result<(), LoadError> {
