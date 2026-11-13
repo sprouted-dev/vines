@@ -315,3 +315,61 @@ pub fn with(mut base: Value, fields: Value) -> Value {
     }
     base
 }
+
+/// `vines/pipe/job_launch.yaml`, built in Rust.
+pub fn job_launch_pipe() -> vine_lang::pipe::PipeDef {
+    use vine_lang::pipe::{attempt, branch, call, emit_with, pipe, tap};
+    let job = || Shape::new().required("job", Ty::Id);
+    pipe("job_launch")
+        .input(
+            job()
+                .required("plan_branch", Ty::Text)
+                .required("brief", Ty::Text),
+        )
+        .output(
+            "started",
+            job()
+                .required("session", Ty::Text)
+                .required("tree", Ty::Text),
+        )
+        .output("failed", job().required("reason", Ty::Text))
+        .stages([attempt(
+            [
+                tap(
+                    "git.refresh_branch",
+                    json!({ "branch": "$item.plan_branch" }),
+                ),
+                call(
+                    "git.worktree_add",
+                    json!({ "name": "$item.job", "from": "$item.plan_branch" }),
+                )
+                .into("tree"),
+                call(
+                    "agent.start",
+                    json!({ "dir": "$item.tree.path", "brief": "$item.brief" }),
+                )
+                .into("session"),
+                emit_with(
+                    "started",
+                    json!({ "job": "$item.job", "session": "$item.session.id", "tree": "$item.tree.path" }),
+                ),
+            ],
+            [
+                branch(
+                    "$item.error.from",
+                    [(
+                        "agent.start",
+                        [tap(
+                            "git.worktree_remove",
+                            json!({ "path": "$item.tree.path" }),
+                        )],
+                    )],
+                    None,
+                ),
+                emit_with(
+                    "failed",
+                    json!({ "job": "$item.job", "reason": "$item.error.message" }),
+                ),
+            ],
+        )])
+}

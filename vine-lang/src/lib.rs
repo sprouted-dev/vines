@@ -27,6 +27,7 @@
 pub mod def;
 pub mod error;
 pub mod expr;
+pub mod pipe;
 pub mod registry;
 pub mod run;
 pub mod shape;
@@ -34,6 +35,7 @@ pub mod stream;
 pub mod vine;
 
 pub use error::{LoadError, RegistryError, RunError};
+pub use pipe::Pipe;
 pub use registry::{OpContext, OpError, OperatorSpec, Registry};
 pub use run::Output;
 pub use shape::{Shape, Ty};

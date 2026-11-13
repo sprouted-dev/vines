@@ -125,6 +125,8 @@ pub enum RunError {
         message: String,
         masked: String,
     },
+    #[error("{path}: {problem}")]
+    ItemMisfit { path: String, problem: String },
     #[error("cannot resume from this checkpoint: {0}")]
     ResumeMisfit(String),
     #[error("{path}: stream operator `{operator}` was woken but its deadline is still due; `wake` must clear or move it")]

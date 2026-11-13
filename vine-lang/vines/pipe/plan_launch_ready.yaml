@@ -1,0 +1,15 @@
+# For each of a plan's jobs that can be launched now, emit one
+# `launch_wanted`. A job can be launched when it is ready, waits on
+# nothing, and has not been asked for yet. A plan with no such job emits
+# nothing.
+vine: plan_launch_ready
+input: { plan: id, jobs: list }
+outputs:
+  launch_wanted: { plan: id, job: id }
+pipe:
+  - split: $item.jobs
+    into: job
+  - filter: $item.job.state == "ready"
+  - filter: $item.job.waiting_on == 0
+  - filter: $item.job.asked == false
+  - emit: { to: launch_wanted, with: { plan: $item.plan, job: $item.job.id } }

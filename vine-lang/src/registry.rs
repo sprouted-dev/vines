@@ -134,6 +134,11 @@ pub(crate) const EACH: &str = "each";
 /// The step that runs a named act: `call: git.worktree_add`.
 pub(crate) const CALL: &str = "call";
 
+/// The words of the pipe model. No operator may take one.
+pub(crate) const PIPE_WORDS: &[&str] = &[
+    "tap", "split", "filter", "take", "together", "attempt", "branch", "emit", "with", "into",
+];
+
 /// Keys that would pull another vine or a piece of one into this one.
 /// Refused at the top level and as step keys, and never registrable.
 pub(crate) const COMPOSITION_WORDS: &[&str] = &[
@@ -288,6 +293,7 @@ impl Registry {
         if CONSTRUCTS.contains(&name)
             || name == EACH
             || name == CALL
+            || PIPE_WORDS.contains(&name)
             || COMPOSITION_WORDS.contains(&name)
         {
             return Err(RegistryError::Reserved(name.into()));
@@ -372,6 +378,17 @@ impl Registry {
     #[cfg(feature = "yaml")]
     pub fn load(&self, yaml: &str) -> Result<Vine, LoadError> {
         crate::vine::load(self, yaml)
+    }
+
+    /// Check a vine built as a pipe in Rust and return it ready to run.
+    pub fn build_pipe(&self, def: crate::pipe::PipeDef) -> Result<crate::pipe::Pipe, LoadError> {
+        crate::pipe::assemble(self, def)
+    }
+
+    /// Check a vine written as a pipe in YAML and return it ready to run.
+    #[cfg(feature = "yaml")]
+    pub fn load_pipe(&self, yaml: &str) -> Result<crate::pipe::Pipe, LoadError> {
+        crate::pipe::load(self, yaml)
     }
 
     /// Check a vine built in Rust and return it ready to run.
