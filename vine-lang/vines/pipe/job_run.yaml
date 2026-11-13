@@ -1,0 +1,58 @@
+# Run a job from start to end in one vine: make a working copy, run the
+# agent in it, pass on each line the agent writes, commit if the agent
+# finished, and always remove the working copy.
+#
+# `agent.run` is a stream act. It gives one item per line and then its
+# end, `{ status, lines }`. `end: ended` makes that end one last item,
+# with `ended` and no `line`. So a run with no lines still ends.
+#
+# Run it with `run_saved` and keep what it hands you to save. After a
+# restart, run it again with the same input and what you saved. It does
+# not make a second working copy, it attaches to the same agent session,
+# and it hands out no line twice.
+vine: job_run
+input: { job: id, plan_branch: text, brief: text }
+outputs:
+  log_line: { job: id, seq: int, text: text }
+  summary: { job: id, lines: int, text: text }
+  implemented: { job: id, commit: text }
+  stopped: { job: id, reason: text }
+  failed: { job: id, reason: text }
+pipe:
+  - call: git.worktree_add
+    with: { name: $item.job, from: $item.plan_branch }
+    into: tree
+  - call: agent.run
+    with: { key: $item.job, dir: $item.tree.path, brief: $item.brief }
+    into: line
+    end: ended
+  # Each item also goes down these side pipes. The end item has no line.
+  - fork:
+      - - filter: $item.line
+        - emit: { to: log_line, with: { job: $item.job, seq: $item.line.seq, text: $item.line.text } }
+      - - filter: $item.line
+        # 50 lines at a time, and what is left when the agent ends.
+        - collect: { size: 50 }
+          into: batch
+        - summarize: { items: $item.batch.items }
+          into: summary
+        - emit: { to: summary, with: { job: $item.job, lines: $item.line.seq, text: $item.summary.text } }
+  # When the agent's stream ends, only its end item goes on.
+  - last
+  - branch:
+      on: $item.ended.status
+      cases:
+        finished:
+          - call: git.commit
+            with: { dir: $item.tree.path, message: $item.job }
+            into: commit
+          - emit: { to: implemented, with: { job: $item.job, commit: $item.commit.sha } }
+      else:
+        - emit: { to: stopped, with: { job: $item.job, reason: $item.ended.status } }
+  - catch:
+      - emit: { to: failed, with: { job: $item.job, reason: $item.error.message } }
+  # `finalize` sees the item as it arrived, before `tree` was added, so it
+  # removes the working copy by the name it was made with.
+  - finalize:
+      - tap: git.worktree_remove
+        with: { name: $item.job }

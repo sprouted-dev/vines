@@ -4,6 +4,8 @@
 //! name. Here the "outside" is a `World` in memory.
 #![allow(dead_code)]
 
+pub mod agent;
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
 
@@ -56,6 +58,16 @@ impl World {
     pub fn when(&self, act: &str, hook: impl Fn() + Send + Sync + 'static) {
         let mut s = self.state.lock().unwrap();
         s.hooks.insert(act.into(), Arc::new(hook));
+    }
+
+    /// Add a line to the log without running an act.
+    pub fn note(&self, line: String) {
+        self.state.lock().unwrap().log.push(line);
+    }
+
+    /// How many lines of the log start with `prefix`.
+    pub fn count(&self, prefix: &str) -> usize {
+        self.log().iter().filter(|l| l.starts_with(prefix)).count()
     }
 
     fn run(&self, act: &str, detail: &str) -> Result<(), OpError> {
@@ -141,15 +153,26 @@ pub fn registry(world: &Arc<World>) -> Registry {
     )
     .unwrap();
 
+    // Remove a working copy by its path, or by the name it was made with.
+    // Removing one that is not there is not a failure, so it is safe to
+    // run twice.
     let w = world.clone();
     reg.register_act(
         OperatorSpec::new("git.worktree_remove")
-            .settings(Shape::new().required("path", Ty::Text))
+            .settings(
+                Shape::new()
+                    .optional("path", Ty::Text)
+                    .optional("name", Ty::Text),
+            )
             .touches(["git"]),
         move |v, _cx| {
             let w = w.clone();
             async move {
-                let path = text(&v, "path");
+                let path = match (v["path"].as_str(), v["name"].as_str()) {
+                    (Some(path), _) => path.to_owned(),
+                    (None, Some(name)) => format!("/trees/{name}"),
+                    (None, None) => return Err(OpError::new("bad_input", "give `path` or `name`")),
+                };
                 w.run("git.worktree_remove", &path)?;
                 w.state.lock().unwrap().trees.remove(&path);
                 Ok(json!({}))

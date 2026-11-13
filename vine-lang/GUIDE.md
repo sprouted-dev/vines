@@ -32,7 +32,15 @@ The stages are in `src/pipe.rs`. Worked examples are in `vines/pipe/`.
 
 **Say `take: 1` when a vine must give exactly one answer.** A vine may emit none, one or many. If the caller needs one, the vine says so itself.
 
-**Start long work and move on.** An agent run takes hours. Start it with one act, emit `started`, and let a second vine pick up when the session ends. `job_launch` and `job_session_ended` are that pair.
+**Treat long work that reports as it goes as a stream.** An agent run takes hours and writes lines as it works. Register it as a stream act. `call` on it gives one item per line, and `end: ended` adds one last item that says how it ended. `job_run` makes the working copy, runs the agent, and commits, all in one vine. See `vines/pipe/job_run.yaml`.
+
+**Run a vine that holds long work with `run_saved`, and save every entry it hands you.** Save each entry in order, before you read the next event. After a restart, run the vine again with the same input and the journal you saved. Acts that finished are not run again. A stream act is asked to go on from where it was, so it must start the work the first time and attach to it after that. Outputs you were already handed are not handed out again, as long as you saved the entry that came after each one.
+
+**Start long work and move on when it does not report as it goes.** If the work gives no stream to attach to, start it with one act, emit `started`, and let a second vine pick up when it ends. `job_launch` and `job_session_ended` are that pair.
+
+**Use `fork` to do more than one thing with each item.** Each item goes down every side pipe, then on down the main pipe. A side pipe sees the whole stream, so `collect` and `last` work in it. Write `filter: $item.line` first in a side pipe that should skip a stream act's end item.
+
+**Use `last` to wait for the end of a stream, and `collect` to batch it.** `collect: { size: 50 }` gives `{ items, count }`, and what is left when the stream ends. With `into: batch` the item is the last one of the batch, so you keep its fields.
 
 **Use `together` for quick acts that do not depend on each other.** They run side by side and the pipe goes on when all are done. Each one needs its own `into`.
 
@@ -57,7 +65,7 @@ The stages are in `src/pipe.rs`. Worked examples are in `vines/pipe/`.
 
 **Don't write a workflow step as an operator or an act.** `git.worktree_add` is an act. `prepare_job_workspace` is a workflow step, and a workflow step is a vine. The test: could a different workflow use it unchanged?
 
-**Don't wait on long work.** No stage should hold an item for hours. `together` and `each` are for quick acts.
+**Don't wait on long work that is not a stream act.** No other stage should hold an item for hours. `together`, `each`, `retry` and `timeout` are for quick acts. `retry` and `timeout` hold what the stages they cover give until those stages are done.
 
 **Don't use `switch` or `exhaust` around work that must finish.** `switch` drops a run partway through. If that run had made a working copy, nothing removes it. Use them for work that is safe to abandon.
 
@@ -68,6 +76,14 @@ The stages are in `src/pipe.rs`. Worked examples are in `vines/pipe/`.
 **Don't rely on `else` to hide a mistake.** A `branch` with no matching case passes the item through unchanged. If every item must be handled, give the branch an `else` and the checker will hold you to it.
 
 **Don't put `take`, or an `each` that merges, switches or exhausts, before a covering stage.** Those work across the whole stream, and a covering stage works one item at a time. The checker refuses it. Put the stream-wide stage after.
+
+**Know what "the end" means before a covering stage.** A covering stage runs the stages before it once for each item. So there, `last` and `collect` see the end of that one item's own stream, such as one agent run. That is what `job_run` wants. They need a stage before them that makes many items from one, such as `split` or a stream act. Without one they could only ever see one item, and the checker refuses them.
+
+**Don't read what a covered stage added from `finalize`.** `finalize` gets the item as it arrived. `job_run` makes the working copy inside, so its `finalize` removes it by the job's name, not by `$item.tree.path`.
+
+**Don't expect `finalize` to run when the caller drops a run.** A dropped run leaves its working copy, and its agent goes on with nobody reading. Resume it from the journal, or clean up from outside.
+
+**Don't use `run_saved` on a vine that cannot replay in one order.** A replay calls the acts in the same order as the first run. `each` that merges, switches or exhausts, and `timeout`, break that, so `run_saved` refuses such a vine. Resume the same vine with the same input: the journal is keyed by where each act stands in the pipe.
 
 **Don't emit from `finalize`.** It is for cleanup. The checker refuses it.
 
@@ -87,16 +103,25 @@ The stages are in `src/pipe.rs`. Worked examples are in `vines/pipe/`.
 - An output nobody declared, or a payload that cannot fit it.
 - A path through the pipe that could end without emitting.
 - A stage that can never run because everything before it already emitted.
+- `fork` with no side pipe, an emit in a side pipe to an output nobody declared, and a `finalize` that holds a fork that emits. An emit in a side pipe does not count as the main pipe emitting.
+- `collect` with a size of 0.
+- `last` or `collect` where they could only ever see one item.
+- `tap` on a stream act, a stream act inside `together`, and `end` on an act that is not a stream act.
 
 ## What it does not catch
 
 - A field read from an item whose shape is not known at that point. After `split` with no `into`, inside `catch` and `finalize`, and after `each`, `use`, `branch` or any covering stage, the checker no longer knows the item's fields. A misspelt field reads as nothing.
 - A `branch` case that is misspelt. It never matches.
 - An act that lies about what it touches.
+- A stream act that does not go on from `resume_from`. A replay trusts it to.
+- A journal saved for a different vine. A saved act whose input no longer matches is a run error, and so is an output the replay does not make again. Anything else is not checked.
 
 ## Not built yet
 
-- Saved positions, memory across a restart, and resuming after a crash.
+- Resuming a vine with `each` that merges, switches or exhausts, or with `timeout`.
+- Making a journal smaller. It only grows: every line an agent writes is in it.
+- Telling a stream act that the run stopped reading. Dropping a run, or a `catch` that drops the rest of an item's work, leaves the stream act's work going.
+- `retry` waits again on replay, even when the attempts it waits for are saved.
 - Waiting stages such as `debounce`, and `take_until` to stop work when a cancel arrives.
 - `finalize` when the caller drops the stream partway.
 - A name for the reach each stage uses, such as "GitHub as reviewer".
