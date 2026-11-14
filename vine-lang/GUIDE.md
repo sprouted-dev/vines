@@ -26,7 +26,18 @@ The stages are in `src/pipe/`. Worked examples are in `vines/pipe/`.
 
 **Order the covering stages by what each should see.** `catch`, `finalize`, `retry` and `timeout` each cover everything before them in their pipe. So `retry` then `catch` means "try three times, then handle the failure". `catch` then `retry` means the retry never sees a failure, because the catch already handled it.
 
-**Give `retry` a wait, and a `timeout` to anything that can hang.** A timeout fails the item with the code `timeout`, and a `catch` after it can handle that like any other failure.
+**Give `retry` a wait, and a `timeout` to anything that can hang.** A timeout fails the item with the code `timeout`, and a `catch` after it can handle that like any other failure. The `catch` gets the item as it reached the stages the timeout covers, not as it was partway through them, so undo by what the input names: `job_launch` removes the working copy by the job's name. See `vines/pipe/job_launch.yaml`.
+
+**Resume a vine with a `timeout` as any other.** A saved run saves what the clock decided for each run of the stages a timeout covers, before anything that depends on it, so a replay never asks the clock again. What you can rely on, with `run_saved` and with `run_from`, inside an `each` that merges, inside a vine run by `use`, and with `catch` or `retry` before or after the timeout:
+
+- A timeout that fired before the restart fires again at once. The stages it covered are not run again, so no act they had done is done again, and none they were doing is started again. A `catch` after it goes down the same branch.
+- A timeout whose stages were done in time before the restart is replayed as done, with no limit, even when the replay is slower, as a stream act asked to go on can be.
+- What the covered stages emit is held until they are done, and dropped if the timeout fires. Outputs keep their ids across a restart.
+- Each run of the covered stages keeps one line for its decision. With `run_from` it is dropped with the item's other lines when the position passes the item.
+
+**Know the rule for a restart before the timeout decided.** If the run stopped while the covered stages were still going, the wait starts again from nothing when the run resumes, and the stages get the whole limit again. Work whose results were saved replays at once and does not count against it. The library has no clock that runs across a restart, so it does not try to honour the time already spent. So after such a restart, the covered stages can finish in time where the first run would have timed out, or reach acts the first run never reached. Nothing you were handed depended on the decision, so this is a run at another pace, not a contradiction. If the work must not get more time than the limit in total, put the limit in the act itself.
+
+**Expect an act in flight when a timeout fires to be dropped, not stopped.** The run stops waiting for it and never saves its result, and a replay does not call it again. But the library does not tell the act. An act that already reached outside, such as a request to start an agent, can still have its effect, and a stream act's work goes on with nobody reading. Make the `catch` after the timeout undo what such an act may have done, and make the act safe to have half run.
 
 **Nest a vine that a move starts by pressing its move.** `plan_launch_all` launches each job with `call: move.launch`, not `use: job_launch`. The host checks the job's gates, builds `job_launch`'s input from the job's facts, and lands each output as an event before your vine hears of it. So you pass only what the move's payload takes, and the work stays visible: another vine can react to every event. The act gives one item per inner output, `{ output, event, landed, payload }`, and ends with `{ status }`: `done`, `failed` with a `reason`, or `refused` with the `gate` that refused it. A refusal is data to branch on, not a failure, so the other jobs go on. `plan_launch_all` launches two jobs at once, with `each` and `overlap: merge, at_once: 2`. Pass your own `request` through: the host builds each inner press's id from it, so after a restart the same press attaches to the first. See `vines/pipe/plan_launch_all.yaml`.
 
@@ -108,7 +119,9 @@ The stages are in `src/pipe/`. Worked examples are in `vines/pipe/`.
 
 **Don't expect `finalize` to run when the caller drops a run.** A dropped run leaves its working copy, and its agent goes on with nobody reading. Resume it from the journal, or clean up from outside.
 
-**Don't use `run_saved` on a vine that depends on time.** `each` that switches or exhausts drops or skips work by when items arrive, and `timeout` fails by how long work took. A replay cannot know either, so `run_saved` and `run_from` refuse such a vine. Resume the same vine with the same input: the journal is keyed by where each act stands in the pipe, and inside a merging `each` by which item it was.
+**Don't use `run_saved` on a vine with an `each` that switches or exhausts.** It drops or skips work by when items arrive, and a replay cannot know when they did, so `run_saved` and `run_from` refuse such a vine. Resume the same vine with the same input: the journal is keyed by where each act stands in the pipe, inside a merging `each` by which item it was, and under a `timeout` by which run of its stages it was.
+
+**Don't resume a journal saved before you added a `timeout`.** The acts a timeout covers are keyed by its runs, so a journal saved by the vine without it names them in a way the vine no longer asks for. `run_saved` and `run_from` refuse it with `ReplayMisfit` before any act runs. Let such a run finish on the old vine, or start it again.
 
 **Don't use `run_from` on a vine that counts the whole stream.** A `take` over the whole stream would count from nothing again after a restart. A vine that ends itself has an end: run it with `run_saved`. `take` inside `each`, or before a covering stage, counts one item's own stream and is fine.
 
@@ -151,7 +164,8 @@ The stages are in `src/pipe/`. Worked examples are in `vines/pipe/`.
 - `last` or `collect` where they could only ever see one item.
 - `tap` on a stream act, a stream act inside `together`, and `end` on an act that is not a stream act.
 - A stream act that gives its items again, where a later item could not rebuild what comes after it: a `take` that its items reach, a `collect` that could mix two calls, or a `retry` over it. The call is saved item by item, and `Pipe::saves_every_item` says where and why. A vine that refuses this for a vine it runs by `use` cannot be resumed.
-- For both ways to resume: `each` that switches or exhausts, `timeout`, `take` or `collect` after a merging `each` (in a side pipe too), an act on the item `last` picked after one, and a `catch` or `finalize` that covers one at any depth. `Pipe::resumable` says so, and the run gives `NotResumable` with the reason and the stage's path.
+- For both ways to resume: `each` that switches or exhausts, `take` or `collect` after a merging `each` (in a side pipe too), an act on the item `last` picked after one, and a `catch` or `finalize` that covers one at any depth. `Pipe::resumable` says so, and the run gives `NotResumable` with the reason and the stage's path. A `timeout` is not refused.
+- A journal or bookmark that holds an act a `timeout` covers, saved with no run of that timeout in its key: it was saved before the timeout was added. The run gives `ReplayMisfit` before any act runs.
 - For `run_from`, besides what `run_saved` refuses: `take` over the whole stream, and `collect` over the whole stream after a stage that makes many items from one. `Pipe::resumable_from_position` says so, and `run_from` gives `NotResumable` with the reason and the stage's path.
 
 ## What it does not catch
@@ -162,13 +176,16 @@ The stages are in `src/pipe/`. Worked examples are in `vines/pipe/`.
 - A stream act that does not go on from `resume_from`. A replay trusts it to.
 - A stream act that says it gives its items again and gives other items. A run sees only an act that stops after fewer items than it gave before it stopped. Outputs handed out before a restart are skipped by count, so an act that gives other items can hand out a different output in place of one already handed.
 - Whether an id you hold was made by this run. Ids say where an output stands, not which run or vine made it: two runs give the same ids. Keep them apart with your own key for the run.
+- A timeout's saved decision used for another item. The decision is not checked against the item, so a journal saved for other input can fail an item at once that would have been in time.
 - A journal saved for a different vine. A saved act whose input no longer matches is a run error, and so is an output the replay does not make again. Anything else is not checked.
 - An output emitted from the item `last` picked after a `merge`, when the item matters. After a restart it can be another item's. An output in the window between being handed out and its line being saved comes again, and from such a `last` it can come with another item's fields, under the same id.
 - A `use` of a vine that a move starts, or moves that start each other in a loop. The library knows no moves. The host checks both when it installs a package of vines, from `Pipe::uses` and `Pipe::acts`.
 
 ## Not built yet
 
-- Resuming a vine with `each` that switches or exhausts, or with `timeout`, in either mode. They would need the run to save what time decided: which item a switch dropped and how far it got, which items an exhaust ignored, and when a timeout's clock started.
+- Resuming a vine with `each` that switches or exhausts, in either mode. They would need the run to save what time decided: which item a switch dropped and how far it got, and which items an exhaust ignored.
+- A timeout that honours, after a restart, the time its stages had already taken. It would need a clock that runs across a restart, which the library does not have.
+- Telling an act that a timeout stopped waiting for it.
 - Making a journal smaller for a stream act that cannot give its items again. Every item it gives is saved until its input item is done.
 - A position for a stage that keeps a count or a running total across events. Such state needs to be saved itself, as the older runner's `Memory::Kept` did.
 - Telling a stream act that the run stopped reading. Dropping a run, or a `catch` that drops the rest of an item's work, leaves the stream act's work going.

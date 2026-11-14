@@ -156,9 +156,15 @@
 //! The checker refuses, for both ways to resume, what a replay in another
 //! order could not rebuild: `take` or `collect` after a merging `each`, an
 //! act on the value `last` picked after one, and a `catch` or `finalize`
-//! that covers one. `each` that switches or exhausts, and `timeout`, depend
-//! on time, not on order, and are refused too. The rules are in
-//! `order.rs`.
+//! that covers one. `each` that switches or exhausts depends on time, not
+//! on order, and is refused too. The rules are in `order.rs`.
+//!
+//! A `timeout` depends on time too, but what it decides is saved: each run
+//! of the stages it covers is a scope of its own, and the run saves
+//! [`Entry::Timed`](crate::Entry::Timed) before anything that depends on
+//! the decision. A replay takes the decision and does not ask the clock.
+//! With no decision saved, the wait starts again from nothing. See
+//! `timer.rs`.
 //!
 //! # Endless streams: a saved position
 //!
@@ -190,8 +196,8 @@
 //!
 //! [`Pipe::resumable_from_position`] says whether a vine can run this way.
 //! `last` and `collect` over whole items, `fork`, `catch`, `finalize`,
-//! `retry`, `each` with `concat` or `merge`, `use`, `branch` and stream
-//! acts all can.
+//! `retry`, `timeout`, `each` with `concat` or `merge`, `use`, `branch`
+//! and stream acts all can.
 //!
 //! Under an `each` that merges, an input item can be done before an
 //! earlier one. The run gives [`Progress::Done`] for it, the caller's
@@ -790,8 +796,9 @@ impl Pipe {
     /// Under an `each` that merges, an output whose line was not saved can
     /// come again after other values' new outputs, not only first.
     ///
-    /// A vine that depends on time, or that counts or batches values in
-    /// the order a merging `each` finishes them, cannot be resumed: the
+    /// A vine with an `each` that switches or exhausts, or that counts or
+    /// batches values in the order a merging `each` finishes them, cannot
+    /// be resumed: the
     /// run gives one [`RunError::NotResumable`] and ends.
     /// [`Pipe::resumable`] says so before you run it.
     pub fn run_saved<S>(

@@ -29,6 +29,11 @@
 //! leave the `each` keep the group's tag, so the stages after it key their
 //! acts by group too, until `last` picks one value out of many groups and
 //! [lifts](Tag::lifted) it back out.
+//!
+//! Each run of the stages a `timeout` covers is a group too, such as
+//! `pipe[3].timeout@0/`, numbered in the order values reach the `timeout`.
+//! A replay of a run that timed out skips its stages, and the keys of every
+//! other run stay where they were.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::{Arc, Mutex};
