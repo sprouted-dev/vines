@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# Fast gates before a commit: formatting and clippy. `just preflight` is the
+# full gate before a push. Enable with `just install-hooks`.
+set -euo pipefail
+just fmt-check
+just clippy
