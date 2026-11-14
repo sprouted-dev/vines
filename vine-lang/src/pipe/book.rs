@@ -57,9 +57,17 @@ pub(super) struct Book {
     pub(super) fresh: VecDeque<Line>,
     /// The outputs the caller was already handed, oldest first, per input
     /// item and per group of work: the scope the output was made in.
-    handed: HashMap<(u64, String), VecDeque<String>>,
+    handed: HashMap<(u64, String), VecDeque<Handed>>,
     /// For each stream act call that gives its items again: how far it got.
     calls: HashMap<Key, CallState>,
+}
+
+/// One output the caller was handed before a restart.
+struct Handed {
+    output: String,
+    /// The item of a stream act call it was made from, when `last` lifted
+    /// it out of its groups.
+    from: Option<String>,
 }
 
 /// How far one call of a stream act that gives its items again got.
@@ -223,11 +231,18 @@ impl Book {
                     ))
                 }
             },
-            Entry::Emitted { output, within } => self
+            Entry::Emitted {
+                output,
+                within,
+                from,
+            } => self
                 .handed
                 .entry((item, within.clone().unwrap_or_default()))
                 .or_default()
-                .push_back(output.clone()),
+                .push_back(Handed {
+                    output: output.clone(),
+                    from: from.clone(),
+                }),
             Entry::Through { at, items, handed } => match self.position_of(key(at)) {
                 Some(Saved::Position {
                     through,
@@ -238,9 +253,14 @@ impl Book {
                     *was = *handed;
                     // Outputs made in groups within the items it passed
                     // are never made again.
-                    self.handed.retain(|(of, within), _| {
-                        *of != item || item_of_stream(within, at).is_none_or(|n| n > *items)
-                    });
+                    let passed = |scope: &str| item_of_stream(scope, at).is_some_and(|n| n <= *items);
+                    self.handed
+                        .retain(|(of, within), _| *of != item || !passed(within));
+                    for ((of, _), queue) in &mut self.handed {
+                        if *of == item {
+                            queue.retain(|h| !h.from.as_deref().is_some_and(passed));
+                        }
+                    }
                 }
                 _ => {
                     return Err(format!(
@@ -350,14 +370,15 @@ impl Book {
             .get_mut(&(item, within.to_owned()))
             .and_then(VecDeque::pop_front);
         match before {
-            Some(was) if was == name => Handing::Before,
-            Some(was) => Handing::Misfit(was),
+            Some(was) if was.output == name => Handing::Before,
+            Some(was) => Handing::Misfit(was.output),
             None => {
                 self.fresh.push_back(Line {
                     item,
                     entry: Entry::Emitted {
                         output: name.to_owned(),
                         within: (!within.is_empty()).then(|| within.to_owned()),
+                        from: tag.stream_item().map(str::to_owned),
                     },
                 });
                 Handing::Fresh

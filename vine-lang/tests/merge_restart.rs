@@ -136,6 +136,7 @@ async fn each_groups_acts_and_outputs_are_keyed_by_the_order_jobs_go_in() {
             Entry::Emitted {
                 output,
                 within: Some(within),
+                ..
             } => Some((within.clone(), output.clone())),
             _ => None,
         })
@@ -177,7 +178,18 @@ async fn with_items_side_by_side_no_act_starts_before_every_result_so_far_was_ha
     for secs in [0, 1] {
         let desk = Desk::new();
         let input = vec![jobs(&[("a", secs), ("b", secs), ("c", secs), ("d", secs)])];
-        let vine = built(&desk, merging(Some(3)));
+        // No output between the two steps, so nothing else stops a job's
+        // second step from starting as soon as its first is done.
+        let def = jobs_vine([each_job(
+            Overlap::Merge,
+            Some(3),
+            vec![
+                step("one", json!("$item.job.secs")),
+                step("two", json!("$item.job.secs")),
+                emit_with("done", json!({ "id": "$item.job.id" })),
+            ],
+        )]);
+        let vine = built(&desk, def);
         let mut run = vine.run_saved(stream::iter(input), Journal::new());
         while let Some(event) = run.next().await {
             if let Event::Save(Entry::Done { .. }) = event.unwrap() {
@@ -189,7 +201,9 @@ async fn with_items_side_by_side_no_act_starts_before_every_result_so_far_was_ha
         for (finished, handed) in &starts {
             assert_eq!(finished, handed, "{secs}s steps: {starts:?}");
         }
-        assert!(desk.most_at_once() > 1, "nothing ran side by side");
+        if secs > 0 {
+            assert_eq!(desk.most_at_once(), 3, "the steps ran side by side");
+        }
     }
 }
 
@@ -227,7 +241,7 @@ async fn sweep_saved(def: impl Fn() -> PipeDef, input: &[Value], bound: usize) -
     let clean_calls = desk.calls();
     let points = events_saved(&clean_vine, input).await;
     let (mut most_again, mut repeats) = (0, 0);
-    for k in 1..points {
+    for k in 1..=points {
         let desk = Desk::new();
         let mut keeper = Keeper::new();
         repeats += run_saved_with_kills_where(
@@ -368,7 +382,7 @@ async fn a_catch_inside_the_each_keeps_the_others_going_through_every_kill() {
     let failing = Desk::new();
     failing.fail("a", "one");
     let points = events_saved(&built(&failing, def()), &input).await;
-    for k in 1..points {
+    for k in 1..=points {
         let desk = Desk::new();
         desk.fail("a", "one");
         let mut keeper = Keeper::new();
@@ -440,7 +454,7 @@ async fn a_stream_act_inside_a_merge_resumes_from_its_position_at_every_kill() {
     let clean = outputs_saved(&built(&desk, lines_inside(2)), &input).await;
     let points = events_saved(&built(&desk, lines_inside(2)), &input).await;
     let mut resumed = 0;
-    for k in 1..points {
+    for k in 1..=points {
         let desk = Desk::new();
         let mut keeper = Keeper::new();
         run_saved_with_kills_where(
@@ -500,7 +514,7 @@ async fn a_merge_after_a_stream_act_saved_by_position_stays_small_and_resumes() 
     let small = vec![jobs(&[("a", 3), ("b", 2)])];
     let clean = outputs_saved(&built(&desk, def()), &small).await;
     let points = events_saved(&built(&desk, def()), &small).await;
-    for k in 1..points {
+    for k in 1..=points {
         let desk = Desk::new();
         let mut keeper = Keeper::new();
         run_saved_with_kills_where(
@@ -541,12 +555,70 @@ async fn last_after_a_merge_gives_one_summary_after_every_job_at_every_kill() {
     let clean = outputs_saved(&built(&desk, summed()), &three()).await;
     assert_eq!(names(&clean).last().map(String::as_str), Some("all "));
     let points = events_saved(&built(&desk, summed()), &three()).await;
-    for k in 1..points {
+    for k in 1..=points {
         let desk = Desk::new();
         let mut keeper = Keeper::new();
         run_saved_with_kills_where(
             || built(&desk, summed()),
             &three(),
+            &mut keeper,
+            &[k],
+            Repeat::Later,
+        )
+        .await;
+        assert_eq!(sorted(&keeper.outs), sorted(&clean), "kill at {k}");
+        assert_eq!(keeper.outs.last(), clean.last(), "kill at {k}");
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn last_after_a_merge_of_stream_acts_saved_by_position_gives_one_summary_at_every_kill() {
+    // `last` picks an end item of a call saved by position. Once the
+    // call's position passes it, that item is never given again, so the
+    // record of the summary made from it must go with it.
+    let def = || {
+        jobs_vine([
+            each_job(
+                Overlap::Merge,
+                Some(2),
+                vec![
+                    call(
+                        "work.lines",
+                        json!({ "id": "$item.job.id", "lines": "$item.job.secs" }),
+                    )
+                    .into("line")
+                    .end("ended"),
+                    fork([[
+                        vine_lang::pipe::filter("$item.line"),
+                        emit_with(
+                            "line",
+                            json!({ "id": "$item.job.id", "line": "$item.line.line" }),
+                        ),
+                    ]]),
+                    vine_lang::pipe::filter("$item.ended"),
+                ],
+            ),
+            last(),
+            emit_with("all", json!({ "jobs": "$item.jobs" })),
+        ])
+    };
+    let desk = Desk::new();
+    let vine = built(&desk, def());
+    assert!(
+        vine.saves_every_item().is_empty(),
+        "{:?}",
+        vine.saves_every_item()
+    );
+    let input = vec![jobs(&[("a", 3), ("b", 1), ("c", 2)])];
+    let clean = outputs_saved(&vine, &input).await;
+    assert_eq!(names(&clean).last().map(String::as_str), Some("all "));
+    let points = events_saved(&vine, &input).await;
+    for k in 1..=points {
+        let desk = Desk::new();
+        let mut keeper = Keeper::new();
+        run_saved_with_kills_where(
+            || built(&desk, def()),
+            &input,
             &mut keeper,
             &[k],
             Repeat::Later,
@@ -623,7 +695,7 @@ async fn a_run_from_a_bookmark_skips_items_done_past_its_position() {
     // Stop once e2 to e4 are done and e1 is still running.
     let points = events_in(&vine, &input).await;
     let mut kill = None;
-    for k in 1..points {
+    for k in 1..=points {
         let mut probe = Caller::new();
         acts::restart::run(
             &built(&Desk::new(), stream_vine(2)),
@@ -658,7 +730,7 @@ async fn a_kill_at_every_point_of_a_run_from_a_position_ends_as_an_uninterrupted
     acts::restart::run(&built(&desk, stream_vine(2)), &input, &mut clean, None).await;
     let clean_calls = desk.calls();
     let points = events_in(&built(&desk, stream_vine(2)), &input).await;
-    for k in 1..points {
+    for k in 1..=points {
         for second in [None, Some(3)] {
             let desk = Desk::new();
             let mut caller = Caller::new();

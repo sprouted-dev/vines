@@ -54,6 +54,11 @@ struct Hold {
     group: Option<Arc<str>>,
     /// Where the keys of acts run for this value start.
     scope: Arc<str>,
+    /// For a value `last` lifted out of its groups: the scope of the item
+    /// of a stream act call it was made from, such as `pipe[1]#0@7/`, if
+    /// any. When the call's position passes that item, the value is never
+    /// made again.
+    from: Option<Arc<str>>,
     /// The input item a line for this value belongs to.
     item: u64,
     /// The tag this one was made from: the value a stream act was given,
@@ -92,6 +97,7 @@ impl Tag {
             call: None,
             group: None,
             scope: "".into(),
+            from: None,
             item: n,
             up: Tag::default(),
         })))
@@ -111,6 +117,7 @@ impl Tag {
             call: Some(call.clone()),
             group: None,
             scope: format!("{}@{n}/", call.at).into(),
+            from: None,
             item: call.item,
             up: up.clone(),
         })))
@@ -125,6 +132,7 @@ impl Tag {
             call: None,
             group: Some(site.into()),
             scope: format!("{}{site}@{n}/", up.scope()).into(),
+            from: None,
             item: up.item_number(),
             up: up.clone(),
         })))
@@ -177,6 +185,7 @@ impl Tag {
             call,
             group: None,
             scope,
+            from: None,
             item,
             up: Tag::default(),
         })))
@@ -198,15 +207,31 @@ impl Tag {
         let Some(scope) = outer else {
             return self.clone();
         };
+        let mut from = None;
+        let mut at = self.0.as_ref();
+        while let Some(hold) = at {
+            if hold.call.is_some() {
+                from = Some(hold.scope.clone());
+                break;
+            }
+            at = hold.up.0.as_ref();
+        }
         Tag(Some(Arc::new(Hold {
             count: None,
             parts: Vec::new(),
             call: None,
             group: None,
             scope,
+            from,
             item: self.item_number(),
             up: self.clone(),
         })))
+    }
+
+    /// For a value `last` lifted out of its groups: the scope of the item
+    /// of a stream act call it was made from.
+    pub(super) fn stream_item(&self) -> Option<&str> {
+        self.0.as_ref()?.from.as_deref()
     }
 
     /// Take `other` when this tag holds nothing.

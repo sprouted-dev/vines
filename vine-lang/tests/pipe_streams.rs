@@ -913,6 +913,7 @@ fn every_kind_of_entry_survives_a_trip_through_json() {
         Entry::Emitted {
             output: "out".into(),
             within: None,
+            from: None,
         },
     ]);
     let text = serde_json::to_string(&journal.to_json()).unwrap();
@@ -1228,6 +1229,7 @@ async fn a_journal_that_does_not_fit_the_run_is_a_run_error() {
         vec![Entry::Emitted {
             output: "other".into(),
             within: None,
+            from: None,
         }],
         a(),
     )
@@ -1239,14 +1241,17 @@ async fn a_journal_that_does_not_fit_the_run_is_a_run_error() {
             Entry::Emitted {
                 output: "out".into(),
                 within: None,
+                from: None,
             },
             Entry::Emitted {
                 output: "out".into(),
                 within: None,
+                from: None,
             },
             Entry::Emitted {
                 output: "out".into(),
                 within: None,
+                from: None,
             },
         ],
         a(),

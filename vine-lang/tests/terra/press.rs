@@ -114,9 +114,12 @@ struct Running {
     installed: Arc<Installed>,
     run: BoxStream<'static, Result<RunEvent, RunError>>,
     journal: Journal,
-    /// The output the resumed run gives again first, which was landed and
-    /// given before the crash.
-    repeat: Option<(String, Value)>,
+    /// Outputs landed and given before a crash, whose entries were never
+    /// kept, so the resumed run gives them again. Each is dropped when it
+    /// comes, and forgotten once the entry after it is kept.
+    repeats: Vec<(String, Value)>,
+    /// A repeat the run just gave again, whose entry is not kept yet.
+    skipped: Option<(String, Value)>,
 }
 
 impl Press {
@@ -185,14 +188,10 @@ impl Press {
             }
             return self.finish(Ok(Part::End(end(&End::Done))));
         };
+        let repeats = store.resume(&self.id);
         let accepted = store.accepted(&self.id);
         let journal =
             Journal::from_json(&accepted.journal).expect("the store keeps journals whole");
-        let repeat = accepted
-            .repeat_pending
-            .then(|| accepted.landings.last())
-            .flatten()
-            .map(|l| (l.output.clone(), l.payload.clone()));
         let input = accepted.input.clone();
         drop(store);
         for landing in &landings {
@@ -205,7 +204,8 @@ impl Press {
             installed,
             run: vine.run_saved(stream::iter([input]), journal.clone()),
             journal,
-            repeat,
+            repeats,
+            skipped: None,
         });
     }
 
@@ -236,12 +236,17 @@ impl Press {
         let live = self.live.as_mut().expect("still live");
         live.journal.record(&event);
         let saved = live.journal.to_json();
-        let pending = live.repeat.is_some();
+        if let Some(skipped) = live.skipped.take() {
+            let at = live.repeats.iter().position(|r| *r == skipped);
+            live.repeats
+                .remove(at.expect("a skipped repeat is one still to come"));
+        }
+        let repeats = live.repeats.clone();
         self.inner
             .store
             .lock()
             .unwrap()
-            .keep_journal(&id, saved, pending);
+            .keep_journal(&id, saved, repeats);
         tick(&self.inner, || format!("{id} after {kind}")).await;
     }
 
@@ -249,12 +254,9 @@ impl Press {
     async fn output(&mut self, out: vine_lang::Output) {
         let id = self.id.clone();
         let live = self.live.as_mut().expect("still live");
-        if let Some((output, payload)) = live.repeat.take() {
-            assert_eq!(
-                (out.name.as_str(), &out.payload),
-                (output.as_str(), &payload),
-                "a resumed run gives the output it gave before the crash again first"
-            );
+        let given = (out.name.clone(), out.payload.clone());
+        if live.repeats.contains(&given) && live.skipped.is_none() {
+            live.skipped = Some(given);
             return;
         }
         let installed = live.installed.clone();

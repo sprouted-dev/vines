@@ -125,9 +125,33 @@
 //! stages rebuild what they held, such as a half full batch, because the
 //! same items flow through them again. See [`crate::journal`].
 //!
-//! Replay needs the run to call its acts in the same order every time. So
-//! a vine with `each` that merges, switches or exhausts, or with a
-//! `timeout`, cannot be resumed, and `run_saved` refuses it.
+//! Replay needs each act's key to name the same act every time. Keys
+//! count how many times a stage ran, so a replay must reach each stage in
+//! the same order the first run did. Where an `each` merges, values run
+//! side by side and finish in any order, so each value that enters it
+//! starts a group of work, numbered in the order the values enter, and the
+//! keys and outputs of its work name the group. Each group replays in its
+//! own order. See [`crate::journal`] for the keys.
+//!
+//! So what a caller can rely on with a merging `each`:
+//!
+//! - Within one value's work, outputs come in order, before and after a
+//!   restart.
+//! - Across values, outputs come in the order the work finishes, and after
+//!   a restart that order can differ. Nothing more is promised.
+//! - An act is called only once the caller has been handed every line made
+//!   so far, by any value. Acts already running finish in any order. After
+//!   a crash, the acts that run again are those that had started and whose
+//!   result the caller had not saved: at most one per value running side
+//!   by side (times the widest `together`), so at most `at_once` with a
+//!   cap, plus one result handed out and not saved.
+//!
+//! The checker refuses, for both ways to resume, what a replay in another
+//! order could not rebuild: `take` or `collect` after a merging `each`, an
+//! act on the value `last` picked after one, and a `catch` or `finalize`
+//! that covers one. `each` that switches or exhausts, and `timeout`, depend
+//! on time, not on order, and are refused too. The rules are in
+//! `order.rs`.
 //!
 //! # Endless streams: a saved position
 //!
@@ -159,7 +183,16 @@
 //!
 //! [`Pipe::resumable_from_position`] says whether a vine can run this way.
 //! `last` and `collect` over whole items, `fork`, `catch`, `finalize`,
-//! `retry`, `each` with `concat`, `use`, `branch` and stream acts all can.
+//! `retry`, `each` with `concat` or `merge`, `use`, `branch` and stream
+//! acts all can.
+//!
+//! Under an `each` that merges, an input item can be done before an
+//! earlier one. The run gives [`Progress::Done`] for it, the caller's
+//! bookmark keeps its number and drops its lines, and a run from that
+//! bookmark skips it. The position still moves only past items in order.
+//! So the bookmark holds the lines of the items in flight, at most
+//! `at_once` of them in the `each`, plus runs of numbers. Without
+//! `at_once` every item fed is in flight at once.
 //!
 //! # A stream act that gives its items again
 //!
@@ -735,9 +768,13 @@ impl Pipe {
     /// twice. If the run stops after an output and before you saved the
     /// entry after it, that output comes again.
     ///
-    /// A vine with `each` that merges, switches or exhausts, or with a
-    /// `timeout`, cannot be resumed: the run gives one
-    /// [`RunError::NotResumable`] and ends.
+    /// Under an `each` that merges, an output whose line was not saved can
+    /// come again after other values' new outputs, not only first.
+    ///
+    /// A vine that depends on time, or that counts or batches values in
+    /// the order a merging `each` finishes them, cannot be resumed: the
+    /// run gives one [`RunError::NotResumable`] and ends.
+    /// [`Pipe::resumable`] says so before you run it.
     pub fn run_saved<S>(
         &self,
         input: S,
@@ -772,10 +809,12 @@ impl Pipe {
     ///
     /// Feed it the input items after `bookmark`'s position: for a fresh
     /// start, [`Bookmark::new`] and every item from the first. The run
-    /// numbers them on from there. Besides each [`Progress::Output`], it
-    /// gives [`Progress::Save`] lines and [`Progress::Through`]. Pass each
-    /// one to [`Bookmark::record`], and save the bookmark, before you read
-    /// the next. After a restart, call `run_from` again with the bookmark
+    /// numbers them on from there, and skips the items the bookmark keeps
+    /// as done. Besides each [`Progress::Output`], it gives
+    /// [`Progress::Save`] lines, [`Progress::Through`], and, under an
+    /// `each` that merges, [`Progress::Done`] for an item done before an
+    /// earlier one. Pass each one to [`Bookmark::record`], and save the
+    /// bookmark, before you read the next. After a restart, call `run_from` again with the bookmark
     /// you saved and the input items after its position.
     ///
     /// `Through(n)` says every input item through `n` is fully done: every

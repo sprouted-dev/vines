@@ -592,6 +592,7 @@ async fn a_bookmark_that_does_not_fit_the_vine_or_its_input_is_a_run_error() {
     let other = Entry::Emitted {
         output: "other".into(),
         within: None,
+        from: None,
     };
     let p = misfit(kept(0, vec![(1, other)]), events(1, 1)).await;
     assert!(p.contains("output `other`"), "{p}");
@@ -600,6 +601,7 @@ async fn a_bookmark_that_does_not_fit_the_vine_or_its_input_is_a_run_error() {
     let handed = || Entry::Emitted {
         output: "archived".into(),
         within: None,
+        from: None,
     };
     let p = misfit(kept(0, vec![(1, handed()), (1, handed())]), events(1, 1)).await;
     assert!(p.contains("1 more outputs"), "{p}");
@@ -636,6 +638,7 @@ fn a_bookmark_survives_json_and_one_that_is_not_one_is_refused() {
             Entry::Emitted {
                 output: "out".into(),
                 within: None,
+                from: None,
             },
         )],
     );
@@ -679,6 +682,7 @@ fn recording_the_position_drops_the_lines_it_passed() {
             entry: Entry::Emitted {
                 output: "out".into(),
                 within: None,
+                from: None,
             },
         })
     };

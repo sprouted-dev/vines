@@ -25,7 +25,7 @@ pub(super) enum Request {
         payload: Value,
         refusal: Refusal,
     },
-    Accepted(Accepted),
+    Accepted(Box<Accepted>),
 }
 
 /// A press whose gates held.
@@ -40,9 +40,13 @@ pub(super) struct Accepted {
     /// The vine's journal, as JSON.
     pub(super) journal: Value,
     pub(super) landings: Vec<Landing>,
-    /// The last output landed and the entry after it was not kept, so a
-    /// resumed run gives that output again first.
-    pub(super) repeat_pending: bool,
+    /// The output landed last, while the entry that records it is not
+    /// kept yet. A crash now means the resumed run gives it again.
+    pub(super) unkept: Option<(String, Value)>,
+    /// Outputs landed before a crash whose entries were never kept. The
+    /// resumed run gives each again, not always first: under an `each`
+    /// that merges, other items can give new outputs before it.
+    pub(super) repeats: Vec<(String, Value)>,
     pub(super) end: Option<End>,
 }
 
@@ -175,7 +179,8 @@ impl Store {
         }
         match self.check(id, decl, payload) {
             Ok(accepted) => {
-                self.requests.insert(id.into(), Request::Accepted(accepted));
+                self.requests
+                    .insert(id.into(), Request::Accepted(Box::new(accepted)));
                 Admission::Accepted {
                     landings: Vec::new(),
                     end: None,
@@ -227,18 +232,30 @@ impl Store {
             input,
             journal: json!([]),
             landings: Vec::new(),
-            repeat_pending: false,
+            unkept: None,
+            repeats: Vec::new(),
             end: None,
         })
     }
 
-    /// Keep the journal of request `id` after one more entry. The output
-    /// landed last is safe from repeating once an entry after it is kept,
-    /// unless the run has not yet given it again (`pending`).
-    pub(super) fn keep_journal(&mut self, id: &str, journal: Value, pending: bool) {
+    /// Keep the journal of request `id` after one more entry, and the
+    /// repeats still to come. The entry a run gives right after an output
+    /// records it, so the output landed last is safe from repeating now.
+    pub(super) fn keep_journal(&mut self, id: &str, journal: Value, repeats: Vec<(String, Value)>) {
         let a = self.accepted_mut(id);
         a.journal = journal;
-        a.repeat_pending = pending;
+        a.unkept = None;
+        a.repeats = repeats;
+    }
+
+    /// The outputs a resumed run of request `id` gives again: those of
+    /// earlier crashes, and the one landed last if its entry was not kept.
+    pub(super) fn resume(&mut self, id: &str) -> Vec<(String, Value)> {
+        let a = self.accepted_mut(id);
+        if let Some(unkept) = a.unkept.take() {
+            a.repeats.push(unkept);
+        }
+        a.repeats.clone()
     }
 
     pub(super) fn end(&mut self, id: &str, end: End) {
@@ -305,7 +322,7 @@ impl Store {
         self.events.push(landing.event.clone());
         let a = self.accepted_mut(id);
         a.landings.push(landing.clone());
-        a.repeat_pending = true;
+        a.unkept = Some((landing.output.clone(), landing.payload.clone()));
         landing
     }
 }

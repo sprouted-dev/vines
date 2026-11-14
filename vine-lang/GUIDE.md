@@ -28,7 +28,7 @@ The stages are in `src/pipe/`. Worked examples are in `vines/pipe/`.
 
 **Give `retry` a wait, and a `timeout` to anything that can hang.** A timeout fails the item with the code `timeout`, and a `catch` after it can handle that like any other failure.
 
-**Nest a vine that a move starts by pressing its move.** `plan_launch_all` launches each job with `call: move.launch`, not `use: job_launch`. The host checks the job's gates, builds `job_launch`'s input from the job's facts, and lands each output as an event before your vine hears of it. So you pass only what the move's payload takes, and the work stays visible: another vine can react to every event. The act gives one item per inner output, `{ output, event, landed, payload }`, and ends with `{ status }`: `done`, `failed` with a `reason`, or `refused` with the `gate` that refused it. A refusal is data to branch on, not a failure, so the jobs after it go on. Pass your own `request` through: the host builds each inner press's id from it, so after a restart the same press attaches to the first. See `vines/pipe/plan_launch_all.yaml`.
+**Nest a vine that a move starts by pressing its move.** `plan_launch_all` launches each job with `call: move.launch`, not `use: job_launch`. The host checks the job's gates, builds `job_launch`'s input from the job's facts, and lands each output as an event before your vine hears of it. So you pass only what the move's payload takes, and the work stays visible: another vine can react to every event. The act gives one item per inner output, `{ output, event, landed, payload }`, and ends with `{ status }`: `done`, `failed` with a `reason`, or `refused` with the `gate` that refused it. A refusal is data to branch on, not a failure, so the other jobs go on. `plan_launch_all` launches two jobs at once, with `each` and `overlap: merge, at_once: 2`. Pass your own `request` through: the host builds each inner press's id from it, so after a restart the same press attaches to the first. See `vines/pipe/plan_launch_all.yaml`.
 
 **Run a helper with `use` when the two are one piece of work and no move starts the helper.** `use: job_teardown` runs that vine as a stage, and `on:` says what to do with each thing it emits. The checker makes you handle every output. See `vines/pipe/job_launch_undo.yaml`.
 
@@ -41,6 +41,13 @@ The stages are in `src/pipe/`. Worked examples are in `vines/pipe/`.
 **Run a vine over an endless stream with `run_from`, and keep the bookmark it builds.** A vine that reads events for months must not replay from the first event after a restart. `run_from` tells you when every event through a number is fully done: its acts finished, its outputs were handed out, and no stage holds it. Pass every event it gives you to `Bookmark::record` and save the bookmark before you read the next. After a restart, feed the events after `bookmark.position()` with the bookmark you saved. The bookmark holds only the lines of events still in flight, so it stays small. See `vines/pipe/event_relay.yaml`, `event_backup.yaml` and `event_pages.yaml`.
 
 **Register a stream act that can give its items again as one.** If the host behind an act stores what it gave, as an agent host stores the lines a session wrote, register it with `register_replayable_stream_act`. Then a saved run keeps how far each call got instead of every item: a job whose agent writes ten thousand lines keeps about 500 bytes, not a megabyte. After a restart the act is asked for its items from the one after the position, and `collect` refills its batch from them. The act must give the same items again from any point it gave. Check `Pipe::saves_every_item()`: it lists every call that is still saved item by item, and why.
+
+**Run independent items side by side with `each` and `merge`, and still resume.** Each item that enters the `each` gets its own group of saved lines, numbered in the order the items went in, not the order they finish. After a restart each item's work replays in its own order, so the items can finish in another order and nothing is lost or run twice. What you can rely on:
+
+- Within one item's work, outputs come in order, before and after a restart.
+- Across items, outputs come in whatever order the work finishes. After a restart that order can differ from the first run. Do not depend on it.
+- Each act still runs once, apart from the acts whose results you had not saved when the crash came. A run starts an act only once you hold every line made so far, so those are the acts that were running, one per item running side by side (more if the item runs `together`), plus at most one result you were handed and had not saved. With `at_once: 2` that is at most two acts.
+- With `run_from`, an item can finish before an earlier one. The run says so with `Progress::Done(n)`, and `Bookmark::record` keeps the number and drops its lines. The position waits for the earlier item and never goes back. After a restart, feed the items after the position as always; the run skips the ones already done. So the bookmark holds the lines of at most `at_once` items in flight, plus runs of numbers. Without `at_once`, every item you feed is in flight at once, and the bookmark grows with how many arrive while one is slow. Over an endless stream, set `at_once`.
 
 **Pick the mode by whether the run ends.** One job, one plan launch: `run_saved` and a journal. A stream of events with no end: `run_from` and a bookmark. They save the same entries. A bookmark's lines also say which input item each belongs to, and the position is where the caller may cut.
 
@@ -59,11 +66,11 @@ The stages are in `src/pipe/`. Worked examples are in `vines/pipe/`.
 | Rule | What it does | Use it when |
 |---|---|---|
 | `concat` | One at a time, in order | Order matters, or the work must not overlap |
-| `merge` | Side by side | The items are independent. Add `at_once` to cap it |
+| `merge` | Side by side | The items are independent. Add `at_once` to cap it. Resumes |
 | `switch` | Drops the run in flight for the new item | Only the newest matters, such as a refresh |
 | `exhaust` | Ignores new items while busy | A second request for the same work is noise |
 
-`concat` is the default because it is the one that cannot surprise you.
+`concat` is the default because it is the one that cannot surprise you. `switch` and `exhaust` cannot be resumed.
 
 **Make every act safe to run twice.** A result can repeat after a crash, and an act whose entry was not saved runs again. An act that creates or writes should give the same result the second time: `git.worktree_add` for a name that has a working copy gives that copy, and `agent.start` in a directory with an agent running gives that agent.
 
@@ -87,6 +94,10 @@ The stages are in `src/pipe/`. Worked examples are in `vines/pipe/`.
 
 **Don't rely on `else` to hide a mistake.** A `branch` with no matching case passes the item through unchanged. If every item must be handled, give the branch an `else` and the checker will hold you to it.
 
+**Don't count or batch what comes out of a `merge`, or act on the item `last` picks from it, in a vine you resume.** After a restart the items can finish in another order. `take` would let other items through and `collect` would batch other items, so the checker refuses both after a merging `each`. `last` is allowed: it gives the final item to finish, and after a restart that can be another item, as it could be in a run at another pace. So an act on it is refused, and what you emit from it should use only what every item shares, as `plan_launch_all`'s `done` does. Count or batch inside the `each`, where one item's work stays in order.
+
+**Don't cover an `each` that merges with `catch` or `finalize`, in a vine you resume.** At the first failure they drop the items still running, and how far those got depends on timing. Put the `catch` inside the `each`: then one item's failure becomes its own output and the others go on. A failure nothing catches ends the run, and the items still running stop where they are; after a restart the run stops at the same failure again, and the acts those items were running start again.
+
 **Don't put `take`, or an `each` that merges, switches or exhausts, before a covering stage.** Those work across the whole stream, and a covering stage works one item at a time. The checker refuses it. Put the stream-wide stage after.
 
 **Know what "the end" means before a covering stage.** A covering stage runs the stages before it once for each item. So there, `last` and `collect` see the end of that one item's own stream, such as one agent run. That is what `job_run` wants. They need a stage before them that makes many items from one, such as `split` or a stream act. Without one they could only ever see one item, and the checker refuses them.
@@ -95,7 +106,7 @@ The stages are in `src/pipe/`. Worked examples are in `vines/pipe/`.
 
 **Don't expect `finalize` to run when the caller drops a run.** A dropped run leaves its working copy, and its agent goes on with nobody reading. Resume it from the journal, or clean up from outside.
 
-**Don't use `run_saved` on a vine that cannot replay in one order.** A replay calls the acts in the same order as the first run. `each` that merges, switches or exhausts, and `timeout`, break that, so `run_saved` refuses such a vine. Resume the same vine with the same input: the journal is keyed by where each act stands in the pipe.
+**Don't use `run_saved` on a vine that depends on time.** `each` that switches or exhausts drops or skips work by when items arrive, and `timeout` fails by how long work took. A replay cannot know either, so `run_saved` and `run_from` refuse such a vine. Resume the same vine with the same input: the journal is keyed by where each act stands in the pipe, and inside a merging `each` by which item it was.
 
 **Don't use `run_from` on a vine that counts the whole stream.** A `take` over the whole stream would count from nothing again after a restart. A vine that ends itself has an end: run it with `run_saved`. `take` inside `each`, or before a covering stage, counts one item's own stream and is fine.
 
@@ -138,6 +149,7 @@ The stages are in `src/pipe/`. Worked examples are in `vines/pipe/`.
 - `last` or `collect` where they could only ever see one item.
 - `tap` on a stream act, a stream act inside `together`, and `end` on an act that is not a stream act.
 - A stream act that gives its items again, where a later item could not rebuild what comes after it: a `take` that its items reach, a `collect` that could mix two calls, or a `retry` over it. The call is saved item by item, and `Pipe::saves_every_item` says where and why. A vine that refuses this for a vine it runs by `use` cannot be resumed.
+- For both ways to resume: `each` that switches or exhausts, `timeout`, `take` or `collect` after a merging `each` (in a side pipe too), an act on the item `last` picked after one, and a `catch` or `finalize` that covers one at any depth. `Pipe::resumable` says so, and the run gives `NotResumable` with the reason and the stage's path.
 - For `run_from`, besides what `run_saved` refuses: `take` over the whole stream, and `collect` over the whole stream after a stage that makes many items from one. `Pipe::resumable_from_position` says so, and `run_from` gives `NotResumable` with the reason and the stage's path.
 
 ## What it does not catch
@@ -148,11 +160,12 @@ The stages are in `src/pipe/`. Worked examples are in `vines/pipe/`.
 - A stream act that does not go on from `resume_from`. A replay trusts it to.
 - A stream act that says it gives its items again and gives other items. A run sees only an act that stops after fewer items than it gave before it stopped. Outputs handed out before a restart are skipped by count, so an act that gives other items can hand out a different output in place of one already handed.
 - A journal saved for a different vine. A saved act whose input no longer matches is a run error, and so is an output the replay does not make again. Anything else is not checked.
+- An output emitted from the item `last` picked after a `merge`, when the item matters. After a restart it can be another item's. An output in the window between being handed out and its line being saved comes again, and from such a `last` it can come with another item's fields.
 - A `use` of a vine that a move starts, or moves that start each other in a loop. The library knows no moves. The host checks both when it installs a package of vines, from `Pipe::uses` and `Pipe::acts`.
 
 ## Not built yet
 
-- Resuming a vine with `each` that merges, switches or exhausts, or with `timeout`, in either mode.
+- Resuming a vine with `each` that switches or exhausts, or with `timeout`, in either mode. They would need the run to save what time decided: which item a switch dropped and how far it got, which items an exhaust ignored, and when a timeout's clock started.
 - Making a journal smaller for a stream act that cannot give its items again. Every item it gives is saved until its input item is done.
 - A position for a stage that keeps a count or a running total across events. Such state needs to be saved itself, as the older runner's `Memory::Kept` did.
 - Telling a stream act that the run stopped reading. Dropping a run, or a `catch` that drops the rest of an item's work, leaves the stream act's work going.

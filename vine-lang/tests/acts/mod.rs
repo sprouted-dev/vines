@@ -31,6 +31,8 @@ struct State {
     started: u64,
     fail: BTreeMap<String, OpError>,
     hooks: BTreeMap<String, Hook>,
+    /// How long each act named here takes, on tokio's clock.
+    slow: BTreeMap<String, std::time::Duration>,
 }
 
 type Hook = Arc<dyn Fn() + Send + Sync>;
@@ -105,6 +107,20 @@ impl World {
     pub fn when(&self, act: &str, hook: impl Fn() + Send + Sync + 'static) {
         let mut s = self.state.lock().unwrap();
         s.hooks.insert(act.into(), Arc::new(hook));
+    }
+
+    /// Make the named act take this long each time, on tokio's clock. A
+    /// test that starts the clock paused gets exact times.
+    pub fn slow(&self, act: &str, takes: std::time::Duration) {
+        self.state.lock().unwrap().slow.insert(act.into(), takes);
+    }
+
+    /// Wait as long as the named act takes.
+    async fn take_time(&self, act: &str) {
+        let takes = self.state.lock().unwrap().slow.get(act).copied();
+        if let Some(takes) = takes {
+            tokio::time::sleep(takes).await;
+        }
     }
 
     /// Add a line to the log without running an act.
@@ -262,6 +278,7 @@ pub fn registry(world: &Arc<World>) -> Registry {
             let w = w.clone();
             async move {
                 let dir = text(&v, "dir");
+                w.take_time("agent.start").await;
                 w.run("agent.start", &dir)?;
                 Ok(json!({ "id": w.start_agent(&dir) }))
             }

@@ -140,10 +140,14 @@ pub enum Entry {
     /// the group of work it was made in, such as `pipe[1].each@3/`, when
     /// it was made in a group of an `each` that merges. A replay matches
     /// the outputs of one group in order, whatever order the groups
-    /// finish in.
+    /// finish in. `from` names the item of a stream act call the output
+    /// was made from, such as `pipe[1]#0@7/`, when `last` picked that item
+    /// out of groups: once the call's position passes it, the output is
+    /// never made again and the line is dropped.
     Emitted {
         output: String,
         within: Option<String>,
+        from: Option<String>,
     },
     /// For a stream act that gives its items again: every item it gave
     /// through number `items` is fully done, and `handed` outputs made
@@ -185,10 +189,20 @@ impl Entry {
             Entry::Started { at, input } => json!({ "kind": "started", "at": at, "input": input }),
             Entry::Item { at, value } => json!({ "kind": "item", "at": at, "value": value }),
             Entry::Ended { at, value } => json!({ "kind": "ended", "at": at, "value": value }),
-            Entry::Emitted { output, within } => match within {
-                None => json!({ "kind": "emitted", "output": output }),
-                Some(within) => json!({ "kind": "emitted", "output": output, "within": within }),
-            },
+            Entry::Emitted {
+                output,
+                within,
+                from,
+            } => {
+                let mut v = json!({ "kind": "emitted", "output": output });
+                if let Some(within) = within {
+                    v["within"] = json!(within);
+                }
+                if let Some(from) = from {
+                    v["from"] = json!(from);
+                }
+                v
+            }
             Entry::Through { at, items, handed } => {
                 json!({ "kind": "through", "at": at, "items": items, "handed": handed })
             }
@@ -239,10 +253,10 @@ impl Entry {
         };
         match self {
             Entry::Through { at, .. } if at == call => true,
-            Entry::Emitted {
-                within: Some(within),
-                ..
-            } => item_of_stream(within, call).is_some_and(|n| n <= *items),
+            Entry::Emitted { within, from, .. } => [within, from]
+                .into_iter()
+                .flatten()
+                .any(|scope| item_of_stream(scope, call).is_some_and(|n| n <= *items)),
             _ => self
                 .at()
                 .and_then(|at| item_of_stream(at, call))
@@ -302,6 +316,10 @@ impl Entry {
                     None => None,
                     Some(_) => Some(text("within")?),
                 },
+                from: match map.get("from") {
+                    None => None,
+                    Some(_) => Some(text("from")?),
+                },
             },
             "through" => Entry::Through {
                 at: text("at")?,
@@ -328,8 +346,7 @@ impl Entry {
             Entry::Failed { .. } => &["kind", "at", "input", "code", "message"],
             Entry::Started { .. } => &["kind", "at", "input"],
             Entry::Item { .. } | Entry::Ended { .. } => &["kind", "at", "value"],
-            Entry::Emitted { within: None, .. } => &["kind", "output"],
-            Entry::Emitted { .. } => &["kind", "output", "within"],
+            Entry::Emitted { .. } => &["kind", "output", "within", "from"],
             Entry::Through { .. } => &["kind", "at", "items", "handed"],
             Entry::Stopped { how, .. } => match how {
                 Ending::Ended(_) => &["kind", "at", "items", "how", "value"],
