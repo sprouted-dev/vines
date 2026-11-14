@@ -106,7 +106,7 @@ impl Checker<'_> {
         let mut side_feeds = Vec::new();
         for (j, side) in sides.iter().enumerate() {
             let at = format!("{here}[{j}]");
-            let side = self.pipe(
+            let checked = self.pipe(
                 side,
                 &at,
                 known.clone(),
@@ -114,11 +114,11 @@ impl Checker<'_> {
                 view.clone(),
                 feeds.clone(),
             )?;
-            built.push(side.transform);
-            side_feeds.extend(side.feeds.into_iter().map(Feed::out_of_side));
+            built.push(checked.transform);
+            side_feeds.extend(checked.feeds.into_iter().map(Feed::out_of_side));
         }
         feeds.extend(side_feeds);
-        let t: Transform = Arc::new(move |items: Items, cx: Cx| forked(items, built.clone(), cx));
+        let t: Transform = Arc::new(move |items: Items, cx: Cx| forked(items, &built, &cx));
         Ok((t, known))
     }
 
@@ -142,32 +142,29 @@ impl Checker<'_> {
                 name: vine.to_owned(),
             });
         };
-        let with = match with {
-            Some(w) => {
-                let at = format!("{path}.with");
-                let t = Template::parse(w).map_err(|p| malformed(&at, &p.to_string()))?;
-                check_refs(t.refs(), &known, &at)?;
-                other
-                    .input()
-                    .check_template(&t)
+        let with = if let Some(w) = with {
+            let at = format!("{path}.with");
+            let t = Template::parse(w).map_err(|p| malformed(&at, &p.to_string()))?;
+            check_refs(t.refs(), known, &at)?;
+            other
+                .input()
+                .check_template(&t)
+                .map_err(|problem| LoadError::BadSettings {
+                    path: at,
+                    operator: vine.to_owned(),
+                    problem: problem.to_string(),
+                })?;
+            Some(t)
+        } else {
+            if let Some(item) = &known {
+                item.fits_into(other.input())
                     .map_err(|problem| LoadError::BadSettings {
-                        path: at,
+                        path: path.into(),
                         operator: vine.to_owned(),
                         problem: problem.to_string(),
                     })?;
-                Some(t)
             }
-            None => {
-                if let Some(item) = &known {
-                    item.fits_into(other.input())
-                        .map_err(|problem| LoadError::BadSettings {
-                            path: path.into(),
-                            operator: vine.to_owned(),
-                            problem: problem.to_string(),
-                        })?;
-                }
-                None
-            }
+            None
         };
         if let Keep::Into(field) = keep {
             if !is_name(field) {

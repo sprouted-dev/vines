@@ -116,6 +116,7 @@ impl OperatorSpec {
         }
     }
 
+    #[must_use]
     pub fn settings(mut self, shape: Shape) -> Self {
         self.settings = shape;
         self
@@ -123,6 +124,7 @@ impl OperatorSpec {
 
     /// Declare the shape of a map the operator returns. Lets the checker
     /// refuse `$item.field` for a field the operator never returns.
+    #[must_use]
     pub fn returns(mut self, shape: Shape) -> Self {
         self.returns = Some(shape);
         self
@@ -130,6 +132,7 @@ impl OperatorSpec {
 
     /// For a stream operator: declare the shape of the value it ends with.
     /// One that declares it must end with [`Part::End`].
+    #[must_use]
     pub fn ends(mut self, shape: Shape) -> Self {
         self.ends = Some(shape);
         self
@@ -137,6 +140,7 @@ impl OperatorSpec {
 
     /// Declare what the operator reaches outside, such as `git` or
     /// `facts.read`. An operator that declares nothing is pure.
+    #[must_use]
     pub fn touches<I, S>(mut self, names: I) -> Self
     where
         I: IntoIterator<Item = S>,
@@ -214,7 +218,7 @@ pub(crate) const CALL: &str = "call";
 /// since a pure operator is written by its name where these keys stand.
 ///
 /// The pipe's camelCase keys, such as `mergeMap` and `catchError`, need no
-/// entry: a pure operator's name is lower snake_case, so it can never be
+/// entry: a pure operator's name is lower `snake_case`, so it can never be
 /// one. `each`, `collect`, `together` and `catch` are the old names of the
 /// mapping operators, `bufferCount`, `forkJoin` and `catchError`. The
 /// pipe's YAML refuses them as keys, so an operator by any of them could
@@ -300,16 +304,16 @@ impl Registry {
     /// Register an operator that gives one result for each item.
     ///
     /// What `spec` says it touches decides what it is (see the module
-    /// docs). A pure one, touching nothing, has a lower snake_case name
+    /// docs). A pure one, touching nothing, has a lower `snake_case` name
     /// that is not a word of the pipe, and a vine runs it by its name. One
     /// that touches something reaches outside: its name is lower
-    /// snake_case words that may be joined by dots, such as
+    /// `snake_case` words that may be joined by dots, such as
     /// `git.worktree_add`, and a vine runs it with `call` or `tap`.
     ///
     /// Refused: a name that breaks those rules, a dotted name on an
     /// operator that touches nothing ([`RegistryError::TouchesNothing`]),
     /// a name already registered, and a touch that is not dot-separated
-    /// lower snake_case words.
+    /// lower `snake_case` words.
     pub fn register<F, Fut>(&mut self, spec: OperatorSpec, f: F) -> Result<(), RegistryError>
     where
         F: Fn(Value, OpContext) -> Fut + Send + Sync + 'static,
@@ -504,7 +508,7 @@ fn is_reserved(name: &str) -> bool {
     name == CALL || PIPE_WORDS.contains(&name) || COMPOSITION_WORDS.contains(&name)
 }
 
-/// `facts.read`, `git`, `agent`: dot-separated lower snake_case words.
+/// `facts.read`, `git`, `agent`: dot-separated lower `snake_case` words.
 fn is_touch(t: &str) -> bool {
     !t.is_empty() && t.split('.').all(crate::expr::is_name)
 }

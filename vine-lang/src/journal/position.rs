@@ -158,6 +158,11 @@ impl Bookmark {
         &self.lines
     }
 
+    /// The lines, oldest first, taken out of the bookmark.
+    pub(crate) fn into_lines(self) -> Vec<Line> {
+        self.lines
+    }
+
     /// The items past the position that are done already, in order. A run
     /// from this bookmark skips them.
     pub fn done(&self) -> impl Iterator<Item = u64> + '_ {
@@ -272,10 +277,10 @@ impl Bookmark {
         let Some(position) = map.get("position").and_then(Value::as_u64) else {
             return Err(BookmarkError::NeedsPosition);
         };
-        let Some(list) = map.get("lines").and_then(Value::as_array) else {
+        let Some(saved) = map.get("lines").and_then(Value::as_array) else {
             return Err(BookmarkError::NeedsLines);
         };
-        let lines = list
+        let lines = saved
             .iter()
             .enumerate()
             .map(|(index, l)| {

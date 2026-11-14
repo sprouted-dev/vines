@@ -19,7 +19,6 @@ use crate::shape::{Shape, Ty};
 impl Checker<'_> {
     /// `split`: one item becomes one item per element of a list.
     pub(super) fn split(
-        &mut self,
         site: Site<'_>,
         from: &Value,
         into: Option<&String>,
@@ -112,7 +111,7 @@ impl Checker<'_> {
     }
 
     /// `last`: when the stream ends, let only its final item through.
-    pub(super) fn last(site: Site<'_>) -> Result<(Transform, Known), LoadError> {
+    pub(super) fn last(site: Site<'_>) -> (Transform, Known) {
         let Site { known, view, .. } = site;
         // After items run side by side, the value it gives is lifted
         // out of the groups made in this pipe, so what is made from
@@ -121,7 +120,7 @@ impl Checker<'_> {
         let t: Transform = Arc::new(move |items: Items, cx: Cx| {
             last_of(items, root.as_ref().map(|r| cx.sites_within(r)))
         });
-        Ok((t, known))
+        (t, known)
     }
 
     /// `bufferCount`: gather items into batches.
@@ -157,10 +156,11 @@ impl Checker<'_> {
             ),
         };
         self.sites.buffer_count(path, feeds);
-        let size = usize::try_from(buffer_size).unwrap_or(usize::MAX);
+        let batch_size = usize::try_from(buffer_size).unwrap_or(usize::MAX);
         let (into, at) = (into.cloned(), path.to_owned());
-        let t: Transform =
-            Arc::new(move |items: Items, _cx: Cx| batches(items, size, into.clone(), at.clone()));
+        let t: Transform = Arc::new(move |items: Items, _cx: Cx| {
+            batches(items, batch_size, into.clone(), at.clone())
+        });
         Ok((t, next))
     }
 }

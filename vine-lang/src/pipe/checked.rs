@@ -11,7 +11,7 @@ use serde_json::Value;
 use super::book::{Book, Cx, ReplayError};
 use super::drive::Saving;
 use super::flow::{fatal, Flowing, Items, Transform};
-use super::output::{OutputId, PipeOutput};
+use super::output::PipeOutput;
 use super::timer::Timeouts;
 use crate::error::RunError;
 use crate::journal::{Bookmark, Event, Journal, Progress};
@@ -188,7 +188,7 @@ impl Pipe {
         if let Some(why) = &self.unresumable {
             return stream::once(ready(Err(self.refused(why)))).boxed();
         }
-        match self.book(Book::from_journal(&journal)) {
+        match self.book(Book::from_journal(journal)) {
             Ok(book) => self
                 .drive(input, Saving::Journal(book))
                 .filter_map(|r| {
@@ -252,13 +252,14 @@ impl Pipe {
         if let Some(why) = self.unresumable.as_ref().or(self.unpositioned.as_ref()) {
             return stream::once(ready(Err(self.refused(why)))).boxed();
         }
-        match self.book(Book::from_bookmark(&bookmark)) {
+        let (position, done) = (bookmark.position(), bookmark.done().collect());
+        match self.book(Book::from_bookmark(bookmark)) {
             Ok(book) => self.drive(
                 input,
                 Saving::Position {
                     book,
-                    position: bookmark.position(),
-                    done: bookmark.done().collect(),
+                    position,
+                    done,
                 },
             ),
             Err(misfit) => stream::once(ready(Err(RunError::ReplayMisfit {

@@ -38,7 +38,7 @@ pub enum RefError {
     BadSegment {
         /// The text after the `$`.
         body: String,
-        /// The segment that is not lower snake_case.
+        /// The segment that is not lower `snake_case`.
         segment: String,
     },
 }
@@ -84,7 +84,7 @@ pub enum CondError {
     Ref(#[from] RefError),
 }
 
-/// Names in the vine language: lower snake_case.
+/// Names in the vine language: lower `snake_case`.
 pub fn is_name(s: &str) -> bool {
     let mut chars = s.chars();
     matches!(chars.next(), Some('a'..='z'))

@@ -9,7 +9,7 @@
 //! reads a vine written as a document and hands the same description to
 //! the same checker. With the feature off, no YAML parser is compiled in.
 //!
-//! Every step of a pipe is an operator, as in RxJS. The built-in ones, such
+//! Every step of a pipe is an operator, as in `RxJS`. The built-in ones, such
 //! as `filter`, `mergeMap` and `catchError`, ship with the library. The
 //! caller registers more by name with [`Registry::register`]. A registered
 //! operator declares what it touches. One that touches nothing is pure.

@@ -167,7 +167,10 @@ impl Tag {
                 lock(&ledger).join(first, last);
                 // A batch of a call's items belongs to the call, unless it
                 // was made inside a group within one of them.
-                let call = hold.call.clone().filter(|_| std::ptr::eq(hold, &**newest));
+                let call = hold
+                    .call
+                    .clone()
+                    .filter(|_| std::ptr::eq(hold, &raw const **newest));
                 (
                     Some(Count {
                         first,

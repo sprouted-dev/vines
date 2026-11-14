@@ -41,15 +41,15 @@ pub(super) enum ItemSaving {
 
 impl Unit {
     /// Run a stream operator for one item: one item out per value it gives.
-    pub(super) fn stream(&self, item: Value, tag: Tag, cx: Cx) -> Items {
+    pub(super) fn stream(&self, item: Value, tag: &Tag, cx: &Cx) -> Items {
         let Runner::Stream(handler) = &self.runner else {
             unreachable!("only a stream operator runs as a stream")
         };
         let input = match self.resolve(&item) {
             Ok(v) => v,
-            Err(fault) => return one(Err(fault.of(&tag))),
+            Err(fault) => return one(Err(fault.of(tag))),
         };
-        let key = cx.key(&self.path, &tag);
+        let key = cx.key(&self.path, tag);
         let mut run = StreamRun {
             unit: self.clone(),
             handler: handler.clone(),
@@ -100,7 +100,7 @@ impl Unit {
                         "`{key}` was saved by position, and `{}` here saves every item",
                         self.spec.name
                     ))
-                    .of(&tag)));
+                    .of(tag)));
                 }
                 (through, skip, stopped) = (t, handed, s);
                 run.started = true;
@@ -110,7 +110,7 @@ impl Unit {
                     "`{key}` was saved as an operator that gives one result, and `{}` is a stream operator",
                     self.spec.name
                 ))
-                .of(&tag)))
+                .of(tag)))
             }
         }
         if saving == ItemSaving::Position {
@@ -212,23 +212,7 @@ impl StreamRun {
             return self.give_saved_stop();
         }
         if self.live.is_none() {
-            if self.key.is_some() {
-                self.cx.handed_out().await;
-            }
-            if !self.started {
-                if let Some(at) = &self.key {
-                    self.cx.save(
-                        at,
-                        Entry::Started {
-                            at: at.at.clone(),
-                            input: self.input.clone(),
-                        },
-                    );
-                }
-                self.started = true;
-            }
-            let cx = OpContext::new().resuming(self.given);
-            self.live = Some((self.handler)(self.input.clone(), cx));
+            self.go_live().await;
         }
         let next = self.live.as_mut()?.next().await;
         let spec = self.unit.spec.clone();
@@ -237,11 +221,11 @@ impl StreamRun {
             Some(Ok(Part::Item(value))) => {
                 if let Some(shape) = &spec.returns {
                     if let Err(problem) = shape.check(&value) {
-                        return self.fail_hard(RunError::ResultMisfit {
+                        return Some(self.fail_hard(RunError::ResultMisfit {
                             path,
                             operator: spec.name.clone(),
                             problem: problem.to_string(),
-                        });
+                        }));
                     }
                 }
                 if let (Some(at), None) = (&self.key, &self.position) {
@@ -260,15 +244,15 @@ impl StreamRun {
             Some(Ok(Part::End(value))) => {
                 if let Some(shape) = &spec.ends {
                     if let Err(problem) = shape.check(&value) {
-                        return self.fail_hard(RunError::ResultMisfit {
+                        return Some(self.fail_hard(RunError::ResultMisfit {
                             path,
                             operator: spec.name.clone(),
                             problem: format!("its end: {problem}"),
-                        });
+                        }));
                     }
                 }
                 if let Some(short) = self.gave_fewer_again("ended") {
-                    return self.fail_hard(short);
+                    return Some(self.fail_hard(short));
                 }
                 self.ended(value)
             }
@@ -278,7 +262,7 @@ impl StreamRun {
                         "failed with `{}`: {}",
                         error.code, error.message
                     )) {
-                        return self.fail_hard(short);
+                        return Some(self.fail_hard(short));
                     }
                     self.save_failure(&error);
                 }
@@ -286,18 +270,41 @@ impl StreamRun {
             }
             None => {
                 if spec.ends.is_some() {
-                    return self.fail_hard(RunError::ResultMisfit {
+                    return Some(self.fail_hard(RunError::ResultMisfit {
                         path,
                         operator: spec.name.clone(),
                         problem: "its stream stopped without giving the end it declares".into(),
-                    });
+                    }));
                 }
                 if let Some(short) = self.gave_fewer_again("ended") {
-                    return self.fail_hard(short);
+                    return Some(self.fail_hard(short));
                 }
                 self.ended(Value::Null)
             }
         }
+    }
+
+    /// Call the operator, or call it again from the item after the ones
+    /// already given. A saved run waits until the caller holds every line
+    /// made so far, and saves that the call started the first time.
+    async fn go_live(&mut self) {
+        if self.key.is_some() {
+            self.cx.handed_out().await;
+        }
+        if !self.started {
+            if let Some(at) = &self.key {
+                self.cx.save(
+                    at,
+                    Entry::Started {
+                        at: at.at.clone(),
+                        input: self.input.clone(),
+                    },
+                );
+            }
+            self.started = true;
+        }
+        let cx = OpContext::new().resuming(self.given);
+        self.live = Some((self.handler)(self.input.clone(), cx));
     }
 
     /// Whether this is a replay of a call saved by position that stopped,
@@ -420,11 +427,12 @@ impl StreamRun {
         }
     }
 
-    pub(super) fn fail_hard(mut self, e: RunError) -> Option<(Flow, StreamRun)> {
+    /// End the call with a failure no `catchError` handles.
+    pub(super) fn fail_hard(mut self, e: RunError) -> (Flow, StreamRun) {
         self.done = true;
         self.live = None;
         let fault = fatal(e).of(&std::mem::take(&mut self.tag));
-        Some((Err(fault), self))
+        (Err(fault), self)
     }
 
     /// The item for the value the operator gave last, numbered `given`.

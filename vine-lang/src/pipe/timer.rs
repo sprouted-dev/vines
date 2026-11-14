@@ -60,16 +60,13 @@ pub(super) fn timed(body: Transform, path: String, limit: Duration) -> Transform
                 out = &mut work => Some(out),
                 () = tokio::time::sleep(limit) => None,
             };
-            match done {
-                Some(out) => {
-                    decide(&cx, key.as_ref(), Timing::InTime);
-                    out
-                }
-                None => {
-                    decide(&cx, key.as_ref(), Timing::TimedOut);
-                    drop(work);
-                    vec![Err(timed_out(&path, limit, item, tag))]
-                }
+            if let Some(out) = done {
+                decide(&cx, key.as_ref(), Timing::InTime);
+                out
+            } else {
+                decide(&cx, key.as_ref(), Timing::TimedOut);
+                drop(work);
+                vec![Err(timed_out(&path, limit, item, tag))]
             }
         }
         .boxed()

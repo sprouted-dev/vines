@@ -103,7 +103,7 @@
 //! # Operators that apply to the ones before them
 //!
 //! Four operators do not change the item. They apply to the operators
-//! before them in the pipe, as `catchError` and `finalize` do in RxJS, and
+//! before them in the pipe, as `catchError` and `finalize` do in `RxJS`, and
 //! they work one item at a time:
 //!
 //! - [`catch_error`] (`catchError`): if one of them fails, run these

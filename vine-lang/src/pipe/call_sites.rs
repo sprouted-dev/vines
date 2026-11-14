@@ -258,7 +258,10 @@ impl CallSites {
                 None => ItemSaving::Position,
                 Some(_) => ItemSaving::Every,
             };
-            // The cell is new and only this checker holds it until now.
+            #[expect(
+                clippy::let_underscore_must_use,
+                reason = "the cell is new and only this checker holds it until now, so `set` finds it empty"
+            )]
             let _ = site.saving.set(saving);
             match why {
                 None => by_position = true,

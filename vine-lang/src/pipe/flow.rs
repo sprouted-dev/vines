@@ -84,7 +84,7 @@ pub(super) type Items = BoxStream<'static, Flow>;
 pub(super) type Transform = Arc<dyn Fn(Items, Cx) -> Items + Send + Sync>;
 
 pub(super) fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
-    m.lock().unwrap_or_else(|e| e.into_inner())
+    m.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 pub(super) fn run_error(fault: Fault) -> RunError {
@@ -323,7 +323,7 @@ pub(super) fn side_input(shared: Arc<Mutex<SideIn>>) -> Items {
 /// Send each value down every side pipe, then on down the main pipe. For
 /// each value the side pipes run in order, each until it wants the next
 /// value, so what comes out does not depend on timing.
-pub(super) fn forked(mut upstream: Items, sides: Vec<Transform>, cx: Cx) -> Items {
+pub(super) fn forked(mut upstream: Items, sides: &[Transform], cx: &Cx) -> Items {
     let inputs: Vec<Arc<Mutex<SideIn>>> = sides
         .iter()
         .map(|_| Arc::new(Mutex::new(SideIn::default())))
@@ -451,13 +451,11 @@ pub(super) fn tidied(body: Items, cleanup: Transform, item: Value, tag: Tag, cx:
         if done {
             return Poll::Ready(None);
         }
-        match after.pop_front() {
-            Some(flow) => return Poll::Ready(Some(flow)),
-            None => {
-                done = true;
-                return Poll::Ready(None);
-            }
+        if let Some(flow) = after.pop_front() {
+            return Poll::Ready(Some(flow));
         }
+        done = true;
+        return Poll::Ready(None);
     })
     .boxed()
 }

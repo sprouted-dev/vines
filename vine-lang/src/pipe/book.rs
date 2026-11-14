@@ -175,9 +175,9 @@ pub(super) enum Handing {
 
 impl Book {
     /// Read a journal: every entry belongs to the whole run, item 0.
-    pub(super) fn from_journal(journal: &Journal) -> Result<Book, ReplayError> {
+    pub(super) fn from_journal(journal: Journal) -> Result<Book, ReplayError> {
         let mut book = Book::default();
-        for (index, entry) in journal.entries().iter().enumerate() {
+        for (index, entry) in journal.into_entries().into_iter().enumerate() {
             book.read(0, entry)
                 .map_err(|source| ReplayError::Entry { index, source })?;
         }
@@ -186,37 +186,33 @@ impl Book {
 
     /// Read a bookmark. Lines of items at or before its position, or done
     /// past it, are not read.
-    pub(super) fn from_bookmark(bookmark: &Bookmark) -> Result<Book, ReplayError> {
+    pub(super) fn from_bookmark(bookmark: Bookmark) -> Result<Book, ReplayError> {
         let mut book = Book::default();
-        for (index, Line { item, entry }) in bookmark.lines().iter().enumerate() {
-            if bookmark.is_done(*item) {
-                continue;
+        let read: Vec<bool> = bookmark
+            .lines()
+            .iter()
+            .map(|line| !bookmark.is_done(line.item))
+            .collect();
+        let lines = bookmark.into_lines().into_iter().zip(read).enumerate();
+        for (index, (Line { item, entry }, read)) in lines {
+            if read {
+                book.read(item, entry)
+                    .map_err(|source| ReplayError::Line { index, source })?;
             }
-            book.read(*item, entry)
-                .map_err(|source| ReplayError::Line { index, source })?;
         }
         Ok(book)
     }
 
-    fn read(&mut self, item: u64, entry: &Entry) -> Result<(), EntryMisfit> {
-        let key = |at: &String| Key {
-            item,
-            at: at.clone(),
-        };
+    fn read(&mut self, item: u64, entry: Entry) -> Result<(), EntryMisfit> {
+        let key = |at: String| Key { item, at };
         match entry {
-            Entry::Done { at, input, result } => {
-                let k = key(at);
-                if self.saved.contains_key(&k) {
-                    return Err(EntryMisfit::Twice(k));
-                }
-                self.saved.insert(
-                    k,
-                    Saved::Once {
-                        input: input.clone(),
-                        outcome: Ok(result.clone()),
-                    },
-                );
-            }
+            Entry::Done { at, input, result } => self.save_new(
+                key(at),
+                Saved::Once {
+                    input,
+                    outcome: Ok(result),
+                },
+            )?,
             Entry::Failed {
                 at,
                 input,
@@ -224,7 +220,7 @@ impl Book {
                 message,
             } => {
                 let k = key(at);
-                let failure = OpError::new(code.clone(), message.clone());
+                let failure = OpError::new(code, message);
                 match self.saved.get_mut(&k) {
                     Some(Saved::Stream {
                         end: end @ None, ..
@@ -234,89 +230,107 @@ impl Book {
                         self.saved.insert(
                             k,
                             Saved::Once {
-                                input: input.clone(),
+                                input,
                                 outcome: Err(failure),
                             },
                         );
                     }
                 }
             }
-            Entry::Started { at, input } => {
+            Entry::Started { at, input } => self.save_new(
+                key(at),
+                Saved::Stream {
+                    input,
+                    items: VecDeque::new(),
+                    end: None,
+                },
+            )?,
+            Entry::Item { at, value } => {
                 let k = key(at);
-                if self.saved.contains_key(&k) {
-                    return Err(EntryMisfit::Twice(k));
+                match self.saved.get_mut(&k) {
+                    Some(Saved::Stream {
+                        items, end: None, ..
+                    }) => items.push_back(value),
+                    _ => return Err(EntryMisfit::ItemNotGoing(k)),
                 }
-                self.saved.insert(
-                    k,
-                    Saved::Stream {
-                        input: input.clone(),
-                        items: VecDeque::new(),
-                        end: None,
-                    },
-                );
             }
-            Entry::Item { at, value } => match self.saved.get_mut(&key(at)) {
-                Some(Saved::Stream {
-                    items, end: None, ..
-                }) => items.push_back(value.clone()),
-                _ => return Err(EntryMisfit::ItemNotGoing(key(at))),
-            },
-            Entry::Ended { at, value } => match self.saved.get_mut(&key(at)) {
-                Some(Saved::Stream {
-                    end: end @ None, ..
-                }) => *end = Some(Ok(value.clone())),
-                _ => return Err(EntryMisfit::EndNotGoing(key(at))),
-            },
+            Entry::Ended { at, value } => {
+                let k = key(at);
+                match self.saved.get_mut(&k) {
+                    Some(Saved::Stream {
+                        end: end @ None, ..
+                    }) => *end = Some(Ok(value)),
+                    _ => return Err(EntryMisfit::EndNotGoing(k)),
+                }
+            }
             Entry::Emitted {
                 output,
                 within,
                 from,
             } => self
                 .handed
-                .entry((item, within.clone().unwrap_or_default()))
+                .entry((item, within.unwrap_or_default()))
                 .or_default()
                 .push_back(Handed {
-                    output: output.clone(),
-                    from: from.clone(),
+                    output,
+                    from,
                     gone: false,
                 }),
-            Entry::Through { at, items, handed } => match self.position_of(key(at)) {
-                Some(Saved::Position {
-                    through,
-                    handed: was,
-                    ..
-                }) => {
-                    *through = *items;
-                    *was = *handed;
-                    // Outputs made in groups within the items it passed
-                    // are never made again.
-                    let passed =
-                        |scope: &str| item_of_stream(scope, at).is_some_and(|n| n <= *items);
-                    self.handed
-                        .retain(|(of, within), _| *of != item || !passed(within));
-                    for ((of, _), queue) in &mut self.handed {
-                        if *of == item {
-                            for h in queue.iter_mut() {
-                                h.gone |= h.from.as_deref().is_some_and(passed);
-                            }
-                        }
-                    }
+            Entry::Through { at, items, handed } => self.read_through(key(at), items, handed)?,
+            Entry::Stopped { at, items, how } => {
+                let k = key(at);
+                match self.position_of(&k) {
+                    Some(Saved::Position {
+                        stopped: stopped @ None,
+                        ..
+                    }) => *stopped = Some((items, how)),
+                    _ => return Err(EntryMisfit::StopNotGoing(k)),
                 }
-                _ => return Err(EntryMisfit::PositionNotStarted(key(at))),
-            },
-            Entry::Stopped { at, items, how } => match self.position_of(key(at)) {
-                Some(Saved::Position {
-                    stopped: stopped @ None,
-                    ..
-                }) => *stopped = Some((*items, how.clone())),
-                _ => return Err(EntryMisfit::StopNotGoing(key(at))),
-            },
+            }
             Entry::Timed { at, timing } => {
                 let k = key(at);
                 if self.timings.contains_key(&k) {
                     return Err(EntryMisfit::Twice(k));
                 }
-                self.timings.insert(k, *timing);
+                self.timings.insert(k, timing);
+            }
+        }
+        Ok(())
+    }
+
+    /// Keep what the call at `k` saved, the first thing saved for it.
+    fn save_new(&mut self, k: Key, saved: Saved) -> Result<(), EntryMisfit> {
+        if self.saved.contains_key(&k) {
+            return Err(EntryMisfit::Twice(k));
+        }
+        self.saved.insert(k, saved);
+        Ok(())
+    }
+
+    /// Read how far the stream operator call at `call` got: every item
+    /// through `items` is done, and `handed` outputs made from the items
+    /// after them were handed out.
+    fn read_through(&mut self, call: Key, items: u64, handed: u64) -> Result<(), EntryMisfit> {
+        let Some(Saved::Position {
+            through,
+            handed: was,
+            ..
+        }) = self.position_of(&call)
+        else {
+            return Err(EntryMisfit::PositionNotStarted(call));
+        };
+        *through = items;
+        *was = handed;
+        // Outputs made in groups within the items it passed are never made
+        // again.
+        let passed = |scope: &str| item_of_stream(scope, &call.at).is_some_and(|n| n <= items);
+        self.handed
+            .retain(|(of, within), _| *of != call.item || !passed(within));
+        for ((of, _), queue) in &mut self.handed {
+            if *of == call.item {
+                for h in queue.iter_mut() {
+                    h.gone |= h.from.as_deref().is_some_and(passed);
+                }
             }
         }
         Ok(())
@@ -329,8 +343,8 @@ impl Book {
 
     /// The saved position of a stream operator call. A call saved as started
     /// with nothing after it yet becomes one.
-    fn position_of(&mut self, key: Key) -> Option<&mut Saved> {
-        let saved = self.saved.get_mut(&key)?;
+    fn position_of(&mut self, key: &Key) -> Option<&mut Saved> {
+        let saved = self.saved.get_mut(key)?;
         if let Saved::Stream {
             input,
             items,
@@ -371,11 +385,11 @@ impl Book {
         state.through = through;
         state.handed.retain(|&n, _| n > through);
         let line = state.line(call);
-        let live = |item: u64, at: &str| {
+        let kept = |item: u64, at: &str| {
             item != call.item || item_of_stream(at, &call.at).is_none_or(|n| n > through)
         };
-        self.counts.retain(|(item, at), _| live(*item, at));
-        self.made.retain(|(item, at), _| live(*item, at));
+        self.counts.retain(|(item, at), _| kept(*item, at));
+        self.made.retain(|(item, at), _| kept(*item, at));
         self.fresh.push_back(line);
     }
 

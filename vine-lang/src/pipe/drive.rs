@@ -29,6 +29,7 @@ use super::tag::{Ledger, Moves, Tag};
 use super::Pipe;
 use crate::error::RunError;
 use crate::journal::Progress;
+use crate::shape::Shape;
 
 /// How a run is saved.
 pub(super) enum Saving {
@@ -66,39 +67,18 @@ impl Pipe {
                 Some(Arc::new(Mutex::new(Ledger::after(position, done)))),
             ),
         };
-        let shape = self.input.clone();
         let first = ledger.as_ref().map_or(0, |l| lock(l).position() + 1);
-        let numbering = ledger.clone();
-        let checked = input
-            .zip(stream::iter(first..))
-            .filter(move |(_, n)| {
-                // An item done before the restart is not run again.
-                let done = numbering.as_ref().is_some_and(|l| lock(l).is_done(*n));
-                std::future::ready(!done)
-            })
-            .map({
-                let numbering = ledger.clone();
-                move |(v, n)| {
-                    let tag = match &numbering {
-                        Some(ledger) => Tag::item(n, ledger),
-                        None => Tag::default(),
-                    };
-                    match shape.check(&v) {
-                        Ok(()) => Ok(Flowing::Value(v, tag)),
-                        Err(p) => Err(fatal(RunError::InputMisfit(p.to_string())).of(&tag)),
-                    }
-                }
-            });
+        let checked = numbered(input, self.input.clone(), ledger.clone(), first);
         let cx = Cx {
             book: book.clone(),
             scope: "".into(),
             moves: Moves::default(),
         };
-        let moves = cx.moves.clone();
-        let mut inner = (self.transform)(checked.boxed(), cx);
+        let call_moves = cx.moves.clone();
+        let mut inner = (self.transform)(checked, cx);
         let mut reported = first.saturating_sub(1);
         let positioned = ledger.clone();
-        let moved = move |reported: u64| {
+        let passed_position = move |reported: u64| {
             positioned
                 .as_ref()
                 .map(|l| lock(l).position())
@@ -120,69 +100,24 @@ impl Pipe {
                     return Poll::Ready(Some(Ok(Progress::Save(line))));
                 }
                 if let Some(b) = &book {
-                    let moved: Vec<_> = lock(&moves).drain(..).collect();
-                    if !moved.is_empty() {
+                    let calls: Vec<_> = lock(&call_moves).drain(..).collect();
+                    if !calls.is_empty() {
                         let mut b = lock(b);
-                        for (call, through) in moved {
+                        for (call, through) in calls {
                             b.moved(&call, through);
                         }
                         continue;
                     }
                 }
                 if let Some(flow) = held.take() {
-                    match flow {
-                        Ok(Flowing::Out(out, tag)) => {
-                            let id = match &book {
-                                Some(b) => {
-                                    let handing = lock(b).hand(&tag, &out.name);
-                                    match handing {
-                                        Handing::Fresh(id) => id,
-                                        // Handed out before the restart.
-                                        Handing::Before => continue,
-                                        Handing::Misfit(was) => {
-                                            stopped = true;
-                                            return Poll::Ready(Some(Err(
-                                                RunError::ReplayMisfit {
-                                                    problem: format!(
-                                                        "the journal says output `{was}` was handed out next, and the run made `{}`",
-                                                        out.name
-                                                    ),
-                                                },
-                                            )));
-                                        }
-                                    }
-                                }
-                                None => {
-                                    unsaved += 1;
-                                    OutputId::at(0, "", unsaved - 1)
-                                }
-                            };
-                            // The tag drops here: the item may now be done.
-                            return Poll::Ready(Some(Ok(Progress::Output(PipeOutput {
-                                id,
-                                name: out.name,
-                                payload: out.payload,
-                            }))));
-                        }
-                        // The checker refuses a pipe with a path that does not emit.
-                        Ok(Flowing::Value(..)) => {
-                            stopped = true;
-                            return Poll::Ready(Some(Err(RunError::ItemMisfit {
-                                path: "pipe".into(),
-                                problem:
-                                    "an item reached the end of the pipe without being emitted"
-                                        .into(),
-                            })));
-                        }
-                        // A failure ends the stream. The position stays
-                        // before the item that failed.
-                        Err(fault) => {
-                            stopped = true;
-                            return Poll::Ready(Some(Err(run_error(fault))));
-                        }
-                    }
+                    let Some((next, stops)) = hand_out(flow, book.as_ref(), &mut unsaved) else {
+                        // Handed out before the restart.
+                        continue;
+                    };
+                    stopped = stops;
+                    return Poll::Ready(Some(next));
                 }
-                if let Some(p) = moved(reported) {
+                if let Some(p) = passed_position(reported) {
                     reported = p;
                     if let Some(b) = &book {
                         lock(b).passed(p);
@@ -212,9 +147,9 @@ impl Pipe {
                     Poll::Ready(None) => ended = true,
                     Poll::Pending => {
                         let more = book.as_ref().is_some_and(|b| !lock(b).fresh.is_empty())
-                            || (book.is_some() && !lock(&moves).is_empty());
+                            || (book.is_some() && !lock(&call_moves).is_empty());
                         told = finished();
-                        if more || moved(reported).is_some() || told.is_some() {
+                        if more || passed_position(reported).is_some() || told.is_some() {
                             continue;
                         }
                         return Poll::Pending;
@@ -223,5 +158,90 @@ impl Pipe {
             }
         })
         .boxed()
+    }
+}
+
+/// The input items, numbered from `first`, checked against `shape` and
+/// tagged. An item the ledger keeps as done before a restart is dropped
+/// without running.
+fn numbered<S>(
+    input: S,
+    shape: Shape,
+    ledger: Option<Arc<Mutex<Ledger>>>,
+    first: u64,
+) -> BoxStream<'static, Flow>
+where
+    S: Stream<Item = Value> + Send + 'static,
+{
+    let numbering = ledger.clone();
+    input
+        .zip(stream::iter(first..))
+        .filter(move |(_, n)| {
+            // An item done before the restart is not run again.
+            let done = numbering.as_ref().is_some_and(|l| lock(l).is_done(*n));
+            std::future::ready(!done)
+        })
+        .map(move |(v, n)| {
+            let tag = match &ledger {
+                Some(ledger) => Tag::item(n, ledger),
+                None => Tag::default(),
+            };
+            match shape.check(&v) {
+                Ok(()) => Ok(Flowing::Value(v, tag)),
+                Err(p) => Err(fatal(RunError::InputMisfit(p.to_string())).of(&tag)),
+            }
+        })
+        .boxed()
+}
+
+/// What the run hands its caller for one flow that reached the end of the
+/// pipe, and whether that ends the run. `None` for an output the caller
+/// was handed before the restart. `unsaved` counts the outputs of a run
+/// that saves nothing.
+fn hand_out(
+    flow: Flow,
+    book: Option<&Arc<Mutex<Book>>>,
+    unsaved: &mut u64,
+) -> Option<(Result<Progress, RunError>, bool)> {
+    match flow {
+        Ok(Flowing::Out(out, tag)) => {
+            let id = if let Some(b) = book {
+                let handing = lock(b).hand(&tag, &out.name);
+                match handing {
+                    Handing::Fresh(id) => id,
+                    Handing::Before => return None,
+                    Handing::Misfit(was) => {
+                        let misfit = RunError::ReplayMisfit {
+                            problem: format!(
+                                "the journal says output `{was}` was handed out next, and the run made `{}`",
+                                out.name
+                            ),
+                        };
+                        return Some((Err(misfit), true));
+                    }
+                }
+            } else {
+                *unsaved += 1;
+                OutputId::at(0, "", *unsaved - 1)
+            };
+            // The tag drops here: the item may now be done.
+            let output = PipeOutput {
+                id,
+                name: out.name,
+                payload: out.payload,
+            };
+            Some((Ok(Progress::Output(output)), false))
+        }
+        // The checker refuses a pipe with a path that does not emit.
+        Ok(Flowing::Value(..)) => {
+            let misfit = RunError::ItemMisfit {
+                path: "pipe".into(),
+                problem: "an item reached the end of the pipe without being emitted".into(),
+            };
+            Some((Err(misfit), true))
+        }
+        // A failure ends the stream. The position stays before the item
+        // that failed.
+        Err(fault) => Some((Err(run_error(fault)), true)),
     }
 }

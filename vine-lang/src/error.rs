@@ -26,7 +26,7 @@ pub enum LoadError {
     Malformed { path: String, problem: String },
     #[error("{path}: unknown key `{key}`")]
     UnknownKey { path: String, key: String },
-    /// A key from before the pipe took its RxJS names.
+    /// A key from before the pipe took its `RxJS` names.
     #[error("{path}: `{old}` is not a key any more; use {new}")]
     Renamed {
         path: String,

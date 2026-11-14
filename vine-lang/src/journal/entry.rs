@@ -247,6 +247,25 @@ impl Entry {
         }
     }
 
+    /// The fields the JSON form of this entry holds, as
+    /// [`Entry::to_json`] writes them.
+    fn json_fields(&self) -> &'static [&'static str] {
+        match self {
+            Self::Done { .. } => &["kind", "at", "input", "result"],
+            Self::Failed { .. } => &["kind", "at", "input", "code", "message"],
+            Self::Started { .. } => &["kind", "at", "input"],
+            Self::Item { .. } | Self::Ended { .. } => &["kind", "at", "value"],
+            Self::Emitted { .. } => &["kind", "output", "within", "from"],
+            Self::Through { .. } => &["kind", "at", "items", "handed"],
+            Self::Stopped { how, .. } => match how {
+                Ending::Ended(_) => &["kind", "at", "items", "how", "value"],
+                Ending::Failed { .. } => &["kind", "at", "items", "how", "code", "message"],
+                Ending::Abandoned => &["kind", "at", "items", "how"],
+            },
+            Self::Timed { .. } => &["kind", "at", "timing"],
+        }
+    }
+
     /// Read an entry written by [`Entry::to_json`].
     pub fn from_json(v: &Value) -> Result<Entry, EntryError> {
         let Some(map) = v.as_object() else {
@@ -339,20 +358,7 @@ impl Entry {
                 })
             }
         };
-        let known: &[&str] = match &entry {
-            Entry::Done { .. } => &["kind", "at", "input", "result"],
-            Entry::Failed { .. } => &["kind", "at", "input", "code", "message"],
-            Entry::Started { .. } => &["kind", "at", "input"],
-            Entry::Item { .. } | Entry::Ended { .. } => &["kind", "at", "value"],
-            Entry::Emitted { .. } => &["kind", "output", "within", "from"],
-            Entry::Through { .. } => &["kind", "at", "items", "handed"],
-            Entry::Stopped { how, .. } => match how {
-                Ending::Ended(_) => &["kind", "at", "items", "how", "value"],
-                Ending::Failed { .. } => &["kind", "at", "items", "how", "code", "message"],
-                Ending::Abandoned => &["kind", "at", "items", "how"],
-            },
-            Entry::Timed { .. } => &["kind", "at", "timing"],
-        };
+        let known = entry.json_fields();
         if let Some(extra) = map.keys().find(|k| !known.contains(&k.as_str())) {
             return Err(EntryError::UnknownField {
                 kind,

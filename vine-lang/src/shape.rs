@@ -33,7 +33,7 @@ pub enum ShapeError {
         /// What was written instead, such as `a list`.
         found: &'static str,
     },
-    /// A field name is not lower snake_case.
+    /// A field name is not lower `snake_case`.
     #[error("field name `{name}` must be lower snake_case (a-z, 0-9, _)")]
     BadFieldName {
         /// The field name as written.
@@ -215,6 +215,7 @@ impl Shape {
     }
 
     /// Add a required field.
+    #[must_use]
     pub fn required(mut self, name: &str, ty: Ty) -> Self {
         self.fields
             .insert(name.to_owned(), Field { ty, required: true });
@@ -222,6 +223,7 @@ impl Shape {
     }
 
     /// Add an optional field.
+    #[must_use]
     pub fn optional(mut self, name: &str, ty: Ty) -> Self {
         self.fields.insert(
             name.to_owned(),
@@ -285,7 +287,6 @@ impl Shape {
                         ty: field.ty,
                     });
                 }
-                None => {}
                 Some(Value::Null) if !field.required => {}
                 Some(value) if !field.ty.fits(value) => {
                     return Err(Misfit::WrongType {
@@ -294,7 +295,7 @@ impl Shape {
                         found: describe(value),
                     });
                 }
-                Some(_) => {}
+                None | Some(_) => {}
             }
         }
         if !self.open {

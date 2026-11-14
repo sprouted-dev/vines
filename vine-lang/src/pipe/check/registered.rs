@@ -13,7 +13,7 @@ use crate::pipe::call_sites::Feed;
 use crate::pipe::flow::{per_item, per_item_stream, Transform};
 use crate::pipe::unit::{add_field, Runner, Unit};
 use crate::pipe::{Keep, Operator};
-use crate::registry::Run;
+use crate::registry::{Registered, Run};
 use crate::shape::Ty;
 
 impl Checker<'_> {
@@ -27,7 +27,7 @@ impl Checker<'_> {
         let path = site.path;
         let known = &site.known;
         let single = site.single;
-        let (unit, next) = self.unit(op, path, &known)?;
+        let (unit, next) = self.unit(op, path, known)?;
         if let Some(gives) = self.reg.stream_gives(&unit.spec.name) {
             let saving = unit.saving.clone();
             let name = unit.spec.name.clone();
@@ -35,7 +35,7 @@ impl Checker<'_> {
         }
         if matches!(unit.runner, Runner::Stream(_)) {
             Ok((
-                per_item_stream(move |item, tag, cx| unit.stream(item, tag, cx)),
+                per_item_stream(move |item, tag, cx| unit.stream(item, &tag, &cx)),
                 next,
             ))
         } else {
@@ -82,7 +82,7 @@ impl Checker<'_> {
                 }
             };
             // Each one sees the item as it was before any of them ran.
-            let (unit, _) = self.unit(part, &at, &known)?;
+            let (unit, _) = self.unit(part, &at, known)?;
             if matches!(unit.runner, Runner::Stream(_)) {
                 return Err(malformed(
                     &at,
@@ -144,27 +144,7 @@ impl Checker<'_> {
             });
         };
         let spec = registered.spec.clone();
-        let runner = match (&registered.run, registered.reaches_outside(), called) {
-            (Run::Once(h), false, false) => Runner::Pure(h.clone()),
-            (Run::Once(h), true, true) => Runner::Outside(h.clone()),
-            (Run::Stream { handler, .. }, true, true) => Runner::Stream(handler.clone()),
-            (_, true, false) => {
-                return Err(malformed(
-                    path,
-                    &format!(
-                        "`{name}` touches something outside, so a pipe runs it with `call`, or `tap` for its effect"
-                    ),
-                ))
-            }
-            (_, false, _) => {
-                return Err(malformed(
-                    path,
-                    &format!(
-                        "`call` and `tap` run an operator that touches something outside, and `{name}` touches nothing; run it by its name"
-                    ),
-                ))
-            }
-        };
+        let runner = runner(registered, name, called, path)?;
         let with_path = if called {
             self.calls.insert(name.clone());
             self.timeouts.call(path);
@@ -172,35 +152,7 @@ impl Checker<'_> {
         } else {
             format!("{path}.{name}")
         };
-        let is_stream = matches!(runner, Runner::Stream(_));
-        if is_stream && *keep == Keep::Tap {
-            return Err(malformed(
-                path,
-                &format!(
-                    "`tap` runs an operator for its effect and lets the item on once; `{name}` gives a stream, so use `call`"
-                ),
-            ));
-        }
-        if let Some(end) = end {
-            if !is_stream {
-                return Err(malformed(
-                    &format!("{path}.end"),
-                    &format!("`end` names where a stream operator's end goes, and `{name}` is not a stream operator"),
-                ));
-            }
-            if !is_name(end) {
-                return Err(malformed(
-                    &format!("{path}.end"),
-                    "`end` is a name, lower snake_case",
-                ));
-            }
-            if *keep == Keep::Into(end.clone()) {
-                return Err(LoadError::DuplicateBinding {
-                    path: format!("{path}.end"),
-                    name: end.clone(),
-                });
-            }
-        }
+        check_stream_use(&runner, name, keep, end.as_ref(), path)?;
         let template = Template::parse(with).map_err(|p| malformed(&with_path, &p.to_string()))?;
         check_refs(template.refs(), known, &with_path)?;
         spec.settings
@@ -242,4 +194,74 @@ impl Checker<'_> {
         };
         Ok((unit, next))
     }
+}
+
+/// How a pipe runs the registered operator `name` at `path`, and whether it may:
+/// one that touches something outside only by `call` or `tap` (`called`),
+/// one that touches nothing only by its name.
+fn runner(
+    registered: &Registered,
+    name: &str,
+    called: bool,
+    path: &str,
+) -> Result<Runner, LoadError> {
+    match (&registered.run, registered.reaches_outside(), called) {
+        (Run::Once(h), false, false) => Ok(Runner::Pure(h.clone())),
+        (Run::Once(h), true, true) => Ok(Runner::Outside(h.clone())),
+        (Run::Stream { handler, .. }, true, true) => Ok(Runner::Stream(handler.clone())),
+        (_, true, false) => Err(malformed(
+            path,
+            &format!(
+                "`{name}` touches something outside, so a pipe runs it with `call`, or `tap` for its effect"
+            ),
+        )),
+        (_, false, _) => Err(malformed(
+            path,
+            &format!(
+                "`call` and `tap` run an operator that touches something outside, and `{name}` touches nothing; run it by its name"
+            ),
+        )),
+    }
+}
+
+/// Refuse `tap` on a stream operator, and an `end` that is on an operator
+/// that gives no stream, is not a name, or is the `into` field too.
+fn check_stream_use(
+    runner: &Runner,
+    name: &str,
+    keep: &Keep,
+    end: Option<&String>,
+    path: &str,
+) -> Result<(), LoadError> {
+    let is_stream = matches!(runner, Runner::Stream(_));
+    if is_stream && *keep == Keep::Tap {
+        return Err(malformed(
+            path,
+            &format!(
+                "`tap` runs an operator for its effect and lets the item on once; `{name}` gives a stream, so use `call`"
+            ),
+        ));
+    }
+    let Some(end) = end else {
+        return Ok(());
+    };
+    if !is_stream {
+        return Err(malformed(
+            &format!("{path}.end"),
+            &format!("`end` names where a stream operator's end goes, and `{name}` is not a stream operator"),
+        ));
+    }
+    if !is_name(end) {
+        return Err(malformed(
+            &format!("{path}.end"),
+            "`end` is a name, lower snake_case",
+        ));
+    }
+    if *keep == Keep::Into(end.clone()) {
+        return Err(LoadError::DuplicateBinding {
+            path: format!("{path}.end"),
+            name: end.clone(),
+        });
+    }
+    Ok(())
 }

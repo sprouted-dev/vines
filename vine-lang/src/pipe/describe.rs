@@ -129,13 +129,14 @@ impl Operator {
     /// For [`split`], each new item is the old one with the element added
     /// under `name`. For [`buffer_count`], the item kept is the last one of
     /// the batch, with the batch added under `name`.
+    #[must_use]
     pub fn into(mut self, name: &str) -> Self {
         match &mut self {
             Operator::Named { keep, .. }
             | Operator::Call { keep, .. }
             | Operator::Use { keep, .. } => *keep = Keep::Into(name.to_owned()),
             Operator::Split { into, .. } | Operator::BufferCount { into, .. } => {
-                *into = Some(name.to_owned())
+                *into = Some(name.to_owned());
             }
             _ => {}
         }
@@ -144,6 +145,7 @@ impl Operator {
 
     /// For [`call`] on a stream operator: after the items, give one last
     /// item with the operator's end value added under `name`.
+    #[must_use]
     pub fn end(mut self, name: &str) -> Self {
         if let Operator::Call { end, .. } = &mut self {
             *end = Some(name.to_owned());
@@ -153,6 +155,7 @@ impl Operator {
 
     /// For [`use_vine`]: the operators to run for what the other vine
     /// sends to this output. Every output of the other vine needs one.
+    #[must_use]
     pub fn on(mut self, output: &str, operators: impl IntoIterator<Item = Operator>) -> Self {
         if let Operator::Use { on, .. } = &mut self {
             on.push((output.to_owned(), operators.into_iter().collect()));
@@ -162,6 +165,7 @@ impl Operator {
 
     /// For [`merge_map`]: run at most this many side by side. The checker
     /// refuses it on the other mapping operators.
+    #[must_use]
     pub fn concurrent(mut self, limit: usize) -> Self {
         if let Operator::Mapped { concurrent, .. } = &mut self {
             *concurrent = Some(limit);
@@ -382,18 +386,21 @@ pub fn pipe(name: &str) -> PipeDef {
 
 impl PipeDef {
     /// The shape of each item that goes in.
+    #[must_use]
     pub fn input(mut self, shape: Shape) -> Self {
         self.input = shape;
         self
     }
 
     /// Declare one named output and the shape of what it carries.
+    #[must_use]
     pub fn output(mut self, name: &str, shape: Shape) -> Self {
         self.outputs.insert(name.to_owned(), shape);
         self
     }
 
     /// The operators, first to last.
+    #[must_use]
     pub fn operators(mut self, operators: impl IntoIterator<Item = Operator>) -> Self {
         self.operators = operators.into_iter().collect();
         self

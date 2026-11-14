@@ -74,6 +74,11 @@ impl Journal {
         self.entries.is_empty()
     }
 
+    /// The entries, oldest first, taken out of the journal.
+    pub(crate) fn into_entries(self) -> Vec<Entry> {
+        self.entries
+    }
+
     /// The journal as a JSON list of entries.
     pub fn to_json(&self) -> Value {
         Value::Array(self.entries.iter().map(Entry::to_json).collect())

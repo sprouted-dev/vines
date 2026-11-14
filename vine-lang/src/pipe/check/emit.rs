@@ -30,31 +30,28 @@ impl Checker<'_> {
                 name: to.to_owned(),
             });
         };
-        let with = match with {
-            Some(w) => {
-                let at = format!("{here}.with");
-                let t = Template::parse(w).map_err(|p| malformed(&at, &p.to_string()))?;
-                check_refs(t.refs(), &known, &at)?;
-                shape
-                    .check_template(&t)
+        let with = if let Some(w) = with {
+            let at = format!("{here}.with");
+            let t = Template::parse(w).map_err(|p| malformed(&at, &p.to_string()))?;
+            check_refs(t.refs(), known, &at)?;
+            shape
+                .check_template(&t)
+                .map_err(|problem| LoadError::OutputMisfit {
+                    path: at,
+                    output: to.to_owned(),
+                    problem: problem.to_string(),
+                })?;
+            Some(t)
+        } else {
+            if let Some(item) = &known {
+                item.fits_into(&shape)
                     .map_err(|problem| LoadError::OutputMisfit {
-                        path: at,
+                        path: here.clone(),
                         output: to.to_owned(),
                         problem: problem.to_string(),
                     })?;
-                Some(t)
             }
-            None => {
-                if let Some(item) = &known {
-                    item.fits_into(&shape)
-                        .map_err(|problem| LoadError::OutputMisfit {
-                            path: here.clone(),
-                            output: to.to_owned(),
-                            problem: problem.to_string(),
-                        })?;
-                }
-                None
-            }
+            None
         };
         let (to, at) = (to.to_owned(), here);
         let t: Transform = Arc::new(move |items: Items, _cx: Cx| {

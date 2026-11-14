@@ -179,27 +179,7 @@ impl Checker<'_> {
             }
             if let Some(word) = applies_to_before(op) {
                 // It wraps everything before it in this pipe, per item.
-                if i == 0 {
-                    return Err(malformed(
-                        &here,
-                        &format!("`{word}` applies to the operators before it, and there are none"),
-                    ));
-                }
-                if let Some(wide) = ops[..i].iter().find_map(stream_wide) {
-                    return Err(malformed(
-                        &here,
-                        &format!(
-                            "`{word}` applies to the operators before it one item at a time, but `{wide}` works across the whole stream; put `{wide}` after `{word}`"
-                        ),
-                    ));
-                }
-                if matches!(op, Operator::CatchError(_) | Operator::Finalize(_))
-                    && merges_anywhere(self.reg, &ops[..i])
-                {
-                    self.not_resumable(format!(
-                        "{here} is a `{word}` over a `mergeMap`, and drops the items still running when one fails; how far they got depends on timing, so a restart could drop them elsewhere; put the `{word}` inside the `mergeMap`"
-                    ));
-                }
+                self.check_applied(op, word, &ops[..i], &here)?;
                 let body = chain(std::mem::take(&mut transforms));
                 let (t, handler_feeds) = self.apply_to_before(op, &here, body, &view)?;
                 transforms.push(t);
@@ -221,19 +201,7 @@ impl Checker<'_> {
                 continue;
             }
             if one_item {
-                let word = match op {
-                    Operator::Last => Some("last"),
-                    Operator::BufferCount { .. } => Some("bufferCount"),
-                    _ => None,
-                };
-                if let Some(word) = word {
-                    return Err(malformed(
-                        &format!("{here}.{word}"),
-                        &format!(
-                            "`{word}` would only ever see one item here: the operators before `catchError`, `finalize`, `retry` or `timeout`, and inside `concatMap`, `mergeMap`, `switchMap`, `exhaustMap`, `branch`, `catchError`, `finalize` and `use`, run once for each item; put an operator that makes many items from one, such as `split` or a stream operator, before it"
-                        ),
-                    ));
-                }
+                refuse_on_one_item(op, &here)?;
             }
             let here_stream = match view.stream {
                 Stream::PerItem => Stream::PerItem,
@@ -264,6 +232,40 @@ impl Checker<'_> {
             transform: chain(transforms),
             feeds,
         })
+    }
+
+    /// Refuse `catchError`, `finalize`, `retry` or `timeout` (`word`) where
+    /// it cannot apply to the operators `before` it, and mark the vine
+    /// unresumable where a restart could not rebuild what it drops.
+    fn check_applied(
+        &mut self,
+        op: &Operator,
+        word: &str,
+        before: &[Operator],
+        here: &str,
+    ) -> Result<(), LoadError> {
+        if before.is_empty() {
+            return Err(malformed(
+                here,
+                &format!("`{word}` applies to the operators before it, and there are none"),
+            ));
+        }
+        if let Some(wide) = before.iter().find_map(stream_wide) {
+            return Err(malformed(
+                here,
+                &format!(
+                    "`{word}` applies to the operators before it one item at a time, but `{wide}` works across the whole stream; put `{wide}` after `{word}`"
+                ),
+            ));
+        }
+        if matches!(op, Operator::CatchError(_) | Operator::Finalize(_))
+            && merges_anywhere(self.reg, before)
+        {
+            self.not_resumable(format!(
+                "{here} is a `{word}` over a `mergeMap`, and drops the items still running when one fails; how far they got depends on timing, so a restart could drop them elsewhere; put the `{word}` inside the `mergeMap`"
+            ));
+        }
+        Ok(())
     }
 
     /// Refuse, for a run from a saved position, an operator that keeps
@@ -334,10 +336,10 @@ impl Checker<'_> {
         };
         match op {
             Operator::Named { .. } | Operator::Call { .. } => self.registered(op, &site, feeds),
-            Operator::Split { from, into } => self.split(site, from, into.as_ref()),
+            Operator::Split { from, into } => Self::split(site, from, into.as_ref()),
             Operator::Filter { when } => Self::filter(site, when),
             Operator::Take(count) => self.take(site, *count, feeds),
-            Operator::Last => Self::last(site),
+            Operator::Last => Ok(Self::last(site)),
             Operator::BufferCount { buffer_size, into } => {
                 self.buffer_count(site, *buffer_size, into.as_ref(), feeds)
             }
@@ -368,6 +370,22 @@ impl Checker<'_> {
             Operator::Emit { to, with } => self.emit(&site, to, with.as_ref()),
         }
     }
+}
+
+/// Refuse `last` and `bufferCount` where the stream reaching them is one
+/// item.
+fn refuse_on_one_item(op: &Operator, here: &str) -> Result<(), LoadError> {
+    let word = match op {
+        Operator::Last => "last",
+        Operator::BufferCount { .. } => "bufferCount",
+        _ => return Ok(()),
+    };
+    Err(malformed(
+        &format!("{here}.{word}"),
+        &format!(
+            "`{word}` would only ever see one item here: the operators before `catchError`, `finalize`, `retry` or `timeout`, and inside `concatMap`, `mergeMap`, `switchMap`, `exhaustMap`, `branch`, `catchError`, `finalize` and `use`, run once for each item; put an operator that makes many items from one, such as `split` or a stream operator, before it"
+        ),
+    ))
 }
 
 /// `$item` is the only name in a pipe. A field is checked when the item's
