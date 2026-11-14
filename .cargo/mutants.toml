@@ -1,0 +1,16 @@
+# cargo-mutants configuration, read by `just mutants`, `just mutants-touched`
+# (scripts/mutants-in-diff.sh) and any `cargo mutants` run in this checkout.
+
+test_tool = "nextest"
+# The nextest `mutants` profile (.config/nextest.toml) stops at the first
+# failing test and kills a hung one at 5s.
+additional_cargo_test_args = ["--profile", "mutants"]
+
+# Each exclusion removes mutants that say nothing about whether behavior is
+# tested. Add one only with a reason beside it; a mutant that is merely hard
+# to kill belongs in a test, not here.
+exclude_re = [
+  # Debug output is for humans reading logs and test failures; no behavior
+  # depends on it.
+  '<impl (std::|core::)?(fmt::)?Debug for ',
+]

@@ -1,0 +1,44 @@
+# cargo-nextest configuration. `just test` uses the default profile,
+# `just flaky-hunt <runs>` the flaky-hunt profile, and cargo-mutants the
+# mutants profile (.cargo/mutants.toml).
+#
+# Every test here runs on a paused Tokio clock and takes milliseconds, so a
+# test still running after seconds is hung, not slow.
+
+[profile.default]
+# A failure is a failure: no retries, here or anywhere. A flaky test is a bug
+# in the test or the code (test-quality skill).
+retries = 0
+# Every failure is reported, not just the first.
+fail-fast = false
+# Flag a test SLOW at 10s and kill it at 30s.
+slow-timeout = { period = "10s", terminate-after = 3, grace-period = "1s" }
+failure-output = "immediate-final"
+success-output = "never"
+status-level = "slow"
+final-status-level = "slow"
+
+# `just flaky-hunt <runs>` runs every test <runs> times (nextest stress
+# mode) under this profile and lists each test that failed in any run.
+# Still no retries: a retry would hide the failure being hunted.
+[profile.flaky-hunt]
+retries = 0
+fail-fast = false
+slow-timeout = { period = "10s", terminate-after = 3, grace-period = "1s" }
+failure-output = "final"
+success-output = "never"
+status-level = "fail"
+final-status-level = "fail"
+
+# cargo-mutants (`just mutants`, `just mutants-touched`). A mutant that
+# makes a test hang is caught by that test: kill it at 5s and stop at the
+# first failure, so a caught mutant costs seconds, not cargo-mutants' whole
+# timeout.
+[profile.mutants]
+retries = 0
+fail-fast = true
+slow-timeout = { period = "5s", terminate-after = 1, grace-period = "1s" }
+failure-output = "never"
+success-output = "never"
+status-level = "none"
+final-status-level = "none"
