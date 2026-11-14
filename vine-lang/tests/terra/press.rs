@@ -161,14 +161,6 @@ impl Press {
         });
         let mut store = self.inner.store.lock().unwrap();
         let (landings, ended) = match store.admit(&self.id, &installed.decl, &self.payload) {
-            Admission::Clash => {
-                drop(store);
-                let e = OpError::new(
-                    "request_clash",
-                    format!("request {} was for another move or payload", self.id),
-                );
-                return self.finish(Err(e));
-            }
             Admission::Refused(refusal) => {
                 drop(store);
                 let gate = json!({ "status": "refused", "gate": refusal.gate() });

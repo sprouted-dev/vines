@@ -71,8 +71,6 @@ pub(super) enum Admission {
         landings: Vec<Landing>,
         end: Option<End>,
     },
-    /// The id names a request for another move or payload.
-    Clash,
 }
 
 impl Store {
@@ -105,6 +103,13 @@ impl Store {
             .filter(|(_, r)| r.move_name() == move_name)
             .map(|(id, _)| id.clone())
             .collect()
+    }
+
+    /// Whether `id` names a press of another move or payload.
+    pub(super) fn clashes(&self, id: &str, move_name: &str, payload: &Value) -> bool {
+        self.requests
+            .get(id)
+            .is_some_and(|r| r.move_name() != move_name || r.payload() != payload)
     }
 
     /// Whether `id` names a press that has not ended.
@@ -156,10 +161,10 @@ impl Store {
     /// refusal is kept too, so the same id is refused the same way after
     /// a restart, whatever the facts are by then.
     pub(super) fn admit(&mut self, id: &str, decl: &Move, payload: &Value) -> Admission {
+        if self.clashes(id, decl.name, payload) {
+            return Admission::Refused(Refusal::IdTaken);
+        }
         if let Some(known) = self.requests.get(id) {
-            if known.move_name() != decl.name || known.payload() != payload {
-                return Admission::Clash;
-            }
             return match known {
                 Request::Refused { refusal, .. } => Admission::Refused(refusal.clone()),
                 Request::Accepted(a) => Admission::Accepted {

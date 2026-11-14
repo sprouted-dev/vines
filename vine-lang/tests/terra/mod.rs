@@ -203,6 +203,8 @@ pub enum Refusal {
     Gate(String),
     /// A fact the vine needs, at this path, is missing.
     Missing(String),
+    /// The request id names a press of another move or payload.
+    IdTaken,
 }
 
 impl Refusal {
@@ -213,6 +215,7 @@ impl Refusal {
             Refusal::Payload(_) => "payload".into(),
             Refusal::Gate(gate) => gate.clone(),
             Refusal::Missing(path) => format!("missing:{path}"),
+            Refusal::IdTaken => "id_taken".into(),
         }
     }
 }
@@ -454,6 +457,9 @@ impl Terra {
     pub async fn press_as(&self, id: &str, name: &str, payload: Value) -> Option<Answer> {
         if self.inner.installed(name).is_none() {
             return Some(Answer::Refused(Refusal::UnknownMove));
+        }
+        if self.inner.store.lock().unwrap().clashes(id, name, &payload) {
+            return Some(Answer::Refused(Refusal::IdTaken));
         }
         let parts = press::parts(self.inner.clone(), id.into(), name.into(), payload);
         if !press::drain(parts, &self.inner.fault.crashed).await {
