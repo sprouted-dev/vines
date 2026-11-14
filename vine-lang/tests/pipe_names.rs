@@ -3,6 +3,7 @@
 //! YAML, and this file passes with the feature off:
 //!
 //!     cargo test --no-default-features --test pipe_names
+#![cfg(test)]
 
 mod fake;
 

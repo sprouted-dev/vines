@@ -47,11 +47,14 @@
 //! gets its id from its parent's id, its move and its payload, so after a
 //! restart the same press gets the same id. [`Terra::crash_at`] stops
 //! everything at a chosen point, as a crash of the process would.
-#![allow(dead_code)]
+// Each test binary compiles this module and uses a subset of it. An
+// `expect` would go unfulfilled in the binaries that use all of it, and
+// clippy's `allow_attributes` checks outer attributes only.
+#![allow(dead_code, reason = "each test binary uses a subset of the fixtures")]
 
 mod install;
 mod loops;
-pub mod moves;
+pub(crate) mod moves;
 mod press;
 mod store;
 
@@ -62,20 +65,20 @@ use tokio::sync::Notify;
 use vine_lang::pipe::{Pipe, PipeDef};
 use vine_lang::{LoadError, Registry, Ty, Value};
 
-pub use loops::LoopWhy;
+pub(crate) use loops::LoopWhy;
 use store::Store;
 
 /// A gate: the fact at `path` must equal `equals`, or the press is refused
-/// with `gate`. Paths start at the payload field the move names, such as
-/// `job.state` or `job.plan.state`.
-pub struct Gate {
+/// with the gate's `name`. Paths start at the payload field the move names,
+/// such as `job.state` or `job.plan.state`.
+pub(crate) struct Gate {
     pub path: &'static str,
     pub equals: Value,
-    pub gate: &'static str,
+    pub name: &'static str,
 }
 
 /// Where a value of the vine's input comes from.
-pub enum Read {
+pub(crate) enum Read {
     /// A fact, read along a path such as `job.plan.branch`.
     Fact(&'static str),
     /// The id of this press, for a vine that presses other moves.
@@ -83,14 +86,14 @@ pub enum Read {
 }
 
 /// A value the vine needs that the caller does not send.
-pub struct Need {
+pub(crate) struct Need {
     pub name: &'static str,
     pub ty: Ty,
     pub from: Read,
 }
 
 impl Need {
-    pub fn fact(name: &'static str, ty: Ty, path: &'static str) -> Need {
+    pub(crate) fn fact(name: &'static str, ty: Ty, path: &'static str) -> Need {
         Need {
             name,
             ty,
@@ -99,7 +102,7 @@ impl Need {
     }
 
     /// The press's own request id, under the name `request`.
-    pub fn request() -> Need {
+    pub(crate) fn request() -> Need {
         Need {
             name: "request",
             ty: Ty::Text,
@@ -110,14 +113,14 @@ impl Need {
 
 /// What one output of the move's vine becomes: an event of `kind` on the
 /// move's target, which sets these facts of the target when it lands.
-pub struct Lands {
+pub(crate) struct Lands {
     pub output: &'static str,
     pub kind: &'static str,
     pub sets: Vec<(&'static str, Value)>,
 }
 
 impl Lands {
-    pub fn new(output: &'static str, kind: &'static str) -> Lands {
+    pub(crate) fn new(output: &'static str, kind: &'static str) -> Lands {
         Lands {
             output,
             kind,
@@ -125,7 +128,7 @@ impl Lands {
         }
     }
 
-    pub fn sets(mut self, field: &'static str, value: Value) -> Lands {
+    pub(crate) fn sets(mut self, field: &'static str, value: Value) -> Lands {
         self.sets.push((field, value));
         self
     }
@@ -133,7 +136,7 @@ impl Lands {
 
 /// A move as declared. `target` is the payload field that names the
 /// artifact the move works on.
-pub struct Move {
+pub(crate) struct Move {
     pub name: &'static str,
     pub target: &'static str,
     pub payload: Vec<(&'static str, Ty)>,
@@ -147,7 +150,7 @@ pub struct Move {
 
 /// What starts a reaction.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Trigger {
+pub(crate) enum Trigger {
     /// An event of this kind landed.
     Event(&'static str),
     /// An output of a press of this move was abandoned.
@@ -156,7 +159,7 @@ pub enum Trigger {
 
 /// Where one payload field of a reaction's press comes from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Pick {
+pub(crate) enum Pick {
     /// The artifact the event landed on.
     Artifact,
     /// A field of the event's payload, along a dotted path.
@@ -164,14 +167,14 @@ pub enum Pick {
 }
 
 /// When `on` happens, press `press` with a payload made from the event.
-pub struct Reaction {
+pub(crate) struct Reaction {
     pub on: Trigger,
     pub press: &'static str,
     pub payload: Vec<(&'static str, Pick)>,
 }
 
 /// One vine of a trellis, as Rust or as YAML.
-pub enum VineSource {
+pub(crate) enum VineSource {
     Def(PipeDef),
     #[cfg(feature = "yaml")]
     Yaml(String),
@@ -180,7 +183,7 @@ pub enum VineSource {
 /// A package of vines, the moves that start some of them, and the
 /// reactions that press moves when events land. Vines are built in the
 /// order listed, so a vine can use only a vine listed before it.
-pub struct Trellis {
+pub(crate) struct Trellis {
     pub vines: Vec<VineSource>,
     pub moves: Vec<Move>,
     pub reactions: Vec<Reaction>,
@@ -188,18 +191,18 @@ pub struct Trellis {
 
 /// An event that landed on an artifact.
 #[derive(Debug, Clone, PartialEq)]
-pub struct Event {
+pub(crate) struct Event {
     pub artifact: String,
     pub kind: String,
     pub payload: Value,
 }
 
 /// The event kind of an output Terra refused because a fact changed.
-pub const ABANDONED: &str = "abandoned";
+pub(crate) const ABANDONED: &str = "abandoned";
 
 /// Why a press was refused before its vine ran.
 #[derive(Debug, Clone, PartialEq)]
-pub enum Refusal {
+pub(crate) enum Refusal {
     UnknownMove,
     /// The payload does not fit the move.
     Payload(String),
@@ -213,7 +216,7 @@ pub enum Refusal {
 
 impl Refusal {
     /// The name a calling vine sees under `gate`.
-    pub fn gate(&self) -> String {
+    pub(crate) fn gate(&self) -> String {
         match self {
             Refusal::UnknownMove => "unknown_move".into(),
             Refusal::Payload(_) => "payload".into(),
@@ -226,14 +229,14 @@ impl Refusal {
 
 /// Whether an output became its event, or was abandoned.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Fate {
+pub(crate) enum Fate {
     Landed,
     Abandoned,
 }
 
 /// One output of a press's vine, and what Terra did with it.
 #[derive(Debug, Clone, PartialEq)]
-pub struct Landing {
+pub(crate) struct Landing {
     pub output: String,
     pub payload: Value,
     pub fate: Fate,
@@ -243,7 +246,7 @@ pub struct Landing {
 
 /// How a press's vine ended.
 #[derive(Debug, Clone, PartialEq)]
-pub enum End {
+pub(crate) enum End {
     Done,
     /// The vine failed and nothing in it caught the failure.
     Failed(String),
@@ -251,7 +254,7 @@ pub enum End {
 
 /// The answer to a press.
 #[derive(Debug, Clone, PartialEq)]
-pub enum Answer {
+pub(crate) enum Answer {
     Refused(Refusal),
     Ran {
         request: String,
@@ -262,12 +265,12 @@ pub enum Answer {
 
 impl Answer {
     /// The events this press landed for its own outputs, in order.
-    pub fn landed(&self) -> Vec<Event> {
+    pub(crate) fn landed(&self) -> Vec<Event> {
         self.with_fate(Fate::Landed)
     }
 
     /// The `abandoned` events this press landed, in order.
-    pub fn abandoned(&self) -> Vec<Event> {
+    pub(crate) fn abandoned(&self) -> Vec<Event> {
         self.with_fate(Fate::Abandoned)
     }
 
@@ -285,7 +288,7 @@ impl Answer {
 
 /// Why a trellis was not installed.
 #[derive(Debug, Clone, PartialEq)]
-pub enum InstallError {
+pub(crate) enum InstallError {
     /// The vine at this place in the trellis's list did not build.
     Load {
         at: usize,
@@ -398,13 +401,13 @@ impl Inner {
     }
 }
 
-pub struct Terra {
+pub(crate) struct Terra {
     inner: Arc<Inner>,
 }
 
 impl Terra {
     /// A Terra whose vines can run the registered operators of `base`.
-    pub fn new(base: Registry) -> Terra {
+    pub(crate) fn new(base: Registry) -> Terra {
         Terra {
             inner: Arc::new(Inner {
                 base,
@@ -418,38 +421,38 @@ impl Terra {
     }
 
     /// Put an artifact's facts in place.
-    pub fn put(&self, id: &str, facts: Value) {
+    pub(crate) fn put(&self, id: &str, facts: Value) {
         self.inner.store.lock().unwrap().put(id, facts);
     }
 
     /// Change one fact of an artifact. Its version moves.
-    pub fn set(&self, id: &str, field: &str, value: Value) {
+    pub(crate) fn set(&self, id: &str, field: &str, value: Value) {
         self.inner.store.lock().unwrap().set(id, field, value);
     }
 
     /// One fact of an artifact, or null.
-    pub fn fact(&self, id: &str, field: &str) -> Value {
+    pub(crate) fn fact(&self, id: &str, field: &str) -> Value {
         self.inner.store.lock().unwrap().fact(id, field)
     }
 
     /// Every event that landed, in the order it landed.
-    pub fn events(&self) -> Vec<Event> {
+    pub(crate) fn events(&self) -> Vec<Event> {
         self.inner.store.lock().unwrap().events.clone()
     }
 
     /// The ids of every request Terra holds for `move_name`, sorted.
-    pub fn requests_of(&self, move_name: &str) -> Vec<String> {
+    pub(crate) fn requests_of(&self, move_name: &str) -> Vec<String> {
         self.inner.store.lock().unwrap().requests_of(move_name)
     }
 
     /// Install a trellis, or say why not. Nothing waits until a move is
     /// pressed to fail. See [`InstallError`] for what is checked.
-    pub fn install(&self, trellis: Trellis) -> Result<(), InstallError> {
+    pub(crate) fn install(&self, trellis: Trellis) -> Result<(), InstallError> {
         install::install(&self.inner, trellis)
     }
 
     /// Press a move as an outside caller, under a new request id.
-    pub async fn press(&self, name: &str, payload: Value) -> Answer {
+    pub(crate) async fn press(&self, name: &str, payload: Value) -> Answer {
         let id = self.inner.store.lock().unwrap().new_request_id();
         self.press_as(&id, name, payload)
             .await
@@ -458,7 +461,7 @@ impl Terra {
 
     /// Press a move under `id`. A press with an id Terra holds attaches
     /// to that request. Gives nothing when Terra crashed partway.
-    pub async fn press_as(&self, id: &str, name: &str, payload: Value) -> Option<Answer> {
+    pub(crate) async fn press_as(&self, id: &str, name: &str, payload: Value) -> Option<Answer> {
         if self.inner.installed(name).is_none() {
             return Some(Answer::Refused(Refusal::UnknownMove));
         }
@@ -476,7 +479,7 @@ impl Terra {
     /// the last call, and the events those land, until none is left. Each
     /// reaction's request id is made from the event's place in the log, so
     /// a reaction pressed again attaches to the first.
-    pub async fn react(&self) -> Vec<Answer> {
+    pub(crate) async fn react(&self) -> Vec<Answer> {
         let mut answers = Vec::new();
         loop {
             let next = {
@@ -498,7 +501,7 @@ impl Terra {
 
     /// Press the reactions to the event at `at` in the log again, as a
     /// queue that delivers twice would.
-    pub async fn redeliver(&self, at: usize) -> Vec<Answer> {
+    pub(crate) async fn redeliver(&self, at: usize) -> Vec<Answer> {
         self.react_to(at).await
     }
 
@@ -519,7 +522,7 @@ impl Terra {
 
     /// Crash at the `n`th point from now where a crash can fall: before
     /// and after Terra keeps each thing a vine's run gives.
-    pub fn crash_at(&self, n: u64) {
+    pub(crate) fn crash_at(&self, n: u64) {
         let mut s = self.inner.fault.state.lock().unwrap();
         *s = FaultState {
             at: Some(n),
@@ -528,18 +531,18 @@ impl Terra {
     }
 
     /// Start again after a crash, keeping everything stored.
-    pub fn restart(&self) {
+    pub(crate) fn restart(&self) {
         *self.inner.fault.state.lock().unwrap() = FaultState::default();
     }
 
     /// How many points where a crash can fall have passed since the last
     /// [`Terra::crash_at`] or [`Terra::restart`].
-    pub fn ticks(&self) -> u64 {
+    pub(crate) fn ticks(&self) -> u64 {
         self.inner.fault.state.lock().unwrap().ticks
     }
 
     /// Where the last crash fell, such as `before r-1 keeps {..}`.
-    pub fn crash_point(&self) -> Option<String> {
+    pub(crate) fn crash_point(&self) -> Option<String> {
         self.inner.fault.state.lock().unwrap().point.clone()
     }
 }

@@ -1,5 +1,6 @@
 //! `job_run` written in YAML is the same vine as `job_run` built in Rust,
 //! and the YAML forms of `fork`, `last`, `bufferCount` and `end`.
+#![cfg(test)]
 #![cfg(feature = "yaml")]
 
 mod fake;
@@ -77,19 +78,19 @@ fn setups() -> Vec<(&'static str, Setup)> {
     vec![
         ("finished", |_, _| {}),
         ("agent failed", |_, h| {
-            h.script("job-1", Script::new(70, "failed"))
+            h.script("job-1", Script::new(70, "failed"));
         }),
         ("agent cancelled", |_, h| {
-            h.script("job-1", Script::new(70, "cancelled"))
+            h.script("job-1", Script::new(70, "cancelled"));
         }),
         ("no lines", |_, h| {
-            h.script("job-1", Script::new(0, "finished"))
+            h.script("job-1", Script::new(0, "finished"));
         }),
         ("commit fails", |w, _| {
-            w.fail("git.commit", "empty", "nothing to commit")
+            w.fail("git.commit", "empty", "nothing to commit");
         }),
         ("working copy fails", |w, _| {
-            w.fail("git.worktree_add", "exists", "already checked out")
+            w.fail("git.worktree_add", "exists", "already checked out");
         }),
         ("host lost", |_, h| {
             h.script(
@@ -98,7 +99,7 @@ fn setups() -> Vec<(&'static str, Setup)> {
                     lost_after: Some(70),
                     ..Script::new(120, "finished")
                 },
-            )
+            );
         }),
     ]
 }

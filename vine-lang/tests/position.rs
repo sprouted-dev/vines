@@ -2,6 +2,7 @@
 //! real vines killed at every point and restarted from what the caller
 //! saved, the failures, and the vines the checker refuses. Rust alone:
 //! this file passes with YAML off.
+#![cfg(test)]
 
 mod fake;
 

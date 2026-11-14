@@ -5,6 +5,7 @@
 //! second agent is started; after one that came before it, the wait
 //! starts again. `plan_launch_all` still launches two jobs at once, and a
 //! hung one holds its slot only until its timeout.
+#![cfg(test)]
 #![cfg(feature = "yaml")]
 
 mod fake;
@@ -30,7 +31,7 @@ fn setup(hung: &[&str]) -> (Arc<World>, Terra) {
         world.slow_for(
             "agent.start",
             &format!("/trees/{job}"),
-            Duration::from_secs(24 * 3600),
+            Duration::from_hours(24),
         );
     }
     let terra = Terra::new(registry(&world));
@@ -66,7 +67,7 @@ async fn a_launch_whose_agent_hangs_times_out_and_lands_launch_failed() {
     let (world, terra) = setup(&["j-1"]);
     let start = Instant::now();
     let answer = terra.press("launch", json!({ "job": "j-1" })).await;
-    assert_eq!(start.elapsed(), Duration::from_secs(60));
+    assert_eq!(start.elapsed(), Duration::from_mins(1));
     let landed = answer.landed();
     assert_eq!(
         kinds(&landed),
@@ -144,7 +145,7 @@ async fn crash_everywhere(hung: &[&str], name: &str, payload: Value, again: usiz
         }
         // A hung launch's wait starts again after a crash that came before
         // its decision was kept; after one, it does not wait at all.
-        if restart.elapsed() >= Duration::from_secs(60) {
+        if restart.elapsed() >= Duration::from_mins(1) {
             late += 1;
         } else if restart.elapsed() == Duration::ZERO {
             at_once += 1;
@@ -170,7 +171,7 @@ async fn launching_a_plan_with_a_hung_job_takes_its_timeout_and_still_runs_two_a
         .unwrap();
     // j-1 and j-2 start together; j-1 is done at 5 and j-3 takes its slot,
     // done at 10. j-2's timeout ends the plan's launch at 60.
-    assert_eq!(start.elapsed(), Duration::from_secs(60));
+    assert_eq!(start.elapsed(), Duration::from_mins(1));
     let landed = kinds(&answer.landed());
     assert!(landed.contains(&("p-1".to_owned(), "core.plan.job_not_launched".to_owned())));
     assert_eq!(

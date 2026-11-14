@@ -7,6 +7,7 @@
 //! The vines are built in Rust, so this file passes with the YAML feature
 //! off. The operators take time on tokio's paused clock, so which item finishes
 //! when is exact and the same every run.
+#![cfg(test)]
 
 mod fake;
 

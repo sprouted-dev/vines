@@ -7,6 +7,7 @@
 //! passes with the feature off:
 //!
 //!     cargo test --no-default-features --test merge_restart
+#![cfg(test)]
 
 mod fake;
 

@@ -32,7 +32,7 @@ use super::{InstallError, Move, Pick, Reaction, Trigger};
 
 /// Why a loop was refused.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LoopWhy {
+pub(crate) enum LoopWhy {
     /// No move on the loop has a gate.
     NoGate,
     /// The loop has gates, and going round it never sets a fact a gate
@@ -129,7 +129,7 @@ fn arrows<'a>(
 /// cannot be allowed, with its arrows left in `path`.
 fn walk(
     moves: &[Move],
-    arrows: &[Arrow],
+    arrows: &[Arrow<'_>],
     start: usize,
     at: usize,
     path: &mut Vec<usize>,
@@ -156,8 +156,8 @@ fn walk(
 }
 
 /// Why this loop cannot be allowed, or nothing when a gate on it stops it.
-fn refuse(moves: &[Move], arrows: &[Arrow], path: &[usize]) -> Option<LoopWhy> {
-    let steps: Vec<&Arrow> = path.iter().map(|&n| &arrows[n]).collect();
+fn refuse(moves: &[Move], arrows: &[Arrow<'_>], path: &[usize]) -> Option<LoopWhy> {
+    let steps: Vec<&Arrow<'_>> = path.iter().map(|&n| &arrows[n]).collect();
     if steps.iter().all(|s| moves[s.from].gates.is_empty()) {
         return Some(LoopWhy::NoGate);
     }

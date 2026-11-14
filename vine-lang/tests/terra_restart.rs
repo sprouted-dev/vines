@@ -4,6 +4,7 @@
 //! After it, pressing the outer request again finishes the work: no job
 //! is pressed twice, no event is lost or repeated, and no second working
 //! copy or agent is made.
+#![cfg(test)]
 #![cfg(feature = "yaml")]
 
 mod fake;

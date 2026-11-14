@@ -5,6 +5,7 @@
 //! feature off:
 //!
 //!     cargo test --no-default-features --test terra_loops
+#![cfg(test)]
 
 mod fake;
 mod terra;
@@ -48,7 +49,7 @@ fn gated(mut m: Move, path: &'static str, equals: Value) -> Move {
     m.gates.push(Gate {
         path,
         equals,
-        gate: "gate",
+        name: "gate",
     });
     m
 }

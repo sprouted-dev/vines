@@ -3,6 +3,7 @@
 //! here uses YAML:
 //!
 //!     cargo test --no-default-features --test merge_checker
+#![cfg(test)]
 
 mod fake;
 

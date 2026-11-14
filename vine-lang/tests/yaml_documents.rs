@@ -1,5 +1,6 @@
 //! What the YAML layer refuses about a document as a whole, before it
 //! reads any operator, and what it allows.
+#![cfg(test)]
 #![cfg(feature = "yaml")]
 
 use vine_lang::{json, LoadError, Registry};

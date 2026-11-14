@@ -24,7 +24,7 @@ use vine_lang::pipe::{
 use vine_lang::{json, OpError, OperatorSpec, Part, Registry, Shape, Ty, Value};
 
 /// What the timed operators did.
-pub struct Desk {
+pub(crate) struct Desk {
     start: Instant,
     log: Mutex<Vec<String>>,
     fail: Mutex<BTreeSet<String>>,
@@ -42,7 +42,7 @@ pub struct Desk {
 }
 
 impl Desk {
-    pub fn new() -> Arc<Desk> {
+    pub(crate) fn new() -> Arc<Desk> {
         Arc::new(Desk {
             start: Instant::now(),
             log: Mutex::new(Vec::new()),
@@ -56,29 +56,29 @@ impl Desk {
     }
 
     /// How many steps were dropped while running, as a kill drops them.
-    pub fn cut_off(&self) -> usize {
+    pub(crate) fn cut_off(&self) -> usize {
         *self.cut.lock().unwrap()
     }
 
     /// The caller was handed one more result.
-    pub fn handed_a_result(&self) {
+    pub(crate) fn handed_a_result(&self) {
         *self.handed.lock().unwrap() += 1;
     }
 
     /// For each step called, in order: how many steps had finished, and
     /// how many results the caller had been handed, when it was called.
-    pub fn at_each_start(&self) -> Vec<(usize, usize)> {
+    pub(crate) fn at_each_start(&self) -> Vec<(usize, usize)> {
         self.at_start.lock().unwrap().clone()
     }
 
     /// Every line, in order, such as `start a.one @0`.
-    pub fn log(&self) -> Vec<String> {
+    pub(crate) fn log(&self) -> Vec<String> {
         self.log.lock().unwrap().clone()
     }
 
     /// The steps that were called, such as `a.one`, in the order they were
     /// called, a step called twice listed twice.
-    pub fn calls(&self) -> Vec<String> {
+    pub(crate) fn calls(&self) -> Vec<String> {
         self.log()
             .iter()
             .filter_map(|l| l.strip_prefix("start "))
@@ -87,22 +87,22 @@ impl Desk {
     }
 
     /// The most steps that were running at one time.
-    pub fn most_at_once(&self) -> usize {
+    pub(crate) fn most_at_once(&self) -> usize {
         self.running.lock().unwrap().1
     }
 
     /// Make each line of `work.lines` take `secs` seconds from now on, as
     /// a host that has slowed down would.
-    pub fn pace_lines(&self, secs: u64) {
+    pub(crate) fn pace_lines(&self, secs: u64) {
         *self.line_secs.lock().unwrap() = secs;
     }
 
     /// Make `id.step` fail every time it is called.
-    pub fn fail(&self, id: &str, step: &str) {
+    pub(crate) fn fail(&self, id: &str, step: &str) {
         self.fail.lock().unwrap().insert(format!("{id}.{step}"));
     }
 
-    fn note(&self, line: String) {
+    fn note(&self, line: &str) {
         let at = self.start.elapsed().as_secs();
         self.log.lock().unwrap().push(format!("{line} @{at}"));
     }
@@ -149,7 +149,7 @@ fn text(v: &Value, key: &str) -> String {
 /// A registry with `work.step` and `work.lines` on `desk`, and the vine
 /// `job_steps`: steps `one` and `two` of the job at `$item.job`, then
 /// `done`.
-pub fn desk_registry(desk: &Arc<Desk>) -> Registry {
+pub(crate) fn desk_registry(desk: &Arc<Desk>) -> Registry {
     let mut reg = desk_operators(desk);
     let id = || Shape::new().required("id", Ty::Text);
     let steps = pipe("job_steps")
@@ -186,7 +186,7 @@ fn desk_operators(desk: &Arc<Desk>) -> Registry {
             let d = d.clone();
             async move {
                 let name = format!("{}.{}", text(&v, "id"), text(&v, "step"));
-                d.note(format!("start {name}"));
+                d.note(&format!("start {name}"));
                 d.enter();
                 let mut running = Running {
                     desk: d.clone(),
@@ -196,10 +196,10 @@ fn desk_operators(desk: &Arc<Desk>) -> Registry {
                 running.finished = true;
                 drop(running);
                 if d.fail.lock().unwrap().contains(&name) {
-                    d.note(format!("broke {name}"));
+                    d.note(&format!("broke {name}"));
                     return Err(OpError::new("broke", format!("{name} broke")));
                 }
-                d.note(format!("done {name}"));
+                d.note(&format!("done {name}"));
                 Ok(json!({ "id": v["id"], "step": v["step"] }))
             }
         },
@@ -223,7 +223,7 @@ fn desk_operators(desk: &Arc<Desk>) -> Registry {
         move |v, cx| {
             let (id, lines) = (text(&v, "id"), v["lines"].as_u64().unwrap_or(0));
             let from = cx.resume_from();
-            d.note(format!("lines {id} from {from}"));
+            d.note(&format!("lines {id} from {from}"));
             let pace = *d.line_secs.lock().unwrap();
             let items = (from + 1..=lines).map(move |n| (n, id.clone()));
             futures::stream::iter(items)
@@ -242,28 +242,26 @@ fn desk_operators(desk: &Arc<Desk>) -> Registry {
 
 /// One job, as the vines here take it: an id and how long its first step
 /// takes.
-pub fn job(id: &str, secs: u64) -> Value {
+pub(crate) fn job(id: &str, secs: u64) -> Value {
     json!({ "id": id, "secs": secs })
 }
 
 /// The input of a vine over `jobs`: one item that lists them.
-pub fn jobs(list: &[(&str, u64)]) -> Value {
+pub(crate) fn jobs(list: &[(&str, u64)]) -> Value {
     json!({ "jobs": list.iter().map(|(id, s)| job(id, *s)).collect::<Vec<_>>() })
 }
 
 /// `work.step` on the job at `$item.job`, adding its result under `into`.
-pub fn step(name: &str, secs: Value) -> Operator {
-    call(
-        "work.step",
-        json!({ "id": "$item.job.id", "step": name, "secs": secs }),
-    )
-    .into(name)
+pub(crate) fn step(name: &str, secs: Value) -> Operator {
+    let mut with = json!({ "id": "$item.job.id", "step": name });
+    with["secs"] = secs;
+    call("work.step", with).into(name)
 }
 
 /// The work for one job: step `one` takes the job's own time and emits
 /// `stepped`; step `two` takes a second and emits `done`. So each job
 /// gives two outputs, `stepped` before `done`.
-pub fn job_work() -> Vec<Operator> {
+pub(crate) fn job_work() -> Vec<Operator> {
     vec![
         step("one", json!("$item.job.secs")),
         fork([[emit_with(
@@ -277,7 +275,7 @@ pub fn job_work() -> Vec<Operator> {
 
 /// The same work, with a `catchError` inside: a job whose step fails emits
 /// `failed`, and the other jobs go on.
-pub fn job_work_caught() -> Vec<Operator> {
+pub(crate) fn job_work_caught() -> Vec<Operator> {
     let mut work = job_work();
     work.push(catch_error([emit_with(
         "failed",
@@ -287,7 +285,7 @@ pub fn job_work_caught() -> Vec<Operator> {
 }
 
 /// A `mergeMap` over `work`, capped at `concurrent` when given.
-pub fn merge_jobs(concurrent: Option<usize>, work: Vec<Operator>) -> Operator {
+pub(crate) fn merge_jobs(concurrent: Option<usize>, work: Vec<Operator>) -> Operator {
     let operator = merge_map(work);
     match concurrent {
         Some(n) => operator.concurrent(n),
@@ -296,7 +294,7 @@ pub fn merge_jobs(concurrent: Option<usize>, work: Vec<Operator>) -> Operator {
 }
 
 /// A vine over one item that lists jobs: split them, then `operators`.
-pub fn jobs_vine(operators: impl IntoIterator<Item = Operator>) -> PipeDef {
+pub(crate) fn jobs_vine(operators: impl IntoIterator<Item = Operator>) -> PipeDef {
     let id = || Shape::new().required("id", Ty::Text);
     pipe("jobs")
         .input(Shape::new().required("jobs", Ty::List))
@@ -313,13 +311,13 @@ pub fn jobs_vine(operators: impl IntoIterator<Item = Operator>) -> PipeDef {
 }
 
 /// One input item of a vine over a stream of jobs.
-pub fn job_event(id: &str, secs: u64) -> Value {
+pub(crate) fn job_event(id: &str, secs: u64) -> Value {
     json!({ "job": job(id, secs) })
 }
 
 /// A vine over a stream of jobs, one per input item `{ job }`: `operators`
 /// alone.
-pub fn job_stream_vine(operators: impl IntoIterator<Item = Operator>) -> PipeDef {
+pub(crate) fn job_stream_vine(operators: impl IntoIterator<Item = Operator>) -> PipeDef {
     let id = || Shape::new().required("id", Ty::Text);
     pipe("job_stream")
         .input(Shape::new().required("job", Ty::Object))

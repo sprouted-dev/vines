@@ -1,5 +1,6 @@
 //! The endless vines written in YAML are the same vines as their Rust
 //! twins, and run from a saved position the same way.
+#![cfg(test)]
 #![cfg(feature = "yaml")]
 
 mod fake;

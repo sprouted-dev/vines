@@ -2,6 +2,7 @@
 //! `abandoned` event that carries it. A reaction presses `undo_launch`,
 //! whose vine `job_launch_undo` stops the agent and removes the working
 //! copy the abandoned launch made.
+#![cfg(test)]
 #![cfg(feature = "yaml")]
 
 mod fake;

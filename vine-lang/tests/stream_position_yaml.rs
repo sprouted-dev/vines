@@ -1,6 +1,7 @@
 //! `job_run` and `event_pages` written in YAML are saved by position the
 //! same way as their Rust twins, when their stream operator gives its items
 //! again.
+#![cfg(test)]
 #![cfg(feature = "yaml")]
 
 mod fake;

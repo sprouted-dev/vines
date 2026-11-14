@@ -215,7 +215,7 @@ impl Store {
         let mut seen = BTreeMap::new();
         for gate in &decl.gates {
             if self.read(gate.path, payload, &mut seen) != Some(gate.equals.clone()) {
-                return Err(Refusal::Gate(gate.gate.into()));
+                return Err(Refusal::Gate(gate.name.into()));
             }
         }
         let mut input = payload.clone();

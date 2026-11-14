@@ -14,6 +14,7 @@
 //! Nothing here uses YAML, and this file passes with the feature off:
 //!
 //!     cargo test --no-default-features --test timeout_restart
+#![cfg(test)]
 
 mod fake;
 
@@ -763,6 +764,10 @@ async fn a_caught_timeout_replays_down_the_same_branch_at_every_kill() {
         again: 2,
     };
     let (outs, calls, _) = sweep.clean().await;
+    #[expect(
+        clippy::case_sensitive_file_extension_comparisons,
+        reason = "`.undo` ends an operator name, not a file name"
+    )]
     let undone: Vec<&String> = calls.iter().filter(|c| c.ends_with(".undo")).collect();
     assert_eq!(undone, ["a.undo", "c.undo"]);
     assert_eq!(outs.len(), 3);

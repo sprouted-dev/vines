@@ -4,6 +4,7 @@
 //! feature off:
 //!
 //!     cargo test --no-default-features --test registry
+#![cfg(test)]
 
 use futures::future::{ready, Ready};
 use futures::{stream, StreamExt};

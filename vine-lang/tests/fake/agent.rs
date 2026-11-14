@@ -25,7 +25,7 @@ use super::{register_stream, registry, Gives, World};
 
 /// How a session the host starts will go.
 #[derive(Debug, Clone)]
-pub struct Script {
+pub(crate) struct Script {
     /// How many lines it makes.
     pub lines: u64,
     /// The time between lines.
@@ -41,7 +41,7 @@ pub struct Script {
 }
 
 impl Script {
-    pub fn new(lines: u64, end: &str) -> Script {
+    pub(crate) fn new(lines: u64, end: &str) -> Script {
         Script {
             lines,
             every: Duration::from_secs(1),
@@ -54,30 +54,30 @@ impl Script {
 
 /// What a session has made so far.
 #[derive(Debug, Clone, Default)]
-pub struct Session {
+pub(crate) struct Session {
     pub lines: Vec<Value>,
     pub status: Option<String>,
 }
 
 #[derive(Default)]
-pub struct Host {
+pub(crate) struct Host {
     scripts: Mutex<BTreeMap<String, Script>>,
     sessions: Mutex<BTreeMap<String, Arc<watch::Sender<Session>>>>,
 }
 
 impl Host {
-    pub fn new() -> Arc<Host> {
+    pub(crate) fn new() -> Arc<Host> {
         Arc::new(Host::default())
     }
 
     /// How the session for `key` will go when it starts. With no script a
     /// session makes 120 lines, one a second, and finishes.
-    pub fn script(&self, key: &str, script: Script) {
+    pub(crate) fn script(&self, key: &str, script: Script) {
         self.scripts.lock().unwrap().insert(key.into(), script);
     }
 
     /// The session for `key`, as it is now.
-    pub fn session(&self, key: &str) -> Option<Session> {
+    pub(crate) fn session(&self, key: &str) -> Option<Session> {
         let sessions = self.sessions.lock().unwrap();
         sessions.get(key).map(|tx| tx.borrow().clone())
     }
@@ -113,7 +113,7 @@ impl Host {
                 tokio::time::sleep(make.every).await;
                 tx.send_modify(|s| {
                     s.lines
-                        .push(json!({ "seq": seq, "text": format!("line {seq}") }))
+                        .push(json!({ "seq": seq, "text": format!("line {seq}") }));
                 });
             }
             tx.send_modify(|s| s.status = Some(make.end.clone()));
@@ -125,17 +125,21 @@ impl Host {
 /// `job_run`'s operators: the `git` fakes of [`registry`], `agent.run` on
 /// `host`, and the `summarize` operator. `agent.run` gives only the lines
 /// after those it gave, so a saved run saves every line.
-pub fn job_run_registry(world: &Arc<World>, host: &Arc<Host>) -> Registry {
+pub(crate) fn job_run_registry(world: &Arc<World>, host: &Arc<Host>) -> Registry {
     job_run_registry_giving(world, host, Gives::OnlyNew)
 }
 
 /// `job_run`'s operators, with `agent.run` registered as a stream operator that gives
 /// its lines again from any point, so a saved run saves how far it got.
-pub fn job_run_registry_again(world: &Arc<World>, host: &Arc<Host>) -> Registry {
+pub(crate) fn job_run_registry_again(world: &Arc<World>, host: &Arc<Host>) -> Registry {
     job_run_registry_giving(world, host, Gives::Again)
 }
 
-pub fn job_run_registry_giving(world: &Arc<World>, host: &Arc<Host>, gives: Gives) -> Registry {
+pub(crate) fn job_run_registry_giving(
+    world: &Arc<World>,
+    host: &Arc<Host>,
+    gives: Gives,
+) -> Registry {
     let mut reg = registry(world);
     let (w, h) = (world.clone(), host.clone());
     register_stream(
@@ -225,7 +229,7 @@ pub fn job_run_registry_giving(world: &Arc<World>, host: &Arc<Host>, gives: Give
 }
 
 /// `vines/pipe/job_run.yaml`, built in Rust.
-pub fn job_run_pipe() -> PipeDef {
+pub(crate) fn job_run_pipe() -> PipeDef {
     let job = || Shape::new().required("job", Ty::Id);
     pipe("job_run")
         .input(
@@ -305,12 +309,12 @@ pub fn job_run_pipe() -> PipeDef {
 }
 
 /// The input `job_run` takes.
-pub fn job() -> Value {
+pub(crate) fn job() -> Value {
     json!({ "job": "job-1", "plan_branch": "plan/p-1", "brief": "do the work" })
 }
 
 /// What an uninterrupted run of `lines` lines that ends with `end` emits.
-pub fn expected(lines: u64, end: &str) -> Vec<(String, Value)> {
+pub(crate) fn expected(lines: u64, end: &str) -> Vec<(String, Value)> {
     let mut out = Vec::new();
     for seq in 1..=lines {
         out.push((

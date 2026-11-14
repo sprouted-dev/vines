@@ -31,17 +31,17 @@ fn seq(v: &Value) -> u64 {
 
 /// A registry with the three feed operators on `world`. `feed.pages` gives
 /// only the pages after those it gave, so a saved run saves every page.
-pub fn feed_registry(world: &Arc<World>) -> Registry {
+pub(crate) fn feed_registry(world: &Arc<World>) -> Registry {
     feed_registry_giving(world, Gives::OnlyNew)
 }
 
 /// The feed operators, with `feed.pages` registered as a stream operator that gives
 /// its pages again from any point, so a saved run saves how far it got.
-pub fn feed_registry_again(world: &Arc<World>) -> Registry {
+pub(crate) fn feed_registry_again(world: &Arc<World>) -> Registry {
     feed_registry_giving(world, Gives::Again)
 }
 
-pub fn feed_registry_giving(world: &Arc<World>, gives: Gives) -> Registry {
+pub(crate) fn feed_registry_giving(world: &Arc<World>, gives: Gives) -> Registry {
     let mut reg = Registry::new();
 
     let w = world.clone();
@@ -158,7 +158,7 @@ fn relay_operators() -> Vec<Operator> {
 }
 
 /// `vines/pipe/event_relay.yaml`, built in Rust.
-pub fn event_relay_pipe() -> PipeDef {
+pub(crate) fn event_relay_pipe() -> PipeDef {
     pipe("event_relay")
         .input(event())
         .output("archived", archived())
@@ -168,7 +168,7 @@ pub fn event_relay_pipe() -> PipeDef {
 /// `event_relay` with a `catchError`: an event the archive refuses becomes one
 /// `refused` output, and the stream goes on. The operator keeps its path,
 /// `pipe[0]`, so a bookmark saved by `event_relay` fits it.
-pub fn event_relay_caught_pipe() -> PipeDef {
+pub(crate) fn event_relay_caught_pipe() -> PipeDef {
     let mut operators = relay_operators();
     operators.push(catch_error([emit_with(
         "refused",
@@ -187,7 +187,7 @@ pub fn event_relay_caught_pipe() -> PipeDef {
 }
 
 /// `vines/pipe/event_backup.yaml`, built in Rust.
-pub fn event_backup_pipe() -> PipeDef {
+pub(crate) fn event_backup_pipe() -> PipeDef {
     pipe("event_backup")
         .input(event())
         .output(
@@ -214,7 +214,7 @@ pub fn event_backup_pipe() -> PipeDef {
 }
 
 /// `vines/pipe/event_pages.yaml`, built in Rust.
-pub fn event_pages_pipe() -> PipeDef {
+pub(crate) fn event_pages_pipe() -> PipeDef {
     pipe("event_pages")
         .input(
             Shape::new()
@@ -256,7 +256,7 @@ pub fn event_pages_pipe() -> PipeDef {
 }
 
 /// Events `{ seq, body }` numbered from `first` to `last`.
-pub fn events(first: u64, last: u64) -> Vec<Value> {
+pub(crate) fn events(first: u64, last: u64) -> Vec<Value> {
     (first..=last)
         .map(|n| json!({ "seq": n, "body": format!("event {n}") }))
         .collect()

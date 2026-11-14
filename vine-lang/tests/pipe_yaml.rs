@@ -1,5 +1,6 @@
 //! The four workflow vines written as pipes in YAML, and the proof that a
 //! pipe built in Rust and the same pipe loaded from YAML are one vine.
+#![cfg(test)]
 #![cfg(feature = "yaml")]
 
 mod fake;

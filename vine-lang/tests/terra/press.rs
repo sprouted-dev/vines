@@ -145,6 +145,10 @@ impl Press {
         self.finished = true;
     }
 
+    #[expect(
+        clippy::used_underscore_binding,
+        reason = "`_busy` is a drop guard: it is held, never read, and frees the request when the press ends"
+    )]
     fn start(&mut self) {
         let installed = self
             .inner
@@ -169,14 +173,12 @@ impl Press {
         };
         let Some(vine) = installed.vine.clone() else {
             // A move of only gates lands its one event as it is accepted.
-            let given = match ended {
-                Some(_) => landings,
-                None => {
-                    let landing =
-                        store.land(&self.id, &installed.decl, "done", self.payload.clone());
-                    store.end(&self.id, End::Done);
-                    vec![landing]
-                }
+            let given = if ended.is_some() {
+                landings
+            } else {
+                let landing = store.land(&self.id, &installed.decl, "done", self.payload.clone());
+                store.end(&self.id, End::Done);
+                vec![landing]
             };
             drop(store);
             for landing in &given {

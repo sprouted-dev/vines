@@ -2,6 +2,7 @@
 //! every line, commits, and cleans up. And what happens when the run is
 //! dropped partway, as a daemon restart would drop it, and started again
 //! from what the caller saved. Rust alone: this file passes with YAML off.
+#![cfg(test)]
 
 mod fake;
 
@@ -324,7 +325,7 @@ async fn a_restart_after_the_agent_finished_unattended_reads_the_rest_and_comple
     .await
     .unwrap();
     // Nothing is attached while the agent writes its other 90 lines.
-    tokio::time::sleep(Duration::from_secs(600)).await;
+    tokio::time::sleep(Duration::from_mins(10)).await;
     let session = host.session("job-1").unwrap();
     assert_eq!(session.status.as_deref(), Some("finished"));
     assert_eq!(session.lines.len(), 120);
@@ -428,7 +429,7 @@ async fn a_run_dropped_and_never_restarted_leaves_its_working_copy_and_its_agent
     )
     .await
     .unwrap();
-    tokio::time::sleep(Duration::from_secs(600)).await;
+    tokio::time::sleep(Duration::from_mins(10)).await;
     // Dropping a run does not run `finalize`. The working copy is still
     // there, the session ran on to its end with nobody reading, and
     // nothing was committed.

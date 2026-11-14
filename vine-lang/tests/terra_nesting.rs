@@ -3,6 +3,7 @@
 //! `job_launch`'s input, and lands each of its outputs before the outer
 //! vine hears of it. `use` is kept for helpers no move starts, and the
 //! stand-in refuses a trellis that `use`s a vine a move starts.
+#![cfg(test)]
 #![cfg(feature = "yaml")]
 
 mod fake;
@@ -128,7 +129,7 @@ async fn a_job_whose_plan_was_paused_meanwhile_is_refused_and_gets_no_working_co
     // j-1's launch is partway through when someone pauses the plan.
     let t = terra.clone();
     world.when("git.worktree_add", move || {
-        t.set("p-1", "state", json!("paused"))
+        t.set("p-1", "state", json!("paused"));
     });
     terra.press("launch_all", launch_all()).await;
     // j-2 is refused by the plan gate, so nothing is made for it.

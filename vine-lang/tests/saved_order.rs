@@ -5,6 +5,7 @@
 //! uses YAML, and this file passes with the feature off:
 //!
 //!     cargo test --no-default-features --test saved_order
+#![cfg(test)]
 
 mod fake;
 

@@ -7,6 +7,7 @@
 //! off; the same vine as YAML is checked against it when the feature is on.
 //! The operators take time on tokio's paused clock, so every run interleaves
 //! the same way.
+#![cfg(test)]
 
 mod fake;
 mod terra;

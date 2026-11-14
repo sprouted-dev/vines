@@ -7,7 +7,7 @@ use super::{Gate, Lands, Move, Need, Pick, Reaction, Trellis, Trigger};
 
 /// The `launch` move on a job. Its `started` event moves the job on, so
 /// a second launch of it is refused by `state`.
-pub fn launch_move() -> Move {
+pub(crate) fn launch_move() -> Move {
     Move {
         name: "launch",
         target: "job",
@@ -16,22 +16,22 @@ pub fn launch_move() -> Move {
             Gate {
                 path: "job.state",
                 equals: json!("ready"),
-                gate: "state",
+                name: "state",
             },
             Gate {
                 path: "job.plan.state",
                 equals: json!("active"),
-                gate: "plan",
+                name: "plan",
             },
             Gate {
                 path: "job.waiting_on",
                 equals: json!(0),
-                gate: "dependencies",
+                name: "dependencies",
             },
             Gate {
                 path: "job.live_session",
                 equals: Value::Null,
-                gate: "session",
+                name: "session",
             },
         ],
         needs: vec![
@@ -47,7 +47,7 @@ pub fn launch_move() -> Move {
 }
 
 /// The `claim` move on an item. It is all gates, so it has no vine.
-pub fn claim_move() -> Move {
+pub(crate) fn claim_move() -> Move {
     Move {
         name: "claim",
         target: "item",
@@ -56,12 +56,12 @@ pub fn claim_move() -> Move {
             Gate {
                 path: "item.state",
                 equals: json!("open"),
-                gate: "state",
+                name: "state",
             },
             Gate {
                 path: "item.holder",
                 equals: Value::Null,
-                gate: "held",
+                name: "held",
             },
         ],
         needs: vec![],
@@ -71,7 +71,7 @@ pub fn claim_move() -> Move {
 }
 
 /// The `activate` move on a plan.
-pub fn activate_move() -> Move {
+pub(crate) fn activate_move() -> Move {
     Move {
         name: "activate",
         target: "plan",
@@ -79,7 +79,7 @@ pub fn activate_move() -> Move {
         gates: vec![Gate {
             path: "plan.state",
             equals: json!("ready"),
-            gate: "state",
+            name: "state",
         }],
         needs: vec![Need::fact("base", Ty::Text, "plan.base")],
         vine: Some("plan_activate"),
@@ -93,7 +93,7 @@ pub fn activate_move() -> Move {
 /// The `launch_all` move on a plan. Its vine presses `launch` for each
 /// job, so it needs its own request id and the plan's job ids, nothing
 /// about any job.
-pub fn launch_all_move() -> Move {
+pub(crate) fn launch_all_move() -> Move {
     Move {
         name: "launch_all",
         target: "plan",
@@ -101,7 +101,7 @@ pub fn launch_all_move() -> Move {
         gates: vec![Gate {
             path: "plan.state",
             equals: json!("active"),
-            gate: "state",
+            name: "state",
         }],
         needs: vec![Need::request(), Need::fact("jobs", Ty::List, "plan.jobs")],
         vine: Some("plan_launch_all"),
@@ -117,7 +117,7 @@ pub fn launch_all_move() -> Move {
 /// The `undo_launch` move on a job: undo a launch Terra abandoned. Its
 /// gate keeps it from tearing down a later launch of the same job that
 /// did land: that one moved the job out of `ready`.
-pub fn undo_launch_move() -> Move {
+pub(crate) fn undo_launch_move() -> Move {
     Move {
         name: "undo_launch",
         target: "job",
@@ -125,7 +125,7 @@ pub fn undo_launch_move() -> Move {
         gates: vec![Gate {
             path: "job.state",
             equals: json!("ready"),
-            gate: "state",
+            name: "state",
         }],
         needs: vec![],
         vine: Some("job_launch_undo"),
@@ -138,7 +138,7 @@ pub fn undo_launch_move() -> Move {
 }
 
 /// When a launch is abandoned, press `undo_launch` with what it made.
-pub fn undo_abandoned_launch() -> Reaction {
+pub(crate) fn undo_abandoned_launch() -> Reaction {
     Reaction {
         on: Trigger::Abandoned { by: "launch" },
         press: "undo_launch",
@@ -152,7 +152,7 @@ pub fn undo_abandoned_launch() -> Reaction {
 
 /// A vine of `vines/pipe`, as YAML.
 #[cfg(feature = "yaml")]
-pub fn yaml(name: &str) -> super::VineSource {
+pub(crate) fn yaml(name: &str) -> super::VineSource {
     let path = format!("{}/vines/pipe/{name}.yaml", env!("CARGO_MANIFEST_DIR"));
     super::VineSource::Yaml(
         std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {path}: {e}")),
@@ -163,7 +163,7 @@ pub fn yaml(name: &str) -> super::VineSource {
 /// activating plans, and undoing abandoned launches. `job_teardown` is a
 /// helper that `job_launch_undo` uses; no move starts it.
 #[cfg(feature = "yaml")]
-pub fn jobs_trellis() -> Trellis {
+pub(crate) fn jobs_trellis() -> Trellis {
     Trellis {
         vines: [
             "job_teardown",
@@ -186,7 +186,7 @@ pub fn jobs_trellis() -> Trellis {
 }
 
 /// A trellis of one move of only gates.
-pub fn items_trellis() -> Trellis {
+pub(crate) fn items_trellis() -> Trellis {
     Trellis {
         vines: vec![],
         moves: vec![claim_move()],

@@ -1,6 +1,7 @@
 //! A vine with a `timeout` written in YAML saves and replays exactly as
 //! its Rust twin: the same entries, the same decisions, the same outputs
 //! with the same ids, clean and after a kill at every event.
+#![cfg(test)]
 #![cfg(feature = "yaml")]
 
 mod fake;
@@ -13,7 +14,7 @@ use futures::{stream, StreamExt};
 use vine_lang::pipe::{catch_error, emit_with, fork, pipe, split, timeout, Pipe, PipeDef};
 use vine_lang::{json, Event, Journal, Shape, Ty, Value};
 
-const YAML: &str = r#"
+const YAML: &str = r"
 vine: timed
 input: { jobs: list }
 outputs:
@@ -38,7 +39,7 @@ pipe:
         - emit: { to: done, with: { id: $item.job.id } }
         - catchError:
             - emit: { to: failed, with: { id: $item.job.id, code: $item.error.code } }
-"#;
+";
 
 fn rust() -> PipeDef {
     let id = || Shape::new().required("id", Ty::Text);

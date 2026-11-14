@@ -2,12 +2,15 @@
 //!
 //! The library ships no operators. A caller registers the Rust behind each
 //! name. Here the "outside" is a `World` in memory.
-#![allow(dead_code)]
+// Each test binary compiles this module and uses a subset of it. An
+// `expect` would go unfulfilled in the binaries that use all of it, and
+// clippy's `allow_attributes` checks outer attributes only.
+#![allow(dead_code, reason = "each test binary uses a subset of the fixtures")]
 
-pub mod agent;
-pub mod desk;
-pub mod feed;
-pub mod restart;
+pub(crate) mod agent;
+pub(crate) mod desk;
+pub(crate) mod feed;
+pub(crate) mod restart;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
@@ -16,7 +19,7 @@ use vine_lang::{json, OpError, OperatorSpec, Registry, Shape, Ty, Value};
 
 /// What the fake operators did, and which operator should fail next.
 #[derive(Default)]
-pub struct World {
+pub(crate) struct World {
     state: Mutex<State>,
 }
 
@@ -40,13 +43,13 @@ type Hook = Arc<dyn Fn() + Send + Sync>;
 /// after those it gave, or as one that gives its items again from any
 /// point, the way a host that stores every item can.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Gives {
+pub(crate) enum Gives {
     OnlyNew,
     Again,
 }
 
 /// Register a stream operator the way `gives` says.
-pub fn register_stream<F, S>(reg: &mut Registry, gives: Gives, spec: OperatorSpec, f: F)
+pub(crate) fn register_stream<F, S>(reg: &mut Registry, gives: Gives, spec: OperatorSpec, f: F)
 where
     F: Fn(Value, vine_lang::OpContext) -> S + Send + Sync + 'static,
     S: futures::Stream<Item = Result<vine_lang::Part, OpError>> + Send + 'static,
@@ -59,28 +62,28 @@ where
 }
 
 impl World {
-    pub fn new() -> Arc<World> {
+    pub(crate) fn new() -> Arc<World> {
         Arc::new(World::default())
     }
 
     /// Make the named operator fail the next time it is called.
-    pub fn fail(&self, operator: &str, code: &str, message: &str) {
+    pub(crate) fn fail(&self, operator: &str, code: &str, message: &str) {
         let mut s = self.state.lock().unwrap();
         s.fail.insert(operator.into(), OpError::new(code, message));
     }
 
     /// Every operator that ran, in order, such as `git.worktree_add job-1`.
-    pub fn log(&self) -> Vec<String> {
+    pub(crate) fn log(&self) -> Vec<String> {
         self.state.lock().unwrap().log.clone()
     }
 
     /// The working copies that exist now.
-    pub fn trees(&self) -> Vec<String> {
+    pub(crate) fn trees(&self) -> Vec<String> {
         self.state.lock().unwrap().trees.iter().cloned().collect()
     }
 
     /// The sessions of the agents running now.
-    pub fn agents(&self) -> Vec<String> {
+    pub(crate) fn agents(&self) -> Vec<String> {
         self.state.lock().unwrap().agents.keys().cloned().collect()
     }
 
@@ -97,20 +100,20 @@ impl World {
         id
     }
 
-    pub fn add_tree(&self, path: &str) {
+    pub(crate) fn add_tree(&self, path: &str) {
         self.state.lock().unwrap().trees.insert(path.into());
     }
 
     /// Run `hook` each time the named operator runs. A test uses this to change
     /// something else while a vine is partway through.
-    pub fn when(&self, operator: &str, hook: impl Fn() + Send + Sync + 'static) {
+    pub(crate) fn when(&self, operator: &str, hook: impl Fn() + Send + Sync + 'static) {
         let mut s = self.state.lock().unwrap();
         s.hooks.insert(operator.into(), Arc::new(hook));
     }
 
     /// Make the named operator take this long each time, on tokio's clock. A
     /// test that starts the clock paused gets exact times.
-    pub fn slow(&self, operator: &str, takes: std::time::Duration) {
+    pub(crate) fn slow(&self, operator: &str, takes: std::time::Duration) {
         self.state
             .lock()
             .unwrap()
@@ -120,7 +123,7 @@ impl World {
 
     /// Make the named operator take this long when it works on `detail`, such
     /// as `agent.start` in `/trees/j-2`, whatever [`World::slow`] says.
-    pub fn slow_for(&self, operator: &str, detail: &str, takes: std::time::Duration) {
+    pub(crate) fn slow_for(&self, operator: &str, detail: &str, takes: std::time::Duration) {
         let key = format!("{operator} {detail}");
         self.state.lock().unwrap().slow.insert(key, takes);
     }
@@ -140,12 +143,12 @@ impl World {
     }
 
     /// Add a line to the log without running an operator.
-    pub fn note(&self, line: String) {
+    pub(crate) fn note(&self, line: String) {
         self.state.lock().unwrap().log.push(line);
     }
 
     /// How many lines of the log start with `prefix`.
-    pub fn count(&self, prefix: &str) -> usize {
+    pub(crate) fn count(&self, prefix: &str) -> usize {
         self.log().iter().filter(|l| l.starts_with(prefix)).count()
     }
 
@@ -170,9 +173,15 @@ fn text(v: &Value, key: &str) -> String {
 }
 
 /// A registry with the fake `git` and `agent` operators.
-pub fn registry(world: &Arc<World>) -> Registry {
+pub(crate) fn registry(world: &Arc<World>) -> Registry {
     let mut reg = Registry::new();
+    register_git(&mut reg, world);
+    register_agent(&mut reg, world);
+    reg
+}
 
+/// The fake `git` operators: branches, working copies and commits.
+fn register_git(reg: &mut Registry, world: &Arc<World>) {
     let w = world.clone();
     reg.register(
         OperatorSpec::new("git.refresh_branch")
@@ -279,7 +288,10 @@ pub fn registry(world: &Arc<World>) -> Registry {
         },
     )
     .unwrap();
+}
 
+/// The fake `agent` operators: start and stop an agent session.
+fn register_agent(reg: &mut Registry, world: &Arc<World>) {
     let w = world.clone();
     reg.register(
         OperatorSpec::new("agent.start")
@@ -320,12 +332,10 @@ pub fn registry(world: &Arc<World>) -> Registry {
         },
     )
     .unwrap();
-
-    reg
 }
 
 /// The input `job_launch` takes.
-pub fn ready_job() -> Value {
+pub(crate) fn ready_job() -> Value {
     json!({
         "job": "job-1",
         "plan_branch": "plan/p-1",
@@ -333,16 +343,8 @@ pub fn ready_job() -> Value {
     })
 }
 
-/// `base` with `fields` laid over it.
-pub fn with(mut base: Value, fields: Value) -> Value {
-    for (k, v) in fields.as_object().unwrap() {
-        base[k] = v.clone();
-    }
-    base
-}
-
 /// `vines/pipe/job_launch.yaml`, built in Rust.
-pub fn job_launch_pipe() -> vine_lang::pipe::PipeDef {
+pub(crate) fn job_launch_pipe() -> vine_lang::pipe::PipeDef {
     use vine_lang::pipe::{branch, call, catch_error, emit_with, pipe, tap, timeout};
     let job = || Shape::new().required("job", Ty::Id);
     pipe("job_launch")
@@ -373,7 +375,7 @@ pub fn job_launch_pipe() -> vine_lang::pipe::PipeDef {
                 json!({ "dir": "$item.tree.path", "brief": "$item.brief" }),
             )
             .into("session"),
-            timeout(std::time::Duration::from_secs(60)),
+            timeout(std::time::Duration::from_mins(1)),
             emit_with(
                 "started",
                 json!({ "job": "$item.job", "session": "$item.session.id", "tree": "$item.tree.path" }),

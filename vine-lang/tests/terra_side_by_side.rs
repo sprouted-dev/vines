@@ -13,6 +13,7 @@
 //!
 //! The order in which two jobs' events interleave is not promised: after a
 //! restart it can differ from the first run.
+#![cfg(test)]
 #![cfg(feature = "yaml")]
 
 mod fake;
@@ -149,7 +150,7 @@ async fn clean(jobs: &[(&str, &str)]) -> Clean {
 fn answered(answer: &Answer) -> (Vec<String>, String) {
     match answer {
         Answer::Ran { landings, end, .. } => (sorted(landings), format!("{end:?}")),
-        other => (Vec::new(), format!("{other:?}")),
+        other @ Answer::Refused(_) => (Vec::new(), format!("{other:?}")),
     }
 }
 
@@ -291,16 +292,16 @@ async fn two_crashes_on_a_grid_then_a_restart_end_as_an_uninterrupted_run() {
             let first = terra.crash_point().unwrap();
             terra.restart();
             terra.crash_at(m);
-            let answer = match terra.press_as("r-1", "launch_all", launch_all()).await {
-                Some(answer) => answer,
-                None => {
+            let answer =
+                if let Some(answer) = terra.press_as("r-1", "launch_all", launch_all()).await {
+                    answer
+                } else {
                     terra.restart();
                     terra
                         .press_as("r-1", "launch_all", launch_all())
                         .await
                         .unwrap()
-                }
-            };
+                };
             let at = format!("crash at {k} ({first}) then {m}");
             assert_same(&clean, &answer, &world, &terra, 4, &at);
         }

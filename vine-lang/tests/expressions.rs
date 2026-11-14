@@ -4,6 +4,7 @@
 //! YAML, and this file passes with the feature off:
 //!
 //!     cargo test --no-default-features --test expressions
+#![cfg(test)]
 
 use vine_lang::pipe::{branch, emit, emit_with, filter, op, pipe, Operator, PipeDef};
 use vine_lang::{json, LoadError, Registry, Shape, Ty, Value};

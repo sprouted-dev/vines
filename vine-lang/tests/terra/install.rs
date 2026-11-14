@@ -259,7 +259,7 @@ pub(super) fn reaction_payload(reaction: &Reaction, event: &Event) -> Option<Val
     if !fires {
         return None;
     }
-    let mut payload = Value::Object(Default::default());
+    let mut payload = Value::Object(serde_json::Map::default());
     for (field, pick) in &reaction.payload {
         payload[*field] = match pick {
             Pick::Artifact => Value::String(event.artifact.clone()),

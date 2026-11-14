@@ -2,6 +2,7 @@
 //! This file passes with the YAML feature off:
 //!
 //!     cargo test --no-default-features --test pipe_streams
+#![cfg(test)]
 
 mod fake;
 

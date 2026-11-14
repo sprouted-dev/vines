@@ -2,6 +2,7 @@
 //! move's gates, builds the vine's input, runs the vine as a stream fed
 //! one item, and turns each output into an event only if nothing the
 //! press read has changed.
+#![cfg(test)]
 #![cfg(feature = "yaml")]
 
 mod fake;
@@ -294,7 +295,7 @@ async fn an_output_does_not_land_when_a_fact_the_vine_was_given_changed_meanwhil
     // While the vine is making the working copy, someone pauses the plan.
     let t = terra.clone();
     world.when("git.worktree_add", move || {
-        t.set("p-1", "state", json!("paused"))
+        t.set("p-1", "state", json!("paused"));
     });
     let answer = terra.press("launch", launch()).await;
     assert!(answer.landed().is_empty());
@@ -315,7 +316,7 @@ async fn a_second_request_sees_the_first_ones_event_as_a_change() {
     // A second launch of the same job lands while the first is running.
     let t = terra.clone();
     world.when("agent.start", move || {
-        t.set("job-1", "live_session", json!("session-0"))
+        t.set("job-1", "live_session", json!("session-0"));
     });
     let answer = terra.press("launch", launch()).await;
     assert_eq!(answer.abandoned()[0].payload["changed"], "job-1");
@@ -329,7 +330,7 @@ async fn a_change_to_an_artifact_the_move_never_read_does_not_block_the_write() 
     terra.put("job-2", json!({ "state": "ready" }));
     let t = terra.clone();
     world.when("git.worktree_add", move || {
-        t.set("job-2", "state", json!("done"))
+        t.set("job-2", "state", json!("done"));
     });
     let answer = terra.press("launch", launch()).await;
     assert_eq!(answer.landed().len(), 1);
@@ -433,7 +434,7 @@ fn install_refuses_a_move_that_gives_the_vine_a_field_it_did_not_declare() {
     let err = broken(|t| {
         launch_of(t)
             .needs
-            .push(Need::fact("state", Ty::Text, "job.state"))
+            .push(Need::fact("state", Ty::Text, "job.state"));
     });
     assert!(misfit(&err).contains("unexpected field `state`"), "{err:?}");
 }
@@ -455,7 +456,7 @@ fn install_refuses_a_move_with_an_event_for_an_output_its_vine_does_not_have() {
     let err = broken(|t| {
         launch_of(t)
             .events
-            .push(Lands::new("finished", "core.job.finished"))
+            .push(Lands::new("finished", "core.job.finished"));
     });
     assert_eq!(
         err,
@@ -556,7 +557,7 @@ fn install_refuses_a_vine_that_does_not_build_and_names_its_place() {
 
 #[test]
 fn a_gate_is_plain_data_the_move_declares_and_the_vine_has_none() {
-    let gates: Vec<&str> = launch_move().gates.iter().map(|g| g.gate).collect();
+    let gates: Vec<&str> = launch_move().gates.iter().map(|g| g.name).collect();
     assert_eq!(gates, ["state", "plan", "dependencies", "session"]);
     let world = World::new();
     let text = std::fs::read_to_string(format!(

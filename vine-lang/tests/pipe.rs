@@ -2,6 +2,7 @@
 //! Nothing here uses YAML, and this file passes with the feature off:
 //!
 //!     cargo test --no-default-features --test pipe
+#![cfg(test)]
 
 mod fake;
 
@@ -509,8 +510,8 @@ async fn exhaust_map_ignores_new_items_while_a_run_is_going() {
 
 #[test]
 fn concurrent_goes_with_merge_map_only_and_is_at_least_one() {
-    let inner = || vec![emit("out")];
     type MapStage = fn(Vec<Operator>) -> Operator;
+    let inner = || vec![emit("out")];
     let others: [(MapStage, &str); 3] = [
         (concat_map, "concatMap"),
         (switch_map, "switchMap"),
@@ -814,7 +815,7 @@ fn flaky(failures: u32, start: Instant) -> (Arc<Mutex<Vec<u64>>>, Registry) {
             async move {
                 let mut tries = t.lock().unwrap();
                 tries.push(start.elapsed().as_secs());
-                if tries.len() as u32 <= failures {
+                if u32::try_from(tries.len()).unwrap() <= failures {
                     Err(OpError::new("busy", "try later"))
                 } else {
                     Ok(json!({ "stored": true }))

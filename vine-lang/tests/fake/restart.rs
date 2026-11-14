@@ -6,7 +6,7 @@ use futures::{stream, StreamExt};
 use vine_lang::{Bookmark, Entry, Event, Journal, Pipe, Progress, RunError, Value};
 
 /// Everything a caller saw and kept over one or more runs.
-pub struct Caller {
+pub(crate) struct Caller {
     /// The bookmark, as a store would hold it.
     pub saved: Value,
     pub outs: Vec<(String, Value)>,
@@ -21,15 +21,15 @@ pub struct Caller {
 }
 
 impl Caller {
-    pub fn new() -> Caller {
+    pub(crate) fn new() -> Caller {
         Caller::from(Bookmark::new())
     }
 
-    pub fn bookmark(&self) -> Bookmark {
+    pub(crate) fn bookmark(&self) -> Bookmark {
         Bookmark::from_json(&self.saved).unwrap()
     }
 
-    pub fn position(&self) -> u64 {
+    pub(crate) fn position(&self) -> u64 {
         self.bookmark().position()
     }
 }
@@ -49,7 +49,7 @@ impl From<Bookmark> for Caller {
 
 /// How one run ended.
 #[derive(Debug)]
-pub enum End {
+pub(crate) enum End {
     /// The input ran out and the run ended by itself.
     Ended,
     /// The caller stopped reading. `after_output` says the last thing it
@@ -63,7 +63,12 @@ pub enum End {
 /// Run `vine` once, as a caller would: read the bookmark back from JSON,
 /// feed the input after its position, and after every event record it
 /// and save the bookmark. Stop after `kill` events.
-pub async fn run(vine: &Pipe, input: &[Value], caller: &mut Caller, kill: Option<usize>) -> End {
+pub(crate) async fn run(
+    vine: &Pipe,
+    input: &[Value],
+    caller: &mut Caller,
+    kill: Option<usize>,
+) -> End {
     let mut bookmark = caller.bookmark();
     let from = usize::try_from(bookmark.position()).unwrap();
     let feed = input[from.min(input.len())..].to_vec();
@@ -97,7 +102,7 @@ pub async fn run(vine: &Pipe, input: &[Value], caller: &mut Caller, kill: Option
 /// Where an output handed out right before a kill comes again after the
 /// restart.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Repeat {
+pub(crate) enum Repeat {
     /// First: the run makes its outputs in one order.
     First,
     /// Somewhere after the restart: under a `mergeMap`, other
@@ -127,7 +132,7 @@ fn take_repeat(outs: &mut Vec<(String, Value)>, mark: usize, at: usize, repeat: 
 /// An output handed out right before a kill comes again first in the next
 /// run, since its line was never saved; that one repeat is checked and
 /// taken out of `outs`. Gives how many repeats there were.
-pub async fn run_with_kills(
+pub(crate) async fn run_with_kills(
     vine: impl Fn() -> Pipe,
     input: &[Value],
     caller: &mut Caller,
@@ -137,7 +142,7 @@ pub async fn run_with_kills(
 }
 
 /// [`run_with_kills`], where the repeat comes where `repeat` says.
-pub async fn run_with_kills_where(
+pub(crate) async fn run_with_kills_where(
     vine: impl Fn() -> Pipe,
     input: &[Value],
     caller: &mut Caller,
@@ -168,7 +173,7 @@ pub async fn run_with_kills_where(
 }
 
 /// How many events an uninterrupted run gives.
-pub async fn events_in(vine: &Pipe, input: &[Value]) -> usize {
+pub(crate) async fn events_in(vine: &Pipe, input: &[Value]) -> usize {
     let run = vine.run_from(stream::iter(input.to_vec()), Bookmark::new());
     run.count().await
 }
@@ -176,12 +181,12 @@ pub async fn events_in(vine: &Pipe, input: &[Value]) -> usize {
 /// The world's log without the lines of a stream operator called again after
 /// a restart, such as `feed.pages 3 again from 2`: what is left is what
 /// started.
-pub fn started(log: Vec<String>) -> Vec<String> {
+pub(crate) fn started(log: Vec<String>) -> Vec<String> {
     log.into_iter().filter(|l| !l.contains(" again ")).collect()
 }
 
 /// Positions only ever move forward.
-pub fn assert_forward(throughs: &[u64]) {
+pub(crate) fn assert_forward(throughs: &[u64]) {
     assert!(
         throughs.windows(2).all(|w| w[0] < w[1]),
         "the position went back or stood still: {throughs:?}"
@@ -190,7 +195,7 @@ pub fn assert_forward(throughs: &[u64]) {
 
 /// Everything a caller of `run_saved` saw and kept over one or more runs.
 #[derive(Default)]
-pub struct Keeper {
+pub(crate) struct Keeper {
     /// The journal, as a store would hold it.
     pub saved: Value,
     pub outs: Vec<(String, Value)>,
@@ -204,14 +209,14 @@ pub struct Keeper {
 }
 
 impl Keeper {
-    pub fn new() -> Keeper {
+    pub(crate) fn new() -> Keeper {
         Keeper {
             saved: Journal::new().to_json(),
             ..Keeper::default()
         }
     }
 
-    pub fn journal(&self) -> Journal {
+    pub(crate) fn journal(&self) -> Journal {
         Journal::from_json(&self.saved).unwrap()
     }
 }
@@ -219,7 +224,7 @@ impl Keeper {
 /// Run `vine` once with `run_saved`, as a caller would: read the journal
 /// back from JSON, feed the whole input, and after every event record it
 /// and save the journal. Stop after `kill` events.
-pub async fn run_saved(
+pub(crate) async fn run_saved(
     vine: &Pipe,
     input: &[Value],
     keeper: &mut Keeper,
@@ -256,7 +261,7 @@ pub async fn run_saved(
 /// to the end, as [`run_with_kills`] does for a bookmark. Gives how many
 /// outputs came twice because the kill fell between an output and the
 /// entry that records it.
-pub async fn run_saved_with_kills(
+pub(crate) async fn run_saved_with_kills(
     vine: impl Fn() -> Pipe,
     input: &[Value],
     keeper: &mut Keeper,
@@ -266,7 +271,7 @@ pub async fn run_saved_with_kills(
 }
 
 /// [`run_saved_with_kills`], where the repeat comes where `repeat` says.
-pub async fn run_saved_with_kills_where(
+pub(crate) async fn run_saved_with_kills_where(
     vine: impl Fn() -> Pipe,
     input: &[Value],
     keeper: &mut Keeper,
@@ -297,7 +302,7 @@ pub async fn run_saved_with_kills_where(
 }
 
 /// How many events an uninterrupted `run_saved` gives.
-pub async fn events_saved(vine: &Pipe, input: &[Value]) -> usize {
+pub(crate) async fn events_saved(vine: &Pipe, input: &[Value]) -> usize {
     let run = vine.run_saved(stream::iter(input.to_vec()), Journal::new());
     run.count().await
 }

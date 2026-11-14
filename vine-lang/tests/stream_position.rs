@@ -2,6 +2,7 @@
 //! caller keeps for one item in flight stays small however many items the
 //! operator gives, and a restart at any point gives what an uninterrupted run
 //! gives. Rust alone: this file passes with YAML off.
+#![cfg(test)]
 
 mod fake;
 
