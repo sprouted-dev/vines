@@ -97,10 +97,11 @@ impl<P> Outlet<P> {
         self.policy.overflow == Overflow::StopProducer
     }
 
-    /// Whether a `stop_producer` producer may emit now.
+    /// Whether a `stop_producer` producer may emit now. A released queue
+    /// (consumer gone) holds no items, so it always has space.
     pub(crate) fn has_space(&self) -> bool {
         let state = self.lock();
-        state.gone || state.ended || state.items < self.policy.queue.get()
+        state.ended || state.items < self.policy.queue.get()
     }
 
     pub(crate) fn writable(&self) -> &Notify {
@@ -150,21 +151,16 @@ impl<P> Outlet<P> {
                             state.counts.lost += 1;
                             state.extend_tail_gap(GapReason::ObserverFailed, seq);
                             drop(state);
+                            // Nothing was queued, so the consumer has
+                            // nothing new to wake for.
                             self.settle(Err(failure));
-                            return self.wake();
+                            return;
                         }
                     }
                 }
             }
             state.waker.take()
         };
-        if let Some(waker) = waker {
-            waker.wake();
-        }
-    }
-
-    fn wake(&self) {
-        let waker = self.lock().waker.take();
         if let Some(waker) = waker {
             waker.wake();
         }

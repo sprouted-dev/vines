@@ -13,4 +13,12 @@ exclude_re = [
   # Debug output is for humans reading logs and test failures; no behavior
   # depends on it.
   '<impl (std::|core::)?(fmt::)?Debug for ',
+  # The tail-gap merge guard is never false in a reachable state: an
+  # outlet has one overflow policy, so one gap reason (ObserverFailed only
+  # after a spill failure, which ends SpillExhausted for good), and every
+  # offer either queues an item (flushing the tail gap), extends the gap, or
+  # is discarded once the outlet is released or ended. So the gap is always
+  # contiguous, and mutants that make the guard true change nothing. The
+  # mutants that make it false are caught.
+  '(match guard .*|&& with \|\|) in State<P>::extend_tail_gap',
 ]

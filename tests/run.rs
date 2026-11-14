@@ -34,6 +34,7 @@ async fn a_run_streams_progress_in_order_then_one_result() {
         }
         Exit::<_, ()>::Completed("ok")
     });
+    assert_eq!(display.name(), "display");
     let record = display.into_record().await;
     assert_eq!(
         record.items,
@@ -257,6 +258,8 @@ async fn a_cancel_the_producer_ignores_is_never_claimed_as_a_stop() {
     let straggler = report.straggler.expect("the producer is still running");
     assert!(!straggler.is_finished());
     effect_tx.send(()).unwrap();
+    common::until_idle().await;
+    assert!(straggler.is_finished());
     // The cancel did not prevent the effect.
     assert_eq!(
         straggler.exit().await,
@@ -332,6 +335,50 @@ async fn cancelling_the_parent_scope_cancels_the_run() {
         run.finish().await.outcome,
         Outcome::Cancelled(Stop::Confirmed)
     );
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_producer_sees_the_cancel_through_its_context() {
+    let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+    let (seen_tx, seen_rx) = tokio::sync::oneshot::channel();
+    let run = builder().spawn(&CancelScope::new(), |ctx| async move {
+        started_tx.send(ctx.is_cancelled()).unwrap();
+        ctx.cancelled().await;
+        seen_tx
+            .send((ctx.is_cancelled(), ctx.scope().cause()))
+            .unwrap();
+        Exit::<(), ()>::Stopped
+    });
+    assert!(
+        !started_rx.await.unwrap(),
+        "not cancelled before the request"
+    );
+    run.cancel();
+    assert_eq!(run.scope().cause(), Some(CancelCause::Requested));
+    run.finish().await;
+    assert_eq!(seen_rx.await.unwrap(), (true, Some(CancelCause::Requested)));
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_run_scope_is_a_child_of_the_scope_it_was_spawned_in() {
+    let parent = CancelScope::new();
+    let run = builder().spawn(&parent, |ctx| async move {
+        ctx.cancelled().await;
+        Exit::<(), ()>::Stopped
+    });
+    assert_eq!(run.scope().cause(), None);
+    parent.cancel();
+    assert_eq!(run.scope().cause(), Some(CancelCause::Requested));
+    run.finish().await;
+}
+
+#[test]
+fn an_emit_error_says_why_the_item_came_back() {
+    assert_eq!(
+        EmitError::Cancelled(1).to_string(),
+        "cancelled while waiting for observer capacity"
+    );
+    assert_eq!(EmitError::Ended(1).to_string(), "the run has already ended");
 }
 
 #[tokio::test(start_paused = true)]

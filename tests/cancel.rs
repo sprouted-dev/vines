@@ -29,6 +29,7 @@ async fn cancel_is_a_request() {
 async fn the_deadline_fires_without_a_request() {
     let scope = CancelScope::with_timeout(Duration::from_secs(10));
     let started = Instant::now();
+    assert_eq!(scope.deadline(), Some(started + Duration::from_secs(10)));
     assert_eq!(scope.cancelled().await, CancelCause::TimedOut);
     assert_eq!(started.elapsed(), Duration::from_secs(10));
     // Awaiting past the deadline cancels the token for token holders.
@@ -53,6 +54,14 @@ async fn a_request_after_the_deadline_leaves_it_timed_out() {
     scope.cancel();
     assert_eq!(scope.cause(), Some(CancelCause::TimedOut));
     assert_eq!(scope.cancelled().await, CancelCause::TimedOut);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_request_at_the_deadline_instant_reads_as_timed_out() {
+    let scope = CancelScope::with_timeout(Duration::from_secs(5));
+    tokio::time::advance(Duration::from_secs(5)).await;
+    scope.cancel();
+    assert_eq!(scope.cause(), Some(CancelCause::TimedOut));
 }
 
 #[tokio::test(start_paused = true)]
@@ -87,10 +96,10 @@ async fn cancelling_a_child_leaves_the_parent_alone() {
 
 #[tokio::test(start_paused = true)]
 async fn a_child_inherits_its_parents_deadline() {
+    let started = Instant::now();
     let parent = CancelScope::with_timeout(Duration::from_secs(3));
     let child = parent.child();
-    assert_eq!(child.deadline(), parent.deadline());
-    let started = Instant::now();
+    assert_eq!(child.deadline(), Some(started + Duration::from_secs(3)));
     assert_eq!(child.cancelled().await, CancelCause::TimedOut);
     assert_eq!(started.elapsed(), Duration::from_secs(3));
 }
@@ -105,10 +114,10 @@ async fn a_childs_earlier_deadline_does_not_touch_the_parent() {
 
 #[tokio::test(start_paused = true)]
 async fn a_childs_later_deadline_is_capped_by_the_parent() {
-    let parent = CancelScope::with_timeout(Duration::from_secs(2));
-    let child = parent.child_with_deadline(Instant::now() + Duration::from_mins(1));
-    assert_eq!(child.deadline(), parent.deadline());
     let started = Instant::now();
+    let parent = CancelScope::with_timeout(Duration::from_secs(2));
+    let child = parent.child_with_deadline(started + Duration::from_mins(1));
+    assert_eq!(child.deadline(), Some(started + Duration::from_secs(2)));
     assert_eq!(child.cancelled().await, CancelCause::TimedOut);
     assert_eq!(started.elapsed(), Duration::from_secs(2));
 }

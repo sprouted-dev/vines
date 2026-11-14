@@ -47,6 +47,7 @@ async fn drop_oldest_keeps_the_tail_and_marks_the_head_gap() {
         .observe("display", ObserverPolicy::new(nz(3), Overflow::DropOldest))
         .unwrap();
     b.spawn(&CancelScope::new(), emit_all(10)).finish().await;
+    assert_eq!(obs.counts().peak_depth, 3, "a drop frees the slot it fills");
     let frames: Vec<_> = obs.collect().await;
     assert_eq!(
         frames[0],
@@ -61,10 +62,50 @@ async fn drop_oldest_keeps_the_tail_and_marks_the_head_gap() {
     assert_eq!(frames[2].seq(), Some(8));
     assert_eq!(frames[3].seq(), Some(9));
     match &frames[4] {
-        Frame::End(end) => assert_eq!(end.coverage.lost, 7),
+        Frame::End(end) => assert_eq!((end.coverage.lost, end.coverage.gaps), (7, 1)),
         other => panic!("expected the end marker, got {other:?}"),
     }
     assert_eq!(frames.len(), 5);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_late_drop_oldest_observer_keeps_its_drops_apart_from_what_it_missed() {
+    let (emitted_tx, emitted_rx) = tokio::sync::oneshot::channel::<()>();
+    let (go_tx, go_rx) = tokio::sync::oneshot::channel::<()>();
+    let run = builder().spawn(&CancelScope::new(), |mut ctx| async move {
+        for item in 0..2 {
+            ctx.emit(item).await.unwrap();
+        }
+        emitted_tx.send(()).unwrap();
+        go_rx.await.unwrap();
+        for item in 2..5 {
+            ctx.emit(item).await.unwrap(); // queue of one: 2 and 3 dropped
+        }
+        Exit::<(), ()>::Completed(())
+    });
+    emitted_rx.await.unwrap();
+    let late = run
+        .observe("late", ObserverPolicy::new(nz(1), Overflow::DropOldest))
+        .unwrap();
+    go_tx.send(()).unwrap();
+    run.finish().await;
+    let record = late.into_record().await;
+    assert_eq!(
+        record.gaps,
+        vec![
+            Gap {
+                reason: GapReason::JoinedLate,
+                first_seq: 0,
+                last_seq: 1
+            },
+            Gap {
+                reason: GapReason::DroppedOldest,
+                first_seq: 2,
+                last_seq: 3
+            },
+        ]
+    );
+    assert_eq!(record.items, vec![(4, 4)]);
 }
 
 #[tokio::test(start_paused = true)]
@@ -144,6 +185,7 @@ async fn spill_absorbs_a_burst_beyond_the_queue_without_loss() {
     let counts = obs.counts();
     assert_eq!(counts.spilled, 6);
     assert_eq!(counts.peak_depth, 10);
+    assert_eq!(counts.delivered, 0, "nothing read yet");
     let record = obs.into_record().await;
     assert!(record.is_complete());
     assert_eq!(record.items.len(), 10);
@@ -160,6 +202,7 @@ async fn an_exhausted_spill_with_loss_allowed_drops_with_a_gap() {
         .unwrap();
     let report = b.spawn(&CancelScope::new(), emit_all(7)).finish().await;
     assert!(!report.is_gated());
+    assert_eq!(obs.counts().lost, 3);
     let record = obs.into_record().await;
     assert_eq!(record.items.len(), 4);
     assert_eq!(
@@ -189,6 +232,11 @@ async fn an_exhausted_spill_with_loss_none_fails_the_observer_not_the_run() {
         Some(ObserverFailure::SpillQuotaExhausted { quota: nz(1) })
     );
     assert_eq!(report.answer().unwrap(), Outcome::Completed(6));
+    assert_eq!(
+        obs.counts().lost,
+        3,
+        "the failing item and the two after it"
+    );
     let record = obs.into_record().await;
     assert_eq!(record.items.len(), 3);
     assert_eq!(
@@ -219,6 +267,7 @@ async fn an_exhausted_spill_on_a_required_observer_gates_the_answer() {
         )
         .unwrap();
     let report = b.spawn(&CancelScope::new(), emit_all(5)).finish().await;
+    assert!(report.is_gated());
     let gated = report.answer().unwrap_err();
     assert_eq!(
         gated.outcome,
@@ -398,6 +447,7 @@ async fn stop_producer_makes_the_producer_wait_and_loses_nothing() {
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
     assert_eq!(seen, (0..20).collect::<Vec<_>>());
+    assert_eq!(obs.counts().delivered, 20);
     assert_eq!(run.finish().await.answer().unwrap(), Outcome::Completed(20));
 }
 
@@ -477,6 +527,7 @@ async fn a_durable_observer_counts_a_frame_only_when_the_sink_acks() {
     slow.delay = Some(Duration::from_secs(1));
     let mut b = builder();
     let handle = b.observe_durable("transcript", durable(8), slow).unwrap();
+    assert_eq!(handle.name(), "transcript");
     let run = b.spawn(&CancelScope::new(), emit_all(3));
     // answer = none: the result does not wait for the slow sink.
     let report = run.finish().await;

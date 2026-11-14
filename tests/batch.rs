@@ -170,6 +170,16 @@ async fn a_batch_that_reaches_max_bytes_exactly_flushes_at_once() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn an_item_of_exactly_max_bytes_is_a_full_batch_not_an_oversize_one() {
+    let policy = BatchPolicy::new(nz(100), OnCancel::Flush).max_bytes(nz(4), |n: &usize| *n);
+    let out: Vec<_> = batch(stream::iter([4usize]), policy, &CancelScope::new())
+        .collect()
+        .await;
+    assert_eq!(items(&out[0]), (vec![4], FlushReason::Bytes));
+    assert_eq!(out.len(), 1);
+}
+
+#[tokio::test(start_paused = true)]
 async fn an_oversize_item_is_emitted_alone_and_flagged() {
     let policy = BatchPolicy::new(nz(100), OnCancel::Flush).max_bytes(nz(4), |n: &usize| *n);
     let out: Vec<_> = batch(stream::iter([1usize, 9, 1]), policy, &CancelScope::new())
