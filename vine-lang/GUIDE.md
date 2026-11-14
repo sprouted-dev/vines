@@ -43,7 +43,7 @@ The stages are in `src/pipe/`. Worked examples are in `vines/pipe/`.
 
 **Run a helper with `use` when the two are one piece of work and no move starts the helper.** `use: job_teardown` runs that vine as a stage, and `on:` says what to do with each thing it emits. The checker makes you handle every output. See `vines/pipe/job_launch_undo.yaml`.
 
-**Say `take: 1` when a vine must give exactly one answer.** A vine may emit none, one or many. If the caller needs one, the vine says so itself.
+**Say `take: 1` when a vine wants no more than its first answer.** A vine may emit none, one or many. `take: 1` lets at most one item through and ends the stream. It does not promise an output: the stream can be empty, and the stages after `take` decide what is emitted.
 
 **Treat long work that reports as it goes as a stream.** An agent run takes hours and writes lines as it works. Register it as a stream act. `call` on it gives one item per line, and `end: ended` adds one last item that says how it ended. `job_run` makes the working copy, runs the agent, and commits, all in one vine. See `vines/pipe/job_run.yaml`.
 
@@ -157,7 +157,7 @@ The stages are in `src/pipe/`. Worked examples are in `vines/pipe/`.
 - A vine used before it exists, an output of a used vine that nothing handles, or input that cannot fit it.
 - A covering stage with nothing before it, or with a stream-wide stage before it.
 - An output nobody declared, or a payload that cannot fit it.
-- A path through the pipe that could end without emitting.
+- A pipe, or a case of a `branch`, a `catch` or a `use`, that does not end at an `emit`. A `branch` with no `else` counts. A `filter` or `take` before the `emit` can still drop an item, so a run can give no output.
 - A stage that can never run because everything before it already emitted.
 - `fork` with no side pipe, an emit in a side pipe to an output nobody declared, and a `finalize` that holds a fork that emits. An emit in a side pipe does not count as the main pipe emitting.
 - `collect` with a size of 0.
