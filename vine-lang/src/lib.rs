@@ -1,59 +1,42 @@
 //! An executable proof of the vine language.
 //!
-//! Two kinds of thing. **Operators** are Rust: the library registers core
-//! ones, anyone registers more through [`Registry::register`]. **Vines**
-//! string operators together. A vine is built in Rust with [`def`] and
-//! checked by [`Registry::build`], which returns a [`Vine`] that runs
-//! nothing until asked to.
+//! A vine is a stream in and a stream out: items flow through a pipe of
+//! stages and come out on named outputs. A vine is described in Rust with
+//! the functions in [`pipe`] and checked by [`Registry::build_pipe`], which
+//! returns a [`Pipe`] that runs nothing until asked to.
 //!
-//! YAML is a layer on top, behind the `yaml` feature. `Registry::load`
+//! YAML is a layer on top, behind the `yaml` feature. `Registry::load_pipe`
 //! reads a vine written as a document and hands the same description to
 //! the same checker. With the feature off, no YAML parser is compiled in.
 //!
-//! The library reaches nothing outside by itself. An **act** is something
-//! that does, such as `git.worktree_add`. The caller registers the Rust
-//! behind each name with [`Registry::register_act`], and a vine runs it
-//! with a `call` step.
+//! The library reaches nothing outside by itself. **Operators** are Rust:
+//! the library registers core ones, anyone registers more through
+//! [`Registry::register`]. An **act** is something that does, such as
+//! `git.worktree_add`. The caller registers the Rust behind each name with
+//! [`Registry::register_act`], and a vine runs it with a `call` stage.
 //!
-//! - Document format and control flow: [`vine`] module docs.
+//! - Stages, stream acts and `fork`: [`pipe`] module docs.
 //! - Shapes: [`shape`] module docs.
-//! - Expressions (`$in.x`, `==`, `!=`, null): [`expr`] module docs.
-//! - Running, cancellation, pause and resume: [`run`] module docs.
-//! - Stream vines and writing stream operators: [`stream`] module docs.
-//! - Pipes, stream acts and `fork`: [`pipe`] module docs.
+//! - Expressions (`$item.x`, `==`, `!=`, null): [`expr`] module docs.
 //! - Saving a pipe run and resuming it after a restart, from a journal for a
 //!   run that ends or from a saved position for an endless stream:
 //!   [`journal`] module docs.
 //!
-//! A vine holds no state, names no other vine, and knows nothing about what
-//! starts it. Its reach, [`Vine::reach`], is everything its operators touch.
+//! A vine holds no state and knows nothing about what starts it. Its reach,
+//! [`Pipe::reach`], is everything its operators and acts touch.
 
-pub mod def;
 pub mod error;
 pub mod expr;
 pub mod journal;
 pub mod pipe;
 pub mod registry;
-pub mod run;
 pub mod shape;
-pub mod stream;
-pub mod vine;
 
 pub use error::{LoadError, RegistryError, RunError};
 pub use journal::{Bookmark, Ending, Entry, Event, Journal, Line, Progress, Timing};
 pub use pipe::{OutputId, Pipe, PipeOutput};
 pub use registry::{ActStream, OpContext, OpError, OperatorSpec, Part, Registry};
-pub use run::Output;
 pub use shape::{Shape, Ty};
-pub use stream::{
-    Checkpoint, Emit, Memory, Stop, StreamOperator, StreamOperatorSpec, StreamReport, StreamSink,
-};
-pub use vine::{Mode, Vine};
-// `Step` and the builder functions stay under [`def`].
 
-// Operators need these to build values and watch cancellation.
+// Operators need these to build values.
 pub use serde_json::{json, Value};
-pub use tokio_util::sync::CancellationToken;
-// Stream operators set deadlines on tokio's clock, so paused test time works.
-pub use futures::future::BoxFuture;
-pub use tokio::time::Instant;

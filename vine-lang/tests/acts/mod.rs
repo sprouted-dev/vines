@@ -12,7 +12,6 @@ pub mod restart;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
 
-use vine_lang::def::{attempt, call, once, out, switch, VineDef};
 use vine_lang::{json, OpError, OperatorSpec, Registry, Shape, Ty, Value};
 
 /// What the fake acts did, and which act should fail next.
@@ -319,104 +318,6 @@ pub fn registry(world: &Arc<World>) -> Registry {
     .unwrap();
 
     reg
-}
-
-/// `vines/core/job_session_ended.yaml`, built in Rust.
-pub fn job_session_ended_def() -> VineDef {
-    let job = || Shape::new().required("job", Ty::Id);
-    once("job_session_ended")
-        .input(
-            job()
-                .required("tree", Ty::Text)
-                .required("status", Ty::Text),
-        )
-        .output("implemented", job().required("commit", Ty::Text))
-        .output("stopped", job().required("reason", Ty::Text))
-        .output("failed", job().required("reason", Ty::Text))
-        .steps([attempt([switch(
-            "$in.status",
-            [(
-                "finished",
-                [
-                    call(
-                        "git.commit",
-                        json!({ "dir": "$in.tree", "message": "$in.job" }),
-                    )
-                    .bind("commit"),
-                    out(
-                        "implemented",
-                        json!({ "job": "$in.job", "commit": "$commit.sha" }),
-                    ),
-                ],
-            )],
-        )
-        .otherwise([out(
-            "stopped",
-            json!({ "job": "$in.job", "reason": "$in.status" }),
-        )])
-        .end()])
-        .on_error([out(
-            "failed",
-            json!({ "job": "$in.job", "reason": "$error.message" }),
-        )])
-        .finally([call("git.worktree_remove", json!({ "path": "$in.tree" }))])
-        .end()])
-}
-
-/// `vines/core/job_launch.yaml`, built in Rust.
-pub fn job_launch_def() -> VineDef {
-    let failed = || {
-        out(
-            "failed",
-            json!({ "job": "$in.job", "reason": "$error.message" }),
-        )
-    };
-    once("job_launch")
-        .input(
-            Shape::new()
-                .required("job", Ty::Id)
-                .required("plan_branch", Ty::Text)
-                .required("brief", Ty::Text),
-        )
-        .output(
-            "started",
-            Shape::new()
-                .required("job", Ty::Id)
-                .required("session", Ty::Text)
-                .required("tree", Ty::Text),
-        )
-        .output(
-            "failed",
-            Shape::new()
-                .required("job", Ty::Id)
-                .required("reason", Ty::Text),
-        )
-        .steps([attempt([
-            call("git.refresh_branch", json!({ "branch": "$in.plan_branch" })),
-            call(
-                "git.worktree_add",
-                json!({ "name": "$in.job", "from": "$in.plan_branch" }),
-            )
-            .bind("tree"),
-            attempt([
-                call(
-                    "agent.start",
-                    json!({ "dir": "$tree.path", "brief": "$in.brief" }),
-                )
-                .bind("session"),
-                out(
-                    "started",
-                    json!({ "job": "$in.job", "session": "$session.id", "tree": "$tree.path" }),
-                ),
-            ])
-            .on_error([
-                call("git.worktree_remove", json!({ "path": "$tree.path" })),
-                failed(),
-            ])
-            .end(),
-        ])
-        .on_error([failed()])
-        .end()])
 }
 
 /// The input `job_launch` takes.

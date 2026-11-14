@@ -5,15 +5,7 @@
 //! it returns (or nothing, meaning any value), and what it touches.
 //!
 //! The library registers its core operators in [`Registry::new`]. Anyone
-//! else registers more with [`Registry::register`]. The control-flow core
-//! operators (`guard`, `switch`, `try`, `out`) hold blocks of steps, so the
-//! loader and runner handle them directly; they are listed here, touch
-//! nothing, and their names are reserved.
-//!
-//! Stream operators (see [`crate::stream`]) are registered with
-//! [`Registry::register_stream`]. The core one is `collect`. `each` holds
-//! once-style steps inside a stream pipe; the loader handles it and its
-//! name is reserved. Plain and stream operators share one namespace.
+//! else registers more with [`Registry::register`].
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
@@ -23,16 +15,12 @@ use futures::future::BoxFuture;
 use futures::stream::BoxStream;
 use futures::{FutureExt, Stream, StreamExt};
 use serde_json::Value;
-use tokio_util::sync::CancellationToken;
 
 use crate::error::{LoadError, RegistryError};
 use crate::shape::{Shape, Ty};
-use crate::stream::{
-    collect_factory, collect_spec, Factory, RegisteredStream, StreamOperator, StreamOperatorSpec,
-};
-use crate::vine::Vine;
 
-/// The error an operator returns. `code` is what a `catch` block matches.
+/// The error an operator returns. A `catchError` gets its `code` and
+/// `message` as `$item.error`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OpError {
     pub code: String,
@@ -40,8 +28,10 @@ pub struct OpError {
 }
 
 impl OpError {
-    /// The code an operator returns when it stopped because the run was
-    /// cancelled. A vine cannot catch it; `finally` still runs.
+    /// The code an operator returns when it stopped because it was
+    /// cancelled. No `catchError` handles it: the run ends with
+    /// [`RunError::Cancelled`](crate::RunError::Cancelled), and the failure
+    /// is not saved, so a resumed run asks the operator again.
     pub const CANCELLED: &'static str = "cancelled";
 
     pub fn new(code: impl Into<String>, message: impl Into<String>) -> Self {
@@ -59,16 +49,12 @@ impl OpError {
 /// What an operator gets besides its settings.
 #[derive(Debug, Clone, Default)]
 pub struct OpContext {
-    cancel: CancellationToken,
     resume_from: u64,
 }
 
 impl OpContext {
-    pub(crate) fn new(cancel: CancellationToken) -> Self {
-        OpContext {
-            cancel,
-            resume_from: 0,
-        }
+    pub(crate) fn new() -> Self {
+        OpContext::default()
     }
 
     pub(crate) fn resuming(mut self, from: u64) -> Self {
@@ -84,12 +70,6 @@ impl OpContext {
     /// items through it are fully done, and the act gives the rest again.
     pub fn resume_from(&self) -> u64 {
         self.resume_from
-    }
-
-    /// The run's cancellation token. A long operator should watch it and
-    /// return [`OpError::cancelled`] when it fires.
-    pub fn cancellation(&self) -> &CancellationToken {
-        &self.cancel
     }
 }
 
@@ -190,13 +170,6 @@ pub(crate) struct Registered {
     pub handler: Handler,
 }
 
-/// The control-flow core operators. Handled by the loader and runner.
-/// They are once grammar: in a stream vine they stand only inside `each`.
-pub(crate) const CONSTRUCTS: &[&str] = &["guard", "switch", "try", "out"];
-
-/// The pipe construct: once-style steps run per item, last in a pipe.
-pub(crate) const EACH: &str = "each";
-
 /// The step that runs a named act: `call: git.worktree_add`.
 pub(crate) const CALL: &str = "call";
 
@@ -204,18 +177,17 @@ pub(crate) const CALL: &str = "call";
 ///
 /// The pipe's camelCase keys, such as `mergeMap` and `catchError`, need no
 /// entry: an operator name is lower snake_case, so it can never be one.
-/// `together` and `catch` are the old names of `forkJoin` and
-/// `catchError`. The pipe's YAML refuses them as stage keys, so an
-/// operator by either name could never run in a pipe, and they stay
-/// reserved. `each` and `collect`, the other two old names, are held by
-/// [`EACH`] and by the core stream operator `collect`.
+/// `each`, `collect`, `together` and `catch` are the old names of the
+/// mapping stages, `bufferCount`, `forkJoin` and `catchError`. The pipe's
+/// YAML refuses them as stage keys, so an operator by any of them could
+/// never run in a pipe, and they stay reserved.
 pub(crate) const PIPE_WORDS: &[&str] = &[
-    "tap", "split", "filter", "take", "together", "catch", "finalize", "retry", "timeout",
-    "branch", "emit", "with", "into", "on", "fork", "last", "end",
+    "tap", "split", "filter", "take", "each", "collect", "together", "catch", "finalize", "retry",
+    "timeout", "branch", "emit", "with", "into", "on", "fork", "last", "end",
 ];
 
-/// Keys that would pull another vine or a piece of one into this one.
-/// Refused at the top level and as step keys, and never registrable.
+/// Words that read as pulling another vine or a piece of one into this
+/// one. A pipe does that only with `use`, so no operator may take one.
 pub(crate) const COMPOSITION_WORDS: &[&str] = &[
     "include",
     "import",
@@ -235,7 +207,6 @@ pub(crate) const COMPOSITION_WORDS: &[&str] = &[
 #[derive(Clone)]
 pub struct Registry {
     ops: BTreeMap<String, Registered>,
-    stream_ops: BTreeMap<String, RegisteredStream>,
     acts: BTreeMap<String, Registered>,
     stream_acts: BTreeMap<String, RegisteredStreamAct>,
     vines: BTreeMap<String, crate::pipe::Pipe>,
@@ -252,7 +223,6 @@ impl Registry {
     pub fn new() -> Self {
         let mut r = Registry {
             ops: BTreeMap::new(),
-            stream_ops: BTreeMap::new(),
             acts: BTreeMap::new(),
             stream_acts: BTreeMap::new(),
             vines: BTreeMap::new(),
@@ -288,7 +258,6 @@ impl Registry {
                 Ok(serde_json::json!({ "count": items.len(), "items": items }))
             },
         );
-        r.insert_stream(collect_spec(), collect_factory);
         r
     }
 
@@ -442,34 +411,14 @@ impl Registry {
         self.acts.values().map(|r| (*r.spec).clone()).collect()
     }
 
-    /// Register a provided stream operator. `factory` builds a fresh
-    /// instance from the step's settings, or says why they do not fit.
-    pub fn register_stream<F>(
-        &mut self,
-        spec: StreamOperatorSpec,
-        factory: F,
-    ) -> Result<(), RegistryError>
-    where
-        F: Fn(&Value) -> Result<Box<dyn StreamOperator>, String> + Send + Sync + 'static,
-    {
-        self.check_new(&spec.name, &spec.touches)?;
-        self.insert_stream(spec, factory);
-        Ok(())
-    }
-
     fn check_new(&self, name: &str, touches: &BTreeSet<String>) -> Result<(), RegistryError> {
         if !crate::expr::is_name(name) {
             return Err(RegistryError::BadName(name.into()));
         }
-        if CONSTRUCTS.contains(&name)
-            || name == EACH
-            || name == CALL
-            || PIPE_WORDS.contains(&name)
-            || COMPOSITION_WORDS.contains(&name)
-        {
+        if name == CALL || PIPE_WORDS.contains(&name) || COMPOSITION_WORDS.contains(&name) {
             return Err(RegistryError::Reserved(name.into()));
         }
-        if self.ops.contains_key(name) || self.stream_ops.contains_key(name) {
+        if self.ops.contains_key(name) {
             return Err(RegistryError::Duplicate(name.into()));
         }
         if let Some(bad) = touches.iter().find(|t| !is_touch(t)) {
@@ -479,32 +428,6 @@ impl Registry {
             });
         }
         Ok(())
-    }
-
-    fn insert_stream<F>(&mut self, spec: StreamOperatorSpec, factory: F)
-    where
-        F: Fn(&Value) -> Result<Box<dyn StreamOperator>, String> + Send + Sync + 'static,
-    {
-        let factory: Factory = Arc::new(factory);
-        self.stream_ops.insert(
-            spec.name.clone(),
-            RegisteredStream {
-                spec: Arc::new(spec),
-                factory,
-            },
-        );
-    }
-
-    pub(crate) fn get_stream(&self, name: &str) -> Option<&RegisteredStream> {
-        self.stream_ops.get(name)
-    }
-
-    /// The specs of every registered stream operator.
-    pub fn stream_specs(&self) -> Vec<StreamOperatorSpec> {
-        self.stream_ops
-            .values()
-            .map(|r| (*r.spec).clone())
-            .collect()
     }
 
     fn insert<F, Fut>(&mut self, spec: OperatorSpec, f: F)
@@ -526,29 +449,9 @@ impl Registry {
         self.ops.get(name)
     }
 
-    /// Whether a vine may name this operator.
-    pub fn contains(&self, name: &str) -> bool {
-        self.ops.contains_key(name)
-            || self.stream_ops.contains_key(name)
-            || CONSTRUCTS.contains(&name)
-            || name == EACH
-            || name == CALL
-    }
-
-    /// The specs of every registered operator, plus the control-flow core
-    /// operators (which touch nothing and take block settings).
+    /// The specs of every registered operator, the core ones included.
     pub fn specs(&self) -> Vec<OperatorSpec> {
-        let mut out: Vec<OperatorSpec> = self.ops.values().map(|r| (*r.spec).clone()).collect();
-        out.extend(construct_specs());
-        out.sort_by(|a, b| a.name.cmp(&b.name));
-        out
-    }
-
-    /// Check a vine written in YAML and return it ready to run. The YAML
-    /// layer builds the same description [`Registry::build`] takes.
-    #[cfg(feature = "yaml")]
-    pub fn load(&self, yaml: &str) -> Result<Vine, LoadError> {
-        crate::vine::load(self, yaml)
+        self.ops.values().map(|r| (*r.spec).clone()).collect()
     }
 
     /// Make a checked vine available to other vines, which run it with a
@@ -576,43 +479,9 @@ impl Registry {
     pub fn load_pipe(&self, yaml: &str) -> Result<crate::pipe::Pipe, LoadError> {
         crate::pipe::load(self, yaml)
     }
-
-    /// Check a vine built in Rust and return it ready to run.
-    pub fn build(&self, def: crate::def::VineDef) -> Result<Vine, LoadError> {
-        def.assemble(self)
-    }
 }
 
 /// `facts.read`, `git`, `agent`: dot-separated lower snake_case words.
 fn is_touch(t: &str) -> bool {
     !t.is_empty() && t.split('.').all(crate::expr::is_name)
-}
-
-pub(crate) fn construct_specs() -> Vec<OperatorSpec> {
-    vec![
-        OperatorSpec::new("guard").settings(
-            Shape::new()
-                .required("when", Ty::Any)
-                .required("out", Ty::Text)
-                .optional("with", Ty::Any),
-        ),
-        OperatorSpec::new("out").settings(
-            Shape::new()
-                .required("name", Ty::Text)
-                .optional("with", Ty::Any),
-        ),
-        OperatorSpec::new("switch").settings(
-            Shape::new()
-                .required("on", Ty::Any)
-                .required("cases", Ty::Object)
-                .optional("else", Ty::List),
-        ),
-        OperatorSpec::new("try").settings(
-            Shape::new()
-                .required("do", Ty::List)
-                .optional("catch", Ty::Object)
-                .optional("on_error", Ty::List)
-                .optional("finally", Ty::List),
-        ),
-    ]
 }

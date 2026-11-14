@@ -15,13 +15,13 @@ use super::flow::{
     one, per_item, per_item_stream, rescued, tidied, Flow, Flowing, Items, Transform,
 };
 use super::order::{merges_anywhere, View};
+use super::output::Output;
 use super::timer::{timed, Covered};
 use super::unit::{add_field, Runner, Unit};
 use super::{Flatten, Keep, Pipe, PipeDef, Stage};
 use crate::error::{LoadError, RunError};
 use crate::expr::{case_key, is_name, Cond, Ref, Template};
 use crate::registry::Registry;
-use crate::run::Output;
 use crate::shape::{Shape, Ty};
 
 /// What is known about the item at a point in the pipe: its fields, or

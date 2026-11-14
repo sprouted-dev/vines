@@ -30,15 +30,13 @@ pub enum LoadError {
     Malformed { path: String, problem: String },
     #[error("{path}: unknown key `{key}`")]
     UnknownKey { path: String, key: String },
-    /// A pipe key from before the stages took their RxJS names.
+    /// A key from before the pipe took its RxJS names.
     #[error("{path}: `{old}` is not a key any more; use {new}")]
     Renamed {
         path: String,
         old: String,
         new: String,
     },
-    #[error("{path}: `{key}` would pull in another vine or a piece of one; vines do not compose, reuse is by operators only")]
-    Composition { path: String, key: String },
     #[error("{path}: unknown operator `{name}` (not registered)")]
     UnknownOperator { path: String, name: String },
     #[error("{path}: unknown act `{name}` (not registered)")]
@@ -51,7 +49,7 @@ pub enum LoadError {
         operator: String,
         problem: String,
     },
-    #[error("{path}: `{reference}` refers to `{name}`, which no earlier step produced")]
+    #[error("{path}: `{reference}` refers to `{name}`, and `$item` is the only name in a pipe")]
     UnboundReference {
         path: String,
         reference: String,
@@ -72,34 +70,20 @@ pub enum LoadError {
         output: String,
         problem: String,
     },
-    #[error("{path}: `as: {name}` is already bound")]
+    #[error("{path}: `{name}` already holds another result here")]
     DuplicateBinding { path: String, name: String },
-    #[error("{path}: this step can never run; the step before it always ends the run")]
+    #[error("{path}: this can never run; everything before it already emits")]
     Unreachable { path: String },
-    #[error("{path}: these steps can finish without ending in an output; end every path with `out` or a `switch` with `else`")]
+    #[error("{path}: an item can get through without being emitted; end every path with `emit`, and give a `branch` an `else`")]
     MissingOutput { path: String },
-    #[error("{path}: `finally` must not end the run (no `out` or `guard` inside it)")]
-    EndsInFinally { path: String },
-    #[error("{path}: `cancelled` cannot be caught; use `finally` for cleanup")]
-    CatchCancelled { path: String },
-    #[error("{path}: `{name}` is per-item grammar and cannot be a step of a stream pipe; put it inside `each`")]
-    OnceOnly { path: String, name: String },
-    #[error("{path}: `{name}` is a stream step; it may only stand in a stream vine's pipe (not in a once vine, nor inside `each`)")]
-    PipeOnly { path: String, name: String },
-    #[error("{path}: `each` must be the last step of the pipe; what its `out` steps name are the vine's outputs")]
-    EachNotLast { path: String },
-    #[error("{path}: the pipe's results cannot be matched to a declared output: {problem}")]
-    UnmatchedOutput { path: String, problem: String },
 }
 
-/// A run ended without a declared output.
+/// A run failed.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum RunError {
-    #[error("vine `{vine}` runs in {mode} mode; call the matching run method")]
-    WrongMode { vine: String, mode: &'static str },
     #[error("input does not fit the declared shape: {0}")]
     InputMisfit(String),
-    #[error("{path}: operator `{operator}` failed with `{code}`: {message} (no catch handles it)")]
+    #[error("{path}: operator `{operator}` failed with `{code}`: {message} (no `catchError` handles it)")]
     Unhandled {
         path: String,
         operator: String,
@@ -126,22 +110,10 @@ pub enum RunError {
         output: String,
         problem: String,
     },
-    #[error("{path}: cleanup operator `{operator}` failed with `{code}`: {message}; the run would otherwise have ended with {masked}")]
-    CleanupFailed {
-        path: String,
-        operator: String,
-        code: String,
-        message: String,
-        masked: String,
-    },
     #[error("{path}: {problem}")]
     ItemMisfit { path: String, problem: String },
-    #[error("cannot resume from this checkpoint: {0}")]
-    ResumeMisfit(String),
     #[error("cannot resume from this journal: {problem}")]
     ReplayMisfit { problem: String },
     #[error("vine `{vine}` cannot be resumed: {why}")]
     NotResumable { vine: String, why: String },
-    #[error("{path}: stream operator `{operator}` was woken but its deadline is still due; `wake` must clear or move it")]
-    DeadlineNotMoved { path: String, operator: String },
 }

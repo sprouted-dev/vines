@@ -191,7 +191,7 @@ Reach for `concatMap` first: it is the one that cannot surprise you. Only `merge
 - A timeout that honours, after a restart, the time its stages had already taken. It would need a clock that runs across a restart, which the library does not have.
 - Telling an act that a timeout stopped waiting for it.
 - Making a journal smaller for a stream act that cannot give its items again. Every item it gives is saved until its input item is done.
-- A position for a stage that keeps a count or a running total across events. Such state needs to be saved itself, as the older runner's `Memory::Kept` did.
+- A position for a stage that keeps a count or a running total across events. Such state would need to be saved itself.
 - Telling a stream act that the run stopped reading. Dropping a run, or a `catchError` that drops the rest of an item's work, leaves the stream act's work going.
 - `retry` waits again on replay, even when the attempts it waits for are saved.
 - Waiting stages such as `debounceTime`, and `takeUntil` to stop work when a cancel arrives.

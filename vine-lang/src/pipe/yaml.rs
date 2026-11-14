@@ -332,12 +332,9 @@ fn read_stage(v: &Value, path: &str) -> Result<Stage, LoadError> {
                 .ok_or_else(|| malformed(&here, "`retry` needs `times`, a whole number"))?;
             let wait = match m.get("wait") {
                 None => Duration::ZERO,
-                Some(v) => v
-                    .as_str()
-                    .and_then(crate::stream::parse_duration)
-                    .ok_or_else(|| {
-                        malformed(&format!("{here}.wait"), "`wait` is a time such as `5s`")
-                    })?,
+                Some(v) => v.as_str().and_then(parse_duration).ok_or_else(|| {
+                    malformed(&format!("{here}.wait"), "`wait` is a time such as `5s`")
+                })?,
             };
             Stage::Retry { times, wait }
         }
@@ -345,7 +342,7 @@ fn read_stage(v: &Value, path: &str) -> Result<Stage, LoadError> {
             takes(false, false)?;
             Stage::Timeout(
                 body.as_str()
-                    .and_then(crate::stream::parse_duration)
+                    .and_then(parse_duration)
                     .ok_or_else(|| malformed(&here, "`timeout` is a time such as `30s`"))?,
             )
         }
@@ -424,5 +421,19 @@ fn read_stage(v: &Value, path: &str) -> Result<Stage, LoadError> {
                 keep: keep(into),
             }
         }
+    })
+}
+
+/// `500ms`, `60s`, `2m`, `1h`.
+fn parse_duration(s: &str) -> Option<Duration> {
+    let split = s.find(|c: char| !c.is_ascii_digit())?;
+    let (n, unit) = s.split_at(split);
+    let n: u64 = n.parse().ok()?;
+    Some(match unit {
+        "ms" => Duration::from_millis(n),
+        "s" => Duration::from_secs(n),
+        "m" => Duration::from_secs(n.checked_mul(60)?),
+        "h" => Duration::from_secs(n.checked_mul(3600)?),
+        _ => return None,
     })
 }

@@ -11,12 +11,12 @@ use futures::StreamExt;
 use serde_json::{json, Value};
 
 use super::book::Cx;
+use super::output::Output;
 use super::tag::Tag;
 use super::unit::add_field;
 use crate::error::RunError;
 use crate::expr::Env;
 use crate::registry::OpError;
-use crate::run::Output;
 
 /// What flows between stages: a value still being worked on, or a value
 /// already sent to an output. Later stages leave an output alone. Each

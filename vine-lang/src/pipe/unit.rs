@@ -5,7 +5,6 @@ use std::sync::{Arc, OnceLock};
 use futures::future::BoxFuture;
 use futures::FutureExt;
 use serde_json::Value;
-use tokio_util::sync::CancellationToken;
 
 use super::book::{Cx, Saved};
 use super::flow::{env_of, fatal, misfit, Fault, OpFault};
@@ -103,7 +102,7 @@ impl Unit {
             if key.is_some() {
                 cx.handed_out().await;
             }
-            let cx_op = OpContext::new(CancellationToken::new());
+            let cx_op = OpContext::new();
             let result = match handler(resolved.clone(), cx_op).await {
                 Ok(v) => v,
                 Err(error) => {

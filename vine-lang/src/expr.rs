@@ -1,23 +1,21 @@
 //! The expression form. It is deliberately tiny.
 //!
 //! **References.** A string that starts with `$` is a reference:
-//! `$in.item`, `$job.state`, `$check.event.id`. The first segment names a
-//! value: `in` is the vine's input, `error` is the caught error inside a
-//! `catch` block, and any other name is the `as:` of an earlier step.
-//! Later segments walk into maps. A missing field reads as null. A string
-//! that starts with `$$` is the literal text with one `$` removed.
+//! `$item`, `$item.tree.path`, `$item.error.from`. The first segment names
+//! a value, and in a pipe the only one is `item`, the item reaching the
+//! stage. Later segments walk into maps. A missing field reads as null. A
+//! string that starts with `$$` is the literal text with one `$` removed.
 //!
 //! **Templates.** Any settings or `with:` value is a template: maps and
 //! lists are walked, a reference anywhere is replaced by its value, every
 //! other value is literal. A reference replaces the whole string; there is
 //! no interpolation inside text.
 //!
-//! **Conditions** (`guard.when`): one operand, or two operands joined by
-//! `==` or `!=`. An operand is a reference, a quoted string (`"open"` or
+//! **Conditions** (`filter`): one operand, or two operands joined by `==`
+//! or `!=`. An operand is a reference, a quoted string (`"open"` or
 //! `'open'`), an integer, `true`, `false` or `null`. One operand alone is
 //! true when it is neither null nor false. Equality is JSON equality.
-//! There is no `and`, `or`, `not`, arithmetic, or function call: two
-//! guards in a row are an `or` that ends the run.
+//! There is no `and`, `or`, `not`, arithmetic, or function call.
 
 use std::collections::BTreeMap;
 
@@ -30,7 +28,7 @@ pub fn is_name(s: &str) -> bool {
         && chars.all(|c| matches!(c, 'a'..='z' | '0'..='9' | '_'))
 }
 
-/// A reference such as `$in.item`.
+/// A reference such as `$item.job`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Ref {
     pub root: String,
@@ -84,7 +82,7 @@ impl std::fmt::Display for Ref {
     }
 }
 
-/// Bound values during a run.
+/// The names a template or condition can read, and their values.
 pub type Env = BTreeMap<String, Value>;
 
 /// An unresolved value: literal parts and references.
@@ -182,28 +180,11 @@ impl Operand {
                     _ => match w.parse::<i64>() {
                         Ok(n) => Ok(Operand::Lit(Value::from(n))),
                         Err(_) => Err(format!(
-                            "bare word `{w}`: quote text (\"{w}\"), or write a reference ($name.field), an integer, true, false or null"
+                            "bare word `{w}`: quote text (\"{w}\"), or write a reference ($item.field), an integer, true, false or null"
                         )),
                     },
                 }
             }
-        }
-    }
-
-    /// Parse a single operand from a YAML value (`switch.on`).
-    pub fn parse_value(v: &Value) -> Result<Operand, String> {
-        match v {
-            Value::String(s) => {
-                let toks = tokenize(s)?;
-                match toks.as_slice() {
-                    [one] => Operand::parse_token(one),
-                    _ => Err(format!("`{s}` should be a single value")),
-                }
-            }
-            Value::Object(_) | Value::Array(_) => {
-                Err("expected a single value, found a map or list".to_owned())
-            }
-            other => Ok(Operand::Lit(other.clone())),
         }
     }
 
@@ -215,7 +196,7 @@ impl Operand {
     }
 }
 
-/// A `guard.when` condition.
+/// A `filter` condition.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Cond {
     Truthy(Operand),
@@ -308,7 +289,7 @@ fn tokenize(s: &str) -> Result<Vec<Token>, String> {
     Ok(toks)
 }
 
-/// The key a `switch` case matches: text as itself, bools and integers as
+/// The key a `branch` case matches: text as itself, bools and integers as
 /// written. Anything else (null, maps, lists) matches no case.
 pub fn case_key(v: &Value) -> Option<String> {
     match v {

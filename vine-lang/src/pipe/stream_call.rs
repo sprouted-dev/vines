@@ -20,7 +20,6 @@ use std::sync::{Arc, Mutex};
 use futures::stream;
 use futures::StreamExt;
 use serde_json::Value;
-use tokio_util::sync::CancellationToken;
 
 use super::book::{Cx, Key, Saved};
 use super::flow::{fatal, held, lock, misfit, one, Fault, Flow, Flowing, Items};
@@ -228,7 +227,7 @@ impl StreamRun {
                 }
                 self.started = true;
             }
-            let cx = OpContext::new(CancellationToken::new()).resuming(self.given);
+            let cx = OpContext::new().resuming(self.given);
             self.live = Some((self.handler)(self.input.clone(), cx));
         }
         let next = self.live.as_mut()?.next().await;

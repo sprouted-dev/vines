@@ -847,15 +847,15 @@ fn no_operator_can_take_a_new_word_of_the_pipe() {
             .unwrap_err();
         assert_eq!(err, RegistryError::Reserved(word.into()));
     }
-    // `collect`, the old name of `bufferCount`, is held by the `Vine`
-    // runner's core stream operator.
-    let mut reg = Registry::new();
-    let err = reg
-        .register(OperatorSpec::new("collect"), |_v, _cx| async {
-            Ok(json!({}))
-        })
-        .unwrap_err();
-    assert_eq!(err, RegistryError::Duplicate("collect".into()));
+    // `each` and `collect`, the old names of the mapping stages and of
+    // `bufferCount`, stay reserved.
+    for word in ["each", "collect"] {
+        let mut reg = Registry::new();
+        let err = reg
+            .register(OperatorSpec::new(word), |_v, _cx| async { Ok(json!({})) })
+            .unwrap_err();
+        assert_eq!(err, RegistryError::Reserved(word.into()));
+    }
 }
 
 // ------------------------------------------------------------- the journal

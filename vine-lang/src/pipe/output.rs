@@ -58,3 +58,10 @@ pub struct PipeOutput {
     pub name: String,
     pub payload: Value,
 }
+
+/// What an `emit` makes, before the run gives it an id.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct Output {
+    pub name: String,
+    pub payload: Value,
+}
