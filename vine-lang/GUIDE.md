@@ -28,13 +28,15 @@ The stages are in `src/pipe/`. Worked examples are in `vines/pipe/`.
 
 **Give `retry` a wait, and a `timeout` to anything that can hang.** A timeout fails the item with the code `timeout`, and a `catch` after it can handle that like any other failure.
 
-**Run another vine with `use` when the two are one piece of work.** `use: job_launch` runs that vine as a stage, and `on:` says what to do with each thing it emits. The checker makes you handle every output. See `vines/pipe/plan_launch_all.yaml`.
+**Nest a vine that a move starts by pressing its move.** `plan_launch_all` launches each job with `call: move.launch`, not `use: job_launch`. The host checks the job's gates, builds `job_launch`'s input from the job's facts, and lands each output as an event before your vine hears of it. So you pass only what the move's payload takes, and the work stays visible: another vine can react to every event. The act gives one item per inner output, `{ output, event, landed, payload }`, and ends with `{ status }`: `done`, `failed` with a `reason`, or `refused` with the `gate` that refused it. A refusal is data to branch on, not a failure, so the jobs after it go on. Pass your own `request` through: the host builds each inner press's id from it, so after a restart the same press attaches to the first. See `vines/pipe/plan_launch_all.yaml`.
+
+**Run a helper with `use` when the two are one piece of work and no move starts the helper.** `use: job_teardown` runs that vine as a stage, and `on:` says what to do with each thing it emits. The checker makes you handle every output. See `vines/pipe/job_launch_undo.yaml`.
 
 **Say `take: 1` when a vine must give exactly one answer.** A vine may emit none, one or many. If the caller needs one, the vine says so itself.
 
 **Treat long work that reports as it goes as a stream.** An agent run takes hours and writes lines as it works. Register it as a stream act. `call` on it gives one item per line, and `end: ended` adds one last item that says how it ended. `job_run` makes the working copy, runs the agent, and commits, all in one vine. See `vines/pipe/job_run.yaml`.
 
-**Run a vine that holds long work with `run_saved`, and keep the journal it builds.** Pass every event to `Journal::record` and save the journal before you read the next event. After a restart, run the vine again with the same input and the journal you saved. Acts that finished are not run again. A stream act is asked to go on from where it was, so it must start the work the first time and attach to it after that. Outputs you were already handed are not handed out again, as long as you saved the entry that came after each one.
+**Run a vine that holds long work with `run_saved`, and keep the journal it builds.** Pass every event to `Journal::record` and save the journal before you read the next event. After a restart, run the vine again with the same input and the journal you saved. Acts whose entry you saved are not run again. A saved run hands out each act's entry before it calls the next act, so a crash can lose at most the one act whose entry you had not saved yet, and that act runs again. A stream act is asked to go on from where it was, so it must start the work the first time and attach to it after that. Outputs you were already handed are not handed out again, as long as you saved the entry that came after each one.
 
 **Run a vine over an endless stream with `run_from`, and keep the bookmark it builds.** A vine that reads events for months must not replay from the first event after a restart. `run_from` tells you when every event through a number is fully done: its acts finished, its outputs were handed out, and no stage holds it. Pass every event it gives you to `Bookmark::record` and save the bookmark before you read the next. After a restart, feed the events after `bookmark.position()` with the bookmark you saved. The bookmark holds only the lines of events still in flight, so it stays small. See `vines/pipe/event_relay.yaml`, `event_backup.yaml` and `event_pages.yaml`.
 
@@ -63,7 +65,9 @@ The stages are in `src/pipe/`. Worked examples are in `vines/pipe/`.
 
 `concat` is the default because it is the one that cannot surprise you.
 
-**Make every act safe to run twice.** A result can repeat after a crash. An act that creates or writes should give the same result the second time.
+**Make every act safe to run twice.** A result can repeat after a crash, and an act whose entry was not saved runs again. An act that creates or writes should give the same result the second time: `git.worktree_add` for a name that has a working copy gives that copy, and `agent.start` in a directory with an agent running gives that agent.
+
+**Undo abandoned work in a vine of its own.** When the host refuses an output because a fact the press read changed, it lands an `abandoned` event that carries the output. A reaction to that event presses a cleanup move, whose vine undoes the work from what the output says. Give the cleanup move a gate that refuses when a later run has taken the work over, as `undo_launch` refuses a job that is no longer `ready`. See `vines/pipe/job_launch_undo.yaml`.
 
 ## Don't
 
@@ -111,7 +115,11 @@ The stages are in `src/pipe/`. Worked examples are in `vines/pipe/`.
 
 **Don't `retry` an act that is not safe to repeat.** A retry runs every covered stage again from the item as it arrived.
 
-**Don't `use` a vine when others need to hear what happens between the two.** A used vine runs inside the outer vine's run. Nothing it emits is seen from outside unless the outer vine emits it again. When a step should be visible, be something others can react to, or take hours, emit an output and let a separate vine pick it up.
+**Don't `use` a vine that a move starts.** It would skip the move's gates, and nobody would build its input. Press the move instead. The host refuses a package of vines in which one does, even through a helper: the library lists what a vine uses with `Pipe::uses`, and the host knows which vines its moves start.
+
+**Don't `use` a vine when others need to hear what happens between the two.** A used vine runs inside the outer vine's run. Nothing it emits is seen from outside unless the outer vine emits it again. When a step should be visible, be something others can react to, or take hours, press its move, or emit an output and let a separate vine pick it up.
+
+**Don't let a move's event press the same move again unless a gate stops it.** The host refuses such a loop at install. It allows one only when a gate on the loop reads a fact of the move's own target that the loop's own events set to a value the gate refuses, as `core.job.started` sets the job's `state` that `launch` gates on. A gate on another artifact, a loop through a nested press, or a reaction that takes its target from the event's payload does not count.
 
 **Don't `use` a vine from another trellis.** A trellis has one version, so the vines in it change together. A vine used across trellises could change under you.
 
@@ -140,6 +148,7 @@ The stages are in `src/pipe/`. Worked examples are in `vines/pipe/`.
 - A stream act that does not go on from `resume_from`. A replay trusts it to.
 - A stream act that says it gives its items again and gives other items. A run sees only an act that stops after fewer items than it gave before it stopped. Outputs handed out before a restart are skipped by count, so an act that gives other items can hand out a different output in place of one already handed.
 - A journal saved for a different vine. A saved act whose input no longer matches is a run error, and so is an output the replay does not make again. Anything else is not checked.
+- A `use` of a vine that a move starts, or moves that start each other in a loop. The library knows no moves. The host checks both when it installs a package of vines, from `Pipe::uses` and `Pipe::acts`.
 
 ## Not built yet
 
