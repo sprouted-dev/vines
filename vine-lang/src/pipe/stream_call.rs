@@ -240,7 +240,7 @@ impl StreamRun {
                         return self.fail_hard(RunError::ResultMisfit {
                             path,
                             operator: spec.name.clone(),
-                            problem,
+                            problem: problem.to_string(),
                         });
                     }
                 }

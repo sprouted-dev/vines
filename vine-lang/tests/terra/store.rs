@@ -209,7 +209,9 @@ impl Store {
         for (field, ty) in &decl.payload {
             shape = shape.required(field, *ty);
         }
-        shape.check(payload).map_err(Refusal::Payload)?;
+        shape
+            .check(payload)
+            .map_err(|misfit| Refusal::Payload(misfit.to_string()))?;
         let mut seen = BTreeMap::new();
         for gate in &decl.gates {
             if self.read(gate.path, payload, &mut seen) != Some(gate.equals.clone()) {

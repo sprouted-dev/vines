@@ -962,7 +962,7 @@ fn through_and_stopped_entries_survive_json_and_bad_ones_are_refused() {
         ),
     ] {
         let err = Entry::from_json(&bad).unwrap_err();
-        assert!(err.contains(says), "{bad}: {err}");
+        assert!(err.to_string().contains(says), "{bad}: {err}");
     }
 }
 

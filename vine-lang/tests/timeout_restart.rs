@@ -976,7 +976,7 @@ async fn a_decision_reads_back_from_json_and_a_broken_one_is_refused() {
         ),
     ] {
         let err = Journal::from_json(&bad).unwrap_err();
-        assert!(err.contains(says), "{bad}: {err}");
+        assert!(err.to_string().contains(says), "{bad}: {err}");
     }
     // Saved twice for one run of the timeout, it is a misfit, not a guess.
     let twice = Journal::from(vec![timed.clone(), timed]);

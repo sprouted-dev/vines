@@ -48,7 +48,7 @@ impl Unit {
             fatal(RunError::SettingsMisfit {
                 path: self.path.clone(),
                 operator: self.spec.name.clone(),
-                problem,
+                problem: problem.to_string(),
             })
         })?;
         Ok(resolved)
@@ -125,7 +125,7 @@ impl Unit {
                     fatal(RunError::ResultMisfit {
                         path: unit.path.clone(),
                         operator: unit.spec.name.clone(),
-                        problem,
+                        problem: problem.to_string(),
                     })
                 })?;
             }

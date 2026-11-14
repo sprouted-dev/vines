@@ -546,14 +546,14 @@ impl Checker<'_> {
                 });
             }
         }
-        let template = Template::parse(with).map_err(|p| malformed(&with_path, &p))?;
+        let template = Template::parse(with).map_err(|p| malformed(&with_path, &p.to_string()))?;
         check_refs(template.refs(), known, &with_path)?;
         spec.settings
             .check_template(&template)
             .map_err(|problem| LoadError::BadSettings {
                 path: with_path,
                 operator: name.clone(),
-                problem,
+                problem: problem.to_string(),
             })?;
         let next = match keep {
             Keep::Replace if end.is_some() => None,
@@ -622,7 +622,7 @@ impl Checker<'_> {
             }
             Operator::Split { from, into } => {
                 let here = format!("{path}.split");
-                let from = Template::parse(from).map_err(|p| malformed(&here, &p))?;
+                let from = Template::parse(from).map_err(|p| malformed(&here, &p.to_string()))?;
                 check_refs(from.refs(), &known, &here)?;
                 if let Some(name) = into {
                     if !is_name(name) {
@@ -671,7 +671,7 @@ impl Checker<'_> {
             }
             Operator::Filter { when } => {
                 let here = format!("{path}.filter");
-                let cond = Cond::parse(when).map_err(|p| malformed(&here, &p))?;
+                let cond = Cond::parse(when).map_err(|p| malformed(&here, &p.to_string()))?;
                 check_refs(cond.refs(), &known, &here)?;
                 let t: Transform = Arc::new(move |items: Items, _cx: Cx| {
                     let cond = cond.clone();
@@ -913,13 +913,13 @@ impl Checker<'_> {
                 let with = match with {
                     Some(w) => {
                         let at = format!("{path}.with");
-                        let t = Template::parse(w).map_err(|p| malformed(&at, &p))?;
+                        let t = Template::parse(w).map_err(|p| malformed(&at, &p.to_string()))?;
                         check_refs(t.refs(), &known, &at)?;
                         other.input().check_template(&t).map_err(|problem| {
                             LoadError::BadSettings {
                                 path: at,
                                 operator: vine.clone(),
-                                problem,
+                                problem: problem.to_string(),
                             }
                         })?;
                         Some(t)
@@ -930,7 +930,7 @@ impl Checker<'_> {
                                 LoadError::BadSettings {
                                     path: path.into(),
                                     operator: vine.clone(),
-                                    problem,
+                                    problem: problem.to_string(),
                                 }
                             })?;
                         }
@@ -1038,7 +1038,8 @@ impl Checker<'_> {
                 otherwise,
             } => {
                 let here = format!("{path}.branch");
-                let on = Template::parse(on).map_err(|p| malformed(&format!("{here}.on"), &p))?;
+                let on = Template::parse(on)
+                    .map_err(|p| malformed(&format!("{here}.on"), &p.to_string()))?;
                 check_refs(on.refs(), &known, &format!("{here}.on"))?;
                 if cases.is_empty() {
                     return Err(malformed(&here, "`branch` needs at least one case"));
@@ -1101,14 +1102,14 @@ impl Checker<'_> {
                 let with = match with {
                     Some(w) => {
                         let at = format!("{here}.with");
-                        let t = Template::parse(w).map_err(|p| malformed(&at, &p))?;
+                        let t = Template::parse(w).map_err(|p| malformed(&at, &p.to_string()))?;
                         check_refs(t.refs(), &known, &at)?;
                         shape
                             .check_template(&t)
                             .map_err(|problem| LoadError::OutputMisfit {
                                 path: at,
                                 output: to.clone(),
-                                problem,
+                                problem: problem.to_string(),
                             })?;
                         Some(t)
                     }
@@ -1118,7 +1119,7 @@ impl Checker<'_> {
                                 .map_err(|problem| LoadError::OutputMisfit {
                                     path: here.clone(),
                                     output: to.clone(),
-                                    problem,
+                                    problem: problem.to_string(),
                                 })?;
                         }
                         None
@@ -1146,7 +1147,7 @@ impl Checker<'_> {
                                     Err(problem) => Err(fatal(RunError::OutputMisfit {
                                         path: at.clone(),
                                         output: to.clone(),
-                                        problem,
+                                        problem: problem.to_string(),
                                     })
                                     .of(&tag)),
                                 }

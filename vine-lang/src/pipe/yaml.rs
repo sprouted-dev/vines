@@ -35,7 +35,7 @@ pub(crate) fn load(reg: &Registry, yaml: &str) -> Result<Pipe, LoadError> {
         _ => return Err(malformed("vine", "missing `vine` (the vine's name)")),
     };
     let input = match map.get("input") {
-        Some(v) => Shape::parse(v).map_err(|p| malformed("input", &p))?,
+        Some(v) => Shape::parse(v).map_err(|p| malformed("input", &p.to_string()))?,
         None => return Err(malformed("vine", "missing `input` (the input shape)")),
     };
     let mut outputs = BTreeMap::new();
@@ -45,7 +45,8 @@ pub(crate) fn load(reg: &Registry, yaml: &str) -> Result<Pipe, LoadError> {
         .into_iter()
         .flatten()
     {
-        let shape = Shape::parse(v).map_err(|p| malformed(&format!("outputs.{k}"), &p))?;
+        let shape =
+            Shape::parse(v).map_err(|p| malformed(&format!("outputs.{k}"), &p.to_string()))?;
         outputs.insert(k.clone(), shape);
     }
     let Some(ops) = map.get("pipe") else {

@@ -941,7 +941,7 @@ fn a_journal_that_is_not_a_list_of_known_entries_is_refused() {
         ),
     ] {
         let err = Journal::from_json(&bad).unwrap_err();
-        assert!(err.contains(says), "{bad}: {err}");
+        assert!(err.to_string().contains(says), "{bad}: {err}");
     }
 }
 

@@ -20,8 +20,117 @@ use std::collections::BTreeMap;
 use std::fmt;
 
 use serde_json::Value;
+use thiserror::Error;
 
 use crate::expr::Template;
+
+/// A shape written in a vine document that cannot be read.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum ShapeError {
+    /// The shape is not a map.
+    #[error("a shape is a map of field name to type, found {found}")]
+    NotAMap {
+        /// What was written instead, such as `a list`.
+        found: &'static str,
+    },
+    /// A field name is not lower snake_case.
+    #[error("field name `{name}` must be lower snake_case (a-z, 0-9, _)")]
+    BadFieldName {
+        /// The field name as written.
+        name: String,
+    },
+    /// A field's type is not written as text.
+    #[error("field `{name}`: type must be a type name such as `text` or `int?`, found {found}")]
+    NotATypeName {
+        /// The field.
+        name: String,
+        /// What was written instead, such as `a number`.
+        found: &'static str,
+    },
+    /// A field's type names no known type.
+    #[error(
+        "field `{name}`: unknown type `{spec}` (known: text, id, int, bool, object, list, any)"
+    )]
+    UnknownType {
+        /// The field.
+        name: String,
+        /// The type name as written, without a trailing `?`.
+        spec: String,
+    },
+}
+
+/// A value, or a template of one, that does not fit a shape.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum Misfit {
+    /// The value is not a map.
+    #[error("expected a map, found {found}")]
+    NotAMap {
+        /// What it is instead, such as `a list`.
+        found: &'static str,
+    },
+    /// A required field is absent or null.
+    #[error("missing required field `{name}` ({ty})")]
+    MissingField {
+        /// The field.
+        name: String,
+        /// Its type in the shape.
+        ty: Ty,
+    },
+    /// A field holds a value of another type.
+    #[error("field `{name}` should be {ty}, found {found}")]
+    WrongType {
+        /// The field.
+        name: String,
+        /// Its type in the shape.
+        ty: Ty,
+        /// What it holds, such as `number 3` or `a map`.
+        found: String,
+    },
+    /// A closed shape does not list this field.
+    #[error("unexpected field `{name}` (not in the shape)")]
+    UnexpectedField {
+        /// The field.
+        name: String,
+    },
+}
+
+/// Why every value of one shape is not sure to fit another, the target.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum FitError {
+    /// An open shape may hold fields a closed target does not list.
+    #[error("its shape is open (it may hold fields the output does not list)")]
+    Open,
+    /// The target requires a field this shape does not have.
+    #[error("missing required field `{name}` ({ty})")]
+    MissingField {
+        /// The field.
+        name: String,
+        /// Its type in the target.
+        ty: Ty,
+    },
+    /// The target requires a field this shape has as optional.
+    #[error("field `{name}` is optional there but required in the output")]
+    Optional {
+        /// The field.
+        name: String,
+    },
+    /// The field's type here does not fit its type in the target.
+    #[error("field `{name}` is {have}, the output wants {want}")]
+    WrongType {
+        /// The field.
+        name: String,
+        /// Its type in this shape.
+        have: Ty,
+        /// Its type in the target.
+        want: Ty,
+    },
+    /// A closed target does not list this field.
+    #[error("unexpected field `{name}` (not in the output)")]
+    UnexpectedField {
+        /// The field.
+        name: String,
+    },
+}
 
 /// A simple field type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -133,34 +242,30 @@ impl Shape {
     }
 
     /// Parse a shape written in a vine document.
-    pub fn parse(v: &Value) -> Result<Shape, String> {
+    pub fn parse(v: &Value) -> Result<Shape, ShapeError> {
         let Some(map) = v.as_object() else {
-            return Err(format!(
-                "a shape is a map of field name to type, found {}",
-                kind(v)
-            ));
+            return Err(ShapeError::NotAMap { found: kind(v) });
         };
         let mut shape = Shape::new();
         for (name, ty) in map {
             if !crate::expr::is_name(name) {
-                return Err(format!(
-                    "field name `{name}` must be lower snake_case (a-z, 0-9, _)"
-                ));
+                return Err(ShapeError::BadFieldName { name: name.clone() });
             }
             let Some(spec) = ty.as_str() else {
-                return Err(format!(
-                    "field `{name}`: type must be a type name such as `text` or `int?`, found {}",
-                    kind(ty)
-                ));
+                return Err(ShapeError::NotATypeName {
+                    name: name.clone(),
+                    found: kind(ty),
+                });
             };
             let (spec, required) = match spec.strip_suffix('?') {
                 Some(s) => (s, false),
                 None => (spec, true),
             };
             let Some(ty) = Ty::parse(spec) else {
-                return Err(format!(
-                    "field `{name}`: unknown type `{spec}` (known: text, id, int, bool, object, list, any)"
-                ));
+                return Err(ShapeError::UnknownType {
+                    name: name.clone(),
+                    spec: spec.to_owned(),
+                });
             };
             shape.fields.insert(name.clone(), Field { ty, required });
         }
@@ -168,67 +273,76 @@ impl Shape {
     }
 
     /// Check a concrete value against the shape.
-    pub fn check(&self, v: &Value) -> Result<(), String> {
+    pub fn check(&self, v: &Value) -> Result<(), Misfit> {
         let Some(map) = v.as_object() else {
-            return Err(format!("expected a map, found {}", kind(v)));
+            return Err(Misfit::NotAMap { found: kind(v) });
         };
         for (name, field) in &self.fields {
             match map.get(name) {
                 None | Some(Value::Null) if field.required && field.ty != Ty::Any => {
-                    return Err(format!("missing required field `{name}` ({})", field.ty));
+                    return Err(Misfit::MissingField {
+                        name: name.clone(),
+                        ty: field.ty,
+                    });
                 }
                 None => {}
                 Some(Value::Null) if !field.required => {}
                 Some(value) if !field.ty.fits(value) => {
-                    return Err(format!(
-                        "field `{name}` should be {}, found {}",
-                        field.ty,
-                        describe(value)
-                    ));
+                    return Err(Misfit::WrongType {
+                        name: name.clone(),
+                        ty: field.ty,
+                        found: describe(value),
+                    });
                 }
                 Some(_) => {}
             }
         }
         if !self.open {
             if let Some(extra) = map.keys().find(|k| !self.fields.contains_key(*k)) {
-                return Err(format!("unexpected field `{extra}` (not in the shape)"));
+                return Err(Misfit::UnexpectedField {
+                    name: extra.clone(),
+                });
             }
         }
         Ok(())
     }
 
     /// Whether every value of this shape is sure to fit `target`.
-    pub fn fits_into(&self, target: &Shape) -> Result<(), String> {
+    pub fn fits_into(&self, target: &Shape) -> Result<(), FitError> {
         if self.open && !target.open {
-            return Err("its shape is open (it may hold fields the output does not list)".into());
+            return Err(FitError::Open);
         }
         for (name, want) in &target.fields {
             match self.fields.get(name) {
                 None if want.required && want.ty != Ty::Any => {
-                    return Err(format!("missing required field `{name}` ({})", want.ty));
+                    return Err(FitError::MissingField {
+                        name: name.clone(),
+                        ty: want.ty,
+                    });
                 }
                 None => {}
                 Some(have) => {
                     if want.required && !have.required && want.ty != Ty::Any {
-                        return Err(format!(
-                            "field `{name}` is optional there but required in the output"
-                        ));
+                        return Err(FitError::Optional { name: name.clone() });
                     }
                     let fits = have.ty == want.ty
                         || want.ty == Ty::Any
                         || (have.ty == Ty::Id && want.ty == Ty::Text);
                     if !fits {
-                        return Err(format!(
-                            "field `{name}` is {}, the output wants {}",
-                            have.ty, want.ty
-                        ));
+                        return Err(FitError::WrongType {
+                            name: name.clone(),
+                            have: have.ty,
+                            want: want.ty,
+                        });
                     }
                 }
             }
         }
         if !target.open {
             if let Some(extra) = self.fields.keys().find(|k| !target.fields.contains_key(*k)) {
-                return Err(format!("unexpected field `{extra}` (not in the output)"));
+                return Err(FitError::UnexpectedField {
+                    name: extra.clone(),
+                });
             }
         }
         Ok(())
@@ -237,52 +351,52 @@ impl Shape {
     /// Check an unresolved template as far as is knowable before running:
     /// field names, required fields, and the types of literal values.
     /// References are checked at run time, once resolved.
-    pub fn check_template(&self, t: &Template) -> Result<(), String> {
+    pub fn check_template(&self, t: &Template) -> Result<(), Misfit> {
         let fields = match t {
             Template::Ref(_) => return Ok(()),
             Template::Obj(fields) => fields,
             Template::Lit(v) => return self.check(v),
-            Template::List(_) => return Err("expected a map, found a list".to_owned()),
+            Template::List(_) => return Err(Misfit::NotAMap { found: "a list" }),
         };
         for (name, field) in &self.fields {
+            let wrong = |found: String| Misfit::WrongType {
+                name: name.clone(),
+                ty: field.ty,
+                found,
+            };
             match fields.get(name) {
                 None | Some(Template::Lit(Value::Null))
                     if field.required && field.ty != Ty::Any =>
                 {
-                    return Err(format!("missing required field `{name}` ({})", field.ty));
+                    return Err(Misfit::MissingField {
+                        name: name.clone(),
+                        ty: field.ty,
+                    });
                 }
                 None | Some(Template::Ref(_)) => {}
                 Some(Template::Lit(Value::Null)) if !field.required => {}
                 Some(Template::Lit(v)) => {
                     if !field.ty.fits(v) {
-                        return Err(format!(
-                            "field `{name}` should be {}, found {}",
-                            field.ty,
-                            describe(v)
-                        ));
+                        return Err(wrong(describe(v)));
                     }
                 }
                 Some(Template::Obj(_)) => {
                     if !matches!(field.ty, Ty::Object | Ty::Any) {
-                        return Err(format!(
-                            "field `{name}` should be {}, found a map",
-                            field.ty
-                        ));
+                        return Err(wrong("a map".into()));
                     }
                 }
                 Some(Template::List(_)) => {
                     if !matches!(field.ty, Ty::List | Ty::Any) {
-                        return Err(format!(
-                            "field `{name}` should be {}, found a list",
-                            field.ty
-                        ));
+                        return Err(wrong("a list".into()));
                     }
                 }
             }
         }
         if !self.open {
             if let Some(extra) = fields.keys().find(|k| !self.fields.contains_key(*k)) {
-                return Err(format!("unexpected field `{extra}` (not in the shape)"));
+                return Err(Misfit::UnexpectedField {
+                    name: extra.clone(),
+                });
             }
         }
         Ok(())

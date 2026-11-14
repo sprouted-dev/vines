@@ -315,7 +315,7 @@ use crate::error::RunError;
 use crate::journal::{Bookmark, Event, Journal, Progress};
 use crate::shape::Shape;
 
-use book::{Book, Cx};
+use book::{Book, Cx, ReplayError};
 use drive::Saving;
 use flow::{fatal, Flowing, Items, Transform};
 use timer::Timeouts;
@@ -904,7 +904,10 @@ impl Pipe {
                     })
                 })
                 .boxed(),
-            Err(problem) => stream::once(ready(Err(RunError::ReplayMisfit { problem }))).boxed(),
+            Err(misfit) => stream::once(ready(Err(RunError::ReplayMisfit {
+                problem: misfit.to_string(),
+            })))
+            .boxed(),
         }
     }
 
@@ -960,13 +963,16 @@ impl Pipe {
                     done: bookmark.done().collect(),
                 },
             ),
-            Err(problem) => stream::once(ready(Err(RunError::ReplayMisfit { problem }))).boxed(),
+            Err(misfit) => stream::once(ready(Err(RunError::ReplayMisfit {
+                problem: misfit.to_string(),
+            })))
+            .boxed(),
         }
     }
 
     /// The book read from what the caller saved, once it is known to be
     /// saved for this vine as it is now, as far as the run can tell.
-    fn book(&self, read: Result<Book, String>) -> Result<Book, String> {
+    fn book(&self, read: Result<Book, ReplayError>) -> Result<Book, ReplayError> {
         let book = read?;
         self.timeouts.check(book.keys())?;
         Ok(book)
@@ -978,7 +984,7 @@ impl Pipe {
         let checked = items.map(move |flow| match flow {
             Ok(Flowing::Value(v, tag)) => match shape.check(&v) {
                 Ok(()) => Ok(Flowing::Value(v, tag)),
-                Err(p) => Err(fatal(RunError::InputMisfit(p)).of(&tag)),
+                Err(p) => Err(fatal(RunError::InputMisfit(p.to_string())).of(&tag)),
             },
             other => other,
         });

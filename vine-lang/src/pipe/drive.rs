@@ -85,7 +85,7 @@ impl Pipe {
                     };
                     match shape.check(&v) {
                         Ok(()) => Ok(Flowing::Value(v, tag)),
-                        Err(p) => Err(fatal(RunError::InputMisfit(p)).of(&tag)),
+                        Err(p) => Err(fatal(RunError::InputMisfit(p.to_string())).of(&tag)),
                     }
                 }
             });

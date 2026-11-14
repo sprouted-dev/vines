@@ -670,7 +670,7 @@ fn a_bookmark_survives_json_and_one_that_is_not_one_is_refused() {
         ),
     ] {
         let err = Bookmark::from_json(&bad).unwrap_err();
-        assert!(err.contains(says), "{bad}: {err}");
+        assert!(err.to_string().contains(says), "{bad}: {err}");
     }
 }
 

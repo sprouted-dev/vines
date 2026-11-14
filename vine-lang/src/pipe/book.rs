@@ -26,6 +26,7 @@ use std::fmt;
 use std::sync::{Arc, Mutex};
 
 use serde_json::Value;
+use thiserror::Error;
 
 use super::flow::lock;
 use super::output::OutputId;
@@ -49,6 +50,36 @@ impl fmt::Display for Key {
             write!(f, "{} of item {}", self.at, self.item)
         }
     }
+}
+
+/// One saved entry that does not fit the entries read before it.
+#[derive(Debug, Error)]
+pub(super) enum EntryMisfit {
+    #[error("`{0}` is saved twice")]
+    Twice(Key),
+    #[error("an item for `{0}`, which is not a stream that is still going")]
+    ItemNotGoing(Key),
+    #[error("an end for `{0}`, which is not a stream that is still going")]
+    EndNotGoing(Key),
+    #[error("a position for `{0}`, which is not a stream operator that gives its items again and was started")]
+    PositionNotStarted(Key),
+    #[error("a stop for `{0}`, which is not a stream operator that gives its items again and is still going")]
+    StopNotGoing(Key),
+}
+
+/// What the caller saved cannot be replayed by this vine.
+#[derive(Debug, Error)]
+pub(super) enum ReplayError {
+    /// An entry of a journal does not fit.
+    #[error("entry {index}: {source}")]
+    Entry { index: usize, source: EntryMisfit },
+    /// A line of a bookmark does not fit.
+    #[error("line {index}: {source}")]
+    Line { index: usize, source: EntryMisfit },
+    /// A call a `timeout` applies to was saved before the `timeout` was
+    /// added.
+    #[error("`{key}` is a call the `timeout` at {timeout} applies to, saved with no run of that `timeout` in its key: it was saved before the `timeout` was added")]
+    BeforeTimeout { key: Key, timeout: String },
 }
 
 /// What a saved run remembers from what it was given, and what it has yet
@@ -144,40 +175,39 @@ pub(super) enum Handing {
 
 impl Book {
     /// Read a journal: every entry belongs to the whole run, item 0.
-    pub(super) fn from_journal(journal: &Journal) -> Result<Book, String> {
+    pub(super) fn from_journal(journal: &Journal) -> Result<Book, ReplayError> {
         let mut book = Book::default();
-        for (i, entry) in journal.entries().iter().enumerate() {
+        for (index, entry) in journal.entries().iter().enumerate() {
             book.read(0, entry)
-                .map_err(|what| format!("entry {i}: {what}"))?;
+                .map_err(|source| ReplayError::Entry { index, source })?;
         }
         Ok(book)
     }
 
     /// Read a bookmark. Lines of items at or before its position, or done
     /// past it, are not read.
-    pub(super) fn from_bookmark(bookmark: &Bookmark) -> Result<Book, String> {
+    pub(super) fn from_bookmark(bookmark: &Bookmark) -> Result<Book, ReplayError> {
         let mut book = Book::default();
-        for (i, Line { item, entry }) in bookmark.lines().iter().enumerate() {
+        for (index, Line { item, entry }) in bookmark.lines().iter().enumerate() {
             if bookmark.is_done(*item) {
                 continue;
             }
             book.read(*item, entry)
-                .map_err(|what| format!("line {i}: {what}"))?;
+                .map_err(|source| ReplayError::Line { index, source })?;
         }
         Ok(book)
     }
 
-    fn read(&mut self, item: u64, entry: &Entry) -> Result<(), String> {
+    fn read(&mut self, item: u64, entry: &Entry) -> Result<(), EntryMisfit> {
         let key = |at: &String| Key {
             item,
             at: at.clone(),
         };
-        let twice = |k: &Key| format!("`{k}` is saved twice");
         match entry {
             Entry::Done { at, input, result } => {
                 let k = key(at);
                 if self.saved.contains_key(&k) {
-                    return Err(twice(&k));
+                    return Err(EntryMisfit::Twice(k));
                 }
                 self.saved.insert(
                     k,
@@ -199,7 +229,7 @@ impl Book {
                     Some(Saved::Stream {
                         end: end @ None, ..
                     }) => *end = Some(Err(failure)),
-                    Some(_) => return Err(twice(&k)),
+                    Some(_) => return Err(EntryMisfit::Twice(k)),
                     None => {
                         self.saved.insert(
                             k,
@@ -214,7 +244,7 @@ impl Book {
             Entry::Started { at, input } => {
                 let k = key(at);
                 if self.saved.contains_key(&k) {
-                    return Err(twice(&k));
+                    return Err(EntryMisfit::Twice(k));
                 }
                 self.saved.insert(
                     k,
@@ -229,23 +259,13 @@ impl Book {
                 Some(Saved::Stream {
                     items, end: None, ..
                 }) => items.push_back(value.clone()),
-                _ => {
-                    return Err(format!(
-                        "an item for `{}`, which is not a stream that is still going",
-                        key(at)
-                    ))
-                }
+                _ => return Err(EntryMisfit::ItemNotGoing(key(at))),
             },
             Entry::Ended { at, value } => match self.saved.get_mut(&key(at)) {
                 Some(Saved::Stream {
                     end: end @ None, ..
                 }) => *end = Some(Ok(value.clone())),
-                _ => {
-                    return Err(format!(
-                        "an end for `{}`, which is not a stream that is still going",
-                        key(at)
-                    ))
-                }
+                _ => return Err(EntryMisfit::EndNotGoing(key(at))),
             },
             Entry::Emitted {
                 output,
@@ -270,7 +290,8 @@ impl Book {
                     *was = *handed;
                     // Outputs made in groups within the items it passed
                     // are never made again.
-                    let passed = |scope: &str| item_of_stream(scope, at).is_some_and(|n| n <= *items);
+                    let passed =
+                        |scope: &str| item_of_stream(scope, at).is_some_and(|n| n <= *items);
                     self.handed
                         .retain(|(of, within), _| *of != item || !passed(within));
                     for ((of, _), queue) in &mut self.handed {
@@ -281,29 +302,19 @@ impl Book {
                         }
                     }
                 }
-                _ => {
-                    return Err(format!(
-                        "a position for `{}`, which is not a stream operator that gives its items again and was started",
-                        key(at)
-                    ))
-                }
+                _ => return Err(EntryMisfit::PositionNotStarted(key(at))),
             },
             Entry::Stopped { at, items, how } => match self.position_of(key(at)) {
                 Some(Saved::Position {
                     stopped: stopped @ None,
                     ..
                 }) => *stopped = Some((*items, how.clone())),
-                _ => {
-                    return Err(format!(
-                        "a stop for `{}`, which is not a stream operator that gives its items again and is still going",
-                        key(at)
-                    ))
-                }
+                _ => return Err(EntryMisfit::StopNotGoing(key(at))),
             },
             Entry::Timed { at, timing } => {
                 let k = key(at);
                 if self.timings.contains_key(&k) {
-                    return Err(twice(&k));
+                    return Err(EntryMisfit::Twice(k));
                 }
                 self.timings.insert(k, *timing);
             }

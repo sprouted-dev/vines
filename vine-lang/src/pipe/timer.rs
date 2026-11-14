@@ -31,7 +31,7 @@ use std::time::Duration;
 use futures::{FutureExt, StreamExt};
 use serde_json::Value;
 
-use super::book::{Cx, Key};
+use super::book::{Cx, Key, ReplayError};
 use super::flow::{one, per_item_held, Fault, Flow, Flowing, OpFault, Transform};
 use super::tag::Tag;
 use crate::journal::{Entry, Timing};
@@ -123,7 +123,7 @@ impl Timeouts {
 
     /// Refuse a saved key of a call a `timeout` applies to that holds no
     /// run of that `timeout`.
-    pub(super) fn check<'a>(&self, keys: impl Iterator<Item = &'a Key>) -> Result<(), String> {
+    pub(super) fn check<'a>(&self, keys: impl Iterator<Item = &'a Key>) -> Result<(), ReplayError> {
         if self.timed.is_empty() {
             return Ok(());
         }
@@ -137,9 +137,10 @@ impl Timeouts {
                 .iter()
                 .find(|(c, t)| c == call && !scopes.split('/').any(|s| runs(s, t)));
             if let Some((_, timeout)) = unscoped {
-                return Err(format!(
-                    "`{key}` is a call the `timeout` at {timeout} applies to, saved with no run of that `timeout` in its key: it was saved before the `timeout` was added"
-                ));
+                return Err(ReplayError::BeforeTimeout {
+                    key: key.clone(),
+                    timeout: timeout.clone(),
+                });
             }
         }
         Ok(())

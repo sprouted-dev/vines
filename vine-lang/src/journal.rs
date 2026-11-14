@@ -127,8 +127,137 @@
 use std::collections::BTreeMap;
 
 use serde_json::{json, Value};
+use thiserror::Error;
 
 use crate::pipe::PipeOutput;
+
+/// Saved JSON that is not an [`Entry`].
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum EntryError {
+    /// The entry is not a map.
+    #[error("an entry is a map")]
+    NotAMap,
+    /// A field that holds text is absent or not text.
+    #[error("an entry needs `{key}` as text")]
+    NeedsText {
+        /// The field.
+        key: &'static str,
+    },
+    /// A field is absent.
+    #[error("an entry needs `{key}`")]
+    Needs {
+        /// The field.
+        key: &'static str,
+    },
+    /// A field that holds a count is absent or not a whole number.
+    #[error("an entry needs `{key}` as a whole number")]
+    NeedsCount {
+        /// The field.
+        key: &'static str,
+    },
+    /// A `stopped` entry's `how` names no way to stop.
+    #[error("unknown way to stop `{how}`")]
+    UnknownEnding {
+        /// The `how` as saved.
+        how: String,
+    },
+    /// A `timed` entry's `timing` names no decision.
+    #[error("unknown timing `{timing}`")]
+    UnknownTiming {
+        /// The `timing` as saved.
+        timing: String,
+    },
+    /// The `kind` names no entry.
+    #[error("unknown entry kind `{kind}`")]
+    UnknownKind {
+        /// The `kind` as saved.
+        kind: String,
+    },
+    /// The entry holds a field its kind does not have.
+    #[error("a `{kind}` entry has no field `{field}`")]
+    UnknownField {
+        /// The entry's `kind`.
+        kind: String,
+        /// The field it does not have.
+        field: String,
+    },
+}
+
+/// Saved JSON that is not a [`Journal`].
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum JournalError {
+    /// The journal is not a list.
+    #[error("a journal is a list of entries")]
+    NotAList,
+    /// One entry of the list cannot be read.
+    #[error("entry {index}: {source}")]
+    Entry {
+        /// The entry's place in the list, from 0.
+        index: usize,
+        /// Why it cannot be read.
+        source: EntryError,
+    },
+}
+
+/// Saved JSON that is not a [`Line`].
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum LineError {
+    /// The line is not a map.
+    #[error("a line is a map")]
+    NotAMap,
+    /// `item` is absent or not a whole number.
+    #[error("a line needs `item`, a whole number")]
+    NeedsItem,
+    /// `item` is 0.
+    #[error("input items are counted from 1")]
+    ItemZero,
+    /// The rest of the line is not an entry.
+    #[error(transparent)]
+    Entry(#[from] EntryError),
+}
+
+/// Saved JSON that is not a [`Bookmark`].
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum BookmarkError {
+    /// The bookmark is not a map.
+    #[error("a bookmark is a map")]
+    NotAMap,
+    /// The bookmark holds a field it does not have.
+    #[error("a bookmark has no field `{field}`")]
+    UnknownField {
+        /// The field.
+        field: String,
+    },
+    /// `position` is absent or not a whole number.
+    #[error("a bookmark needs `position`, a whole number")]
+    NeedsPosition,
+    /// `lines` is absent or not a list.
+    #[error("a bookmark needs `lines`, a list")]
+    NeedsLines,
+    /// One line cannot be read.
+    #[error("line {index}: {source}")]
+    Line {
+        /// The line's place in `lines`, from 0.
+        index: usize,
+        /// Why it cannot be read.
+        source: LineError,
+    },
+    /// `done` is not a list.
+    #[error("a bookmark's `done` is a list of runs")]
+    DoneNotAList,
+    /// One run of `done` is not a pair of whole numbers.
+    #[error("done run {index}: a run is [first, last], whole numbers")]
+    BadRun {
+        /// The run's place in `done`, from 0.
+        index: usize,
+    },
+    /// One run of `done` is backwards or not past the position.
+    #[error("done run {index}: a run lies past the position, first to last")]
+    MisplacedRun {
+        /// The run's place in `done`, from 0.
+        index: usize,
+    },
+}
 
 /// What a resumable run gives its caller.
 #[derive(Debug, Clone, PartialEq)]
@@ -332,25 +461,23 @@ impl Entry {
     }
 
     /// Read an entry written by [`Entry::to_json`].
-    pub fn from_json(v: &Value) -> Result<Entry, String> {
+    pub fn from_json(v: &Value) -> Result<Entry, EntryError> {
         let Some(map) = v.as_object() else {
-            return Err("an entry is a map".into());
+            return Err(EntryError::NotAMap);
         };
-        let text = |key: &str| -> Result<String, String> {
+        let text = |key: &'static str| -> Result<String, EntryError> {
             map.get(key)
                 .and_then(Value::as_str)
                 .map(str::to_owned)
-                .ok_or_else(|| format!("an entry needs `{key}` as text"))
+                .ok_or(EntryError::NeedsText { key })
         };
-        let value = |key: &str| -> Result<Value, String> {
-            map.get(key)
-                .cloned()
-                .ok_or_else(|| format!("an entry needs `{key}`"))
+        let value = |key: &'static str| -> Result<Value, EntryError> {
+            map.get(key).cloned().ok_or(EntryError::Needs { key })
         };
-        let count = |key: &str| -> Result<u64, String> {
+        let count = |key: &'static str| -> Result<u64, EntryError> {
             map.get(key)
                 .and_then(Value::as_u64)
-                .ok_or_else(|| format!("an entry needs `{key}` as a whole number"))
+                .ok_or(EntryError::NeedsCount { key })
         };
         let kind = text("kind")?;
         let entry = match kind.as_str() {
@@ -403,18 +530,27 @@ impl Entry {
                         message: text("message")?,
                     },
                     "abandoned" => Ending::Abandoned,
-                    other => return Err(format!("unknown way to stop `{other}`")),
+                    other => {
+                        return Err(EntryError::UnknownEnding {
+                            how: other.to_owned(),
+                        })
+                    }
                 },
             },
             "timed" => {
                 let timing = text("timing")?;
                 Entry::Timed {
                     at: text("at")?,
-                    timing: Timing::parse(&timing)
-                        .ok_or_else(|| format!("unknown timing `{timing}`"))?,
+                    timing: Timing::parse(&timing).ok_or_else(|| EntryError::UnknownTiming {
+                        timing: timing.clone(),
+                    })?,
                 }
             }
-            other => return Err(format!("unknown entry kind `{other}`")),
+            other => {
+                return Err(EntryError::UnknownKind {
+                    kind: other.to_owned(),
+                })
+            }
         };
         let known: &[&str] = match &entry {
             Entry::Done { .. } => &["kind", "at", "input", "result"],
@@ -431,7 +567,10 @@ impl Entry {
             Entry::Timed { .. } => &["kind", "at", "timing"],
         };
         if let Some(extra) = map.keys().find(|k| !known.contains(&k.as_str())) {
-            return Err(format!("a `{kind}` entry has no field `{extra}`"));
+            return Err(EntryError::UnknownField {
+                kind,
+                field: extra.clone(),
+            });
         }
         Ok(entry)
     }
@@ -494,14 +633,16 @@ impl Journal {
     }
 
     /// Read a JSON list of entries.
-    pub fn from_json(v: &Value) -> Result<Journal, String> {
+    pub fn from_json(v: &Value) -> Result<Journal, JournalError> {
         let Some(list) = v.as_array() else {
-            return Err("a journal is a list of entries".into());
+            return Err(JournalError::NotAList);
         };
         let entries = list
             .iter()
             .enumerate()
-            .map(|(i, e)| Entry::from_json(e).map_err(|p| format!("entry {i}: {p}")))
+            .map(|(index, e)| {
+                Entry::from_json(e).map_err(|source| JournalError::Entry { index, source })
+            })
             .collect::<Result<_, _>>()?;
         Ok(Journal { entries })
     }
@@ -555,15 +696,15 @@ impl Line {
     }
 
     /// Read a line written by [`Line::to_json`].
-    pub fn from_json(v: &Value) -> Result<Line, String> {
+    pub fn from_json(v: &Value) -> Result<Line, LineError> {
         let Some(map) = v.as_object() else {
-            return Err("a line is a map".into());
+            return Err(LineError::NotAMap);
         };
         let Some(item) = map.get("item").and_then(Value::as_u64) else {
-            return Err("a line needs `item`, a whole number".into());
+            return Err(LineError::NeedsItem);
         };
         if item == 0 {
-            return Err("input items are counted from 1".into());
+            return Err(LineError::ItemZero);
         }
         let mut rest = map.clone();
         rest.remove("item");
@@ -709,26 +850,30 @@ impl Bookmark {
     }
 
     /// Read a bookmark written by [`Bookmark::to_json`].
-    pub fn from_json(v: &Value) -> Result<Bookmark, String> {
+    pub fn from_json(v: &Value) -> Result<Bookmark, BookmarkError> {
         let Some(map) = v.as_object() else {
-            return Err("a bookmark is a map".into());
+            return Err(BookmarkError::NotAMap);
         };
         if let Some(extra) = map
             .keys()
             .find(|k| !["position", "lines", "done"].contains(&k.as_str()))
         {
-            return Err(format!("a bookmark has no field `{extra}`"));
+            return Err(BookmarkError::UnknownField {
+                field: extra.clone(),
+            });
         }
         let Some(position) = map.get("position").and_then(Value::as_u64) else {
-            return Err("a bookmark needs `position`, a whole number".into());
+            return Err(BookmarkError::NeedsPosition);
         };
         let Some(list) = map.get("lines").and_then(Value::as_array) else {
-            return Err("a bookmark needs `lines`, a list".into());
+            return Err(BookmarkError::NeedsLines);
         };
         let lines = list
             .iter()
             .enumerate()
-            .map(|(i, l)| Line::from_json(l).map_err(|p| format!("line {i}: {p}")))
+            .map(|(index, l)| {
+                Line::from_json(l).map_err(|source| BookmarkError::Line { index, source })
+            })
             .collect::<Result<_, _>>()?;
         let mut bookmark = Bookmark {
             position,
@@ -737,24 +882,18 @@ impl Bookmark {
         };
         let runs = match map.get("done") {
             None => &[][..],
-            Some(v) => v
-                .as_array()
-                .ok_or("a bookmark's `done` is a list of runs")?,
+            Some(v) => v.as_array().ok_or(BookmarkError::DoneNotAList)?,
         };
-        for (i, run) in runs.iter().enumerate() {
+        for (index, run) in runs.iter().enumerate() {
             let pair = run.as_array().map(|p| (p.len(), p.first(), p.get(1)));
             let (Some(first), Some(last)) = (
                 pair.and_then(|(_, f, _)| f?.as_u64()),
                 pair.and_then(|(len, _, l)| if len == 2 { l?.as_u64() } else { None }),
             ) else {
-                return Err(format!(
-                    "done run {i}: a run is [first, last], whole numbers"
-                ));
+                return Err(BookmarkError::BadRun { index });
             };
             if first > last || first <= position {
-                return Err(format!(
-                    "done run {i}: a run lies past the position, first to last"
-                ));
+                return Err(BookmarkError::MisplacedRun { index });
             }
             bookmark.mark_done(first, last);
         }

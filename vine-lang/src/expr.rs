@@ -20,6 +20,69 @@
 use std::collections::BTreeMap;
 
 use serde_json::Value;
+use thiserror::Error;
+
+/// A `$` string that is not a well-formed reference.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum RefError {
+    /// The first segment, the name the reference reads, is not a name.
+    #[error(
+        "`${body}` is not a reference: a reference is `$name` or `$name.field`, lower snake_case"
+    )]
+    BadRoot {
+        /// The text after the `$`.
+        body: String,
+    },
+    /// A field segment after the first is not a name.
+    #[error("`${body}` is not a reference: segment `{segment}` must be lower snake_case")]
+    BadSegment {
+        /// The text after the `$`.
+        body: String,
+        /// The segment that is not lower snake_case.
+        segment: String,
+    },
+}
+
+/// A `filter` condition that cannot be read.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum CondError {
+    /// The condition is neither text nor a bool.
+    #[error("a condition is text such as `$item.state != \"open\"`")]
+    NotText,
+    /// A quote opens and never closes.
+    #[error("`{text}`: unclosed quote")]
+    UnclosedQuote {
+        /// The whole condition.
+        text: String,
+    },
+    /// An `=` or `!` that is not part of `==` or `!=`.
+    #[error("`{text}`: the only operators are == and !=")]
+    BadOperator {
+        /// The whole condition.
+        text: String,
+    },
+    /// An operator stands where an operand belongs.
+    #[error("expected a value, found `{op}`")]
+    ExpectedValue {
+        /// The operator found.
+        op: String,
+    },
+    /// An unquoted word that is no reference, number, bool or null.
+    #[error("bare word `{word}`: quote text (\"{word}\"), or write a reference ($item.field), an integer, true, false or null")]
+    BareWord {
+        /// The word as written.
+        word: String,
+    },
+    /// Neither one operand nor two joined by `==` or `!=`.
+    #[error("`{text}`: a condition is one value, or two values joined by == or != (no and/or)")]
+    BadForm {
+        /// The whole condition.
+        text: String,
+    },
+    /// An operand is a malformed reference.
+    #[error(transparent)]
+    Ref(#[from] RefError),
+}
 
 /// Names in the vine language: lower snake_case.
 pub fn is_name(s: &str) -> bool {
@@ -37,20 +100,19 @@ pub struct Ref {
 
 impl Ref {
     /// Parse the text after the `$`.
-    pub fn parse(body: &str) -> Result<Ref, String> {
+    pub fn parse(body: &str) -> Result<Ref, RefError> {
         let mut parts = body.split('.');
         let root = parts.next().unwrap_or_default();
         if !is_name(root) {
-            return Err(format!(
-                "`${body}` is not a reference: a reference is `$name` or `$name.field`, lower snake_case"
-            ));
+            return Err(RefError::BadRoot { body: body.into() });
         }
         let mut path = Vec::new();
         for p in parts {
             if !is_name(p) {
-                return Err(format!(
-                    "`${body}` is not a reference: segment `{p}` must be lower snake_case"
-                ));
+                return Err(RefError::BadSegment {
+                    body: body.into(),
+                    segment: p.into(),
+                });
             }
             path.push(p.to_owned());
         }
@@ -95,7 +157,7 @@ pub enum Template {
 }
 
 impl Template {
-    pub fn parse(v: &Value) -> Result<Template, String> {
+    pub fn parse(v: &Value) -> Result<Template, RefError> {
         Ok(match v {
             Value::String(s) => {
                 if let Some(rest) = s.strip_prefix("$$") {
@@ -165,10 +227,10 @@ impl Operand {
         }
     }
 
-    fn parse_token(tok: &Token) -> Result<Operand, String> {
+    fn parse_token(tok: &Token) -> Result<Operand, CondError> {
         match tok {
             Token::Quoted(s) => Ok(Operand::Lit(Value::String(s.clone()))),
-            Token::Op(op) => Err(format!("expected a value, found `{op}`")),
+            Token::Op(op) => Err(CondError::ExpectedValue { op: op.clone() }),
             Token::Word(w) => {
                 if let Some(body) = w.strip_prefix('$') {
                     return Ok(Operand::Ref(Ref::parse(body)?));
@@ -179,9 +241,7 @@ impl Operand {
                     "false" => Ok(Operand::Lit(Value::Bool(false))),
                     _ => match w.parse::<i64>() {
                         Ok(n) => Ok(Operand::Lit(Value::from(n))),
-                        Err(_) => Err(format!(
-                            "bare word `{w}`: quote text (\"{w}\"), or write a reference ($item.field), an integer, true, false or null"
-                        )),
+                        Err(_) => Err(CondError::BareWord { word: w.clone() }),
                     },
                 }
             }
@@ -205,11 +265,11 @@ pub enum Cond {
 }
 
 impl Cond {
-    pub fn parse(v: &Value) -> Result<Cond, String> {
+    pub fn parse(v: &Value) -> Result<Cond, CondError> {
         let s = match v {
             Value::Bool(b) => return Ok(Cond::Truthy(Operand::Lit(Value::Bool(*b)))),
             Value::String(s) => s,
-            _ => return Err("a condition is text such as `$item.state != \"open\"`".to_owned()),
+            _ => return Err(CondError::NotText),
         };
         let toks = tokenize(s)?;
         match toks.as_slice() {
@@ -222,9 +282,7 @@ impl Cond {
                     Cond::Ne(a, b)
                 })
             }
-            _ => Err(format!(
-                "`{s}`: a condition is one value, or two values joined by == or != (no and/or)"
-            )),
+            _ => Err(CondError::BadForm { text: s.clone() }),
         }
     }
 
@@ -251,7 +309,7 @@ enum Token {
     Op(String),
 }
 
-fn tokenize(s: &str) -> Result<Vec<Token>, String> {
+fn tokenize(s: &str) -> Result<Vec<Token>, CondError> {
     let mut toks = Vec::new();
     let mut chars = s.chars().peekable();
     while let Some(&c) = chars.peek() {
@@ -264,14 +322,14 @@ fn tokenize(s: &str) -> Result<Vec<Token>, String> {
                 match chars.next() {
                     Some(q) if q == c => break,
                     Some(ch) => lit.push(ch),
-                    None => return Err(format!("`{s}`: unclosed quote")),
+                    None => return Err(CondError::UnclosedQuote { text: s.into() }),
                 }
             }
             toks.push(Token::Quoted(lit));
         } else if c == '=' || c == '!' {
             chars.next();
             if chars.next() != Some('=') {
-                return Err(format!("`{s}`: the only operators are == and !="));
+                return Err(CondError::BadOperator { text: s.into() });
             }
             toks.push(Token::Op(format!("{c}=")));
         } else {

@@ -174,7 +174,7 @@ fn check_move(decl: &Move, vines: &BTreeMap<&str, &Pipe>) -> Result<(), InstallE
         .map_err(|problem| InstallError::InputMisfit {
             move_name: move_name(),
             vine: vine_name.into(),
-            problem,
+            problem: problem.to_string(),
         })?;
     if let Some(output) = vine
         .outputs()
