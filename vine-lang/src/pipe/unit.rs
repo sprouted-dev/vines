@@ -100,6 +100,9 @@ impl Unit {
                     }
                 }
             }
+            if key.is_some() {
+                cx.handed_out().await;
+            }
             let cx_op = OpContext::new(CancellationToken::new());
             let result = match handler(resolved.clone(), cx_op).await {
                 Ok(v) => v,

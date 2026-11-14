@@ -385,6 +385,29 @@ impl Cx {
         }
     }
 
+    /// Wait until the caller has been handed every line made so far. A
+    /// saved run calls an act only then, so the result of the act before
+    /// it is in the caller's hands, and can be saved, before this act
+    /// starts. Without the wait, acts that finish at once would all run
+    /// before the caller saw the first result, and a crash between would
+    /// run them all again.
+    pub(super) async fn handed_out(&self) {
+        let Some(book) = &self.book else {
+            return;
+        };
+        futures::future::poll_fn(|task| {
+            if lock(book).fresh.is_empty() {
+                std::task::Poll::Ready(())
+            } else {
+                // The drive hands out the lines when the run waits, and
+                // polls the run again when the caller asks for more.
+                task.waker().wake_by_ref();
+                std::task::Poll::Pending
+            }
+        })
+        .await;
+    }
+
     /// The scope for a vine run by `use` at `path`.
     pub(super) fn within(&self, path: &str, vine: &str) -> Cx {
         Cx {

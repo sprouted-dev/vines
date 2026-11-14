@@ -213,6 +213,9 @@ impl StreamRun {
             return self.give_saved_stop();
         }
         if self.live.is_none() {
+            if self.key.is_some() {
+                self.cx.handed_out().await;
+            }
             if !self.started {
                 if let Some(at) = &self.key {
                     self.cx.save(
