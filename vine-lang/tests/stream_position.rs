@@ -89,7 +89,7 @@ async fn check_kills(build: Build, script: &Script, kills: &[usize]) -> Keeper {
 /// Every single kill point, and pairs of kill points in a row on a grid.
 async fn check_every_kill(build: Build, script: &Script, bound: usize) {
     let (_, _, events) = uninterrupted(build, script).await;
-    for k in 1..events {
+    for k in 1..=events {
         let keeper = check_kills(build, script, &[k]).await;
         assert!(
             keeper.largest <= bound,
@@ -213,7 +213,7 @@ async fn job_run_by_position_killed_anywhere_with_a_commit_that_fails_removes_th
         events_saved(&job_run(&w, &host), &[job()]).await
     };
     assert_eq!(world.count("git.worktree_remove"), 1);
-    for k in 1..events {
+    for k in 1..=events {
         let (world, keeper) = failing_commit(&[k]).await;
         assert_eq!(keeper.outs, want, "kill {k}");
         assert_eq!(world.count("git.worktree_remove"), 1, "kill {k}");
@@ -403,7 +403,7 @@ async fn event_pages_by_position_killed_anywhere_once_or_twice_gives_each_page_o
         .map(|(n, pages)| json!({ "seq": n, "pages": pages }))
         .collect();
     let events = events_in(&pages(&World::new()), &input).await;
-    for k in 1..events {
+    for k in 1..=events {
         assert!(check_pages(pages, &input, &[k]).await <= 600, "kill {k}");
     }
     for k1 in 1..events {
@@ -513,7 +513,7 @@ async fn a_call_a_catch_took_over_is_not_read_past_where_the_first_run_stopped()
     let (want, want_log, events) = uninterrupted(checked_run, &script).await;
     assert_eq!(want.len(), 71, "70 lines and one failure: {want:?}");
     assert_eq!(want[70].0, "failed");
-    for k in 1..events {
+    for k in 1..=events {
         let (world, host) = (World::new(), Host::new());
         host.script("job-1", script.clone());
         let mut keeper = Keeper::new();

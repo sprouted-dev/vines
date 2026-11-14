@@ -40,6 +40,22 @@
 //!   number of items saved, and the run carries on from there.
 //! - [`Entry::Emitted`]: the caller was handed this output. On replay the
 //!   same output is made again and not handed out twice.
+//! - [`Entry::Through`] and [`Entry::Stopped`]: for a stream act that gives
+//!   its items again, how far a call got, how many outputs made from the
+//!   items after that were handed out, and how it stopped. They take the
+//!   place of `Item`, `Ended` and the `Emitted` lines of those outputs. On
+//!   replay the act is called with `resume_from` set to the position, and
+//!   the run hands out again, silently, as many outputs as were handed.
+//!   If the call had stopped, the run reads the act only up to the items it
+//!   gave before and then gives the saved end.
+//!
+//! # Keeping it small
+//!
+//! [`Journal::record`] and [`Bookmark::record`] keep what a run hands out.
+//! For most entries they append. An [`Entry::Through`] replaces the one
+//! before it for the same call, and drops every entry whose key belongs to
+//! an item of that call it passed: the keys of item 7 of `pipe[1]#0` start
+//! `pipe[1]#0@7/`. [`Journal::push`] appends and drops nothing.
 //!
 //! # Which input item a line belongs to
 //!

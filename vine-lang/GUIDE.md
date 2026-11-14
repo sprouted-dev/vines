@@ -2,7 +2,7 @@
 
 A vine is a stream in and a stream out. Items go in, flow through a pipe of stages, and come out on named outputs. This guide is for whoever writes one, person or agent. It says what works and what goes wrong.
 
-The stages are in `src/pipe.rs`. Worked examples are in `vines/pipe/`.
+The stages are in `src/pipe/`. Worked examples are in `vines/pipe/`.
 
 ## The model in five lines
 
@@ -34,9 +34,11 @@ The stages are in `src/pipe.rs`. Worked examples are in `vines/pipe/`.
 
 **Treat long work that reports as it goes as a stream.** An agent run takes hours and writes lines as it works. Register it as a stream act. `call` on it gives one item per line, and `end: ended` adds one last item that says how it ended. `job_run` makes the working copy, runs the agent, and commits, all in one vine. See `vines/pipe/job_run.yaml`.
 
-**Run a vine that holds long work with `run_saved`, and save every entry it hands you.** Save each entry in order, before you read the next event. After a restart, run the vine again with the same input and the journal you saved. Acts that finished are not run again. A stream act is asked to go on from where it was, so it must start the work the first time and attach to it after that. Outputs you were already handed are not handed out again, as long as you saved the entry that came after each one.
+**Run a vine that holds long work with `run_saved`, and keep the journal it builds.** Pass every event to `Journal::record` and save the journal before you read the next event. After a restart, run the vine again with the same input and the journal you saved. Acts that finished are not run again. A stream act is asked to go on from where it was, so it must start the work the first time and attach to it after that. Outputs you were already handed are not handed out again, as long as you saved the entry that came after each one.
 
 **Run a vine over an endless stream with `run_from`, and keep the bookmark it builds.** A vine that reads events for months must not replay from the first event after a restart. `run_from` tells you when every event through a number is fully done: its acts finished, its outputs were handed out, and no stage holds it. Pass every event it gives you to `Bookmark::record` and save the bookmark before you read the next. After a restart, feed the events after `bookmark.position()` with the bookmark you saved. The bookmark holds only the lines of events still in flight, so it stays small. See `vines/pipe/event_relay.yaml`, `event_backup.yaml` and `event_pages.yaml`.
+
+**Register a stream act that can give its items again as one.** If the host behind an act stores what it gave, as an agent host stores the lines a session wrote, register it with `register_replayable_stream_act`. Then a saved run keeps how far each call got instead of every item: a job whose agent writes ten thousand lines keeps about 500 bytes, not a megabyte. After a restart the act is asked for its items from the one after the position, and `collect` refills its batch from them. The act must give the same items again from any point it gave. Check `Pipe::saves_every_item()`: it lists every call that is still saved item by item, and why.
 
 **Pick the mode by whether the run ends.** One job, one plan launch: `run_saved` and a journal. A stream of events with no end: `run_from` and a bookmark. They save the same entries. A bookmark's lines also say which input item each belongs to, and the position is where the caller may cut.
 
@@ -99,7 +101,11 @@ The stages are in `src/pipe.rs`. Worked examples are in `vines/pipe/`.
 
 **Don't feed `run_from` anything but the events after the position, in the order you fed them before.** A saved act whose input does not match is a run error. A bookmark whose keys happen to fit another vine is not caught.
 
-**Don't let one event's stream act run for months under `run_from`.** Its lines stay in the bookmark until the event is done. The bookmark is bounded by the work in flight, and one endless stream act is endless work in flight.
+**Don't let one event's stream act run for months under `run_from` unless it gives its items again.** A stream act saved item by item keeps its lines in the bookmark until the event is done. One saved by position keeps a few lines however long it runs.
+
+**Don't put `take` after a stream act that gives its items again, or `retry` over it.** `take` counts what the act gives, and after a restart it would count from the position. `retry` drops what a failed attempt gave, so the run cannot tell what is done. The call is then saved item by item. Put `take` inside `each`, where it counts one item's own stream, and leave `retry` to quick acts after the stream act.
+
+**Batch a stream act's items where the batch holds one call's items.** `collect` after the act, in the same pipe or a side pipe, before a covering stage, as `job_run` does, holds one call's lines. A `collect` that could mix two calls, such as one over the whole stream of events or after an `each` that runs the act, makes the call saved item by item.
 
 **Don't emit from `finalize`.** It is for cleanup. The checker refuses it.
 
@@ -123,6 +129,7 @@ The stages are in `src/pipe.rs`. Worked examples are in `vines/pipe/`.
 - `collect` with a size of 0.
 - `last` or `collect` where they could only ever see one item.
 - `tap` on a stream act, a stream act inside `together`, and `end` on an act that is not a stream act.
+- A stream act that gives its items again, where a later item could not rebuild what comes after it: a `take` that its items reach, a `collect` that could mix two calls, or a `retry` over it. The call is saved item by item, and `Pipe::saves_every_item` says where and why. A vine that refuses this for a vine it runs by `use` cannot be resumed.
 - For `run_from`, besides what `run_saved` refuses: `take` over the whole stream, and `collect` over the whole stream after a stage that makes many items from one. `Pipe::resumable_from_position` says so, and `run_from` gives `NotResumable` with the reason and the stage's path.
 
 ## What it does not catch
@@ -131,12 +138,13 @@ The stages are in `src/pipe.rs`. Worked examples are in `vines/pipe/`.
 - A `branch` case that is misspelt. It never matches.
 - An act that lies about what it touches.
 - A stream act that does not go on from `resume_from`. A replay trusts it to.
+- A stream act that says it gives its items again and gives other items. A run sees only an act that stops after fewer items than it gave before it stopped. Outputs handed out before a restart are skipped by count, so an act that gives other items can hand out a different output in place of one already handed.
 - A journal saved for a different vine. A saved act whose input no longer matches is a run error, and so is an output the replay does not make again. Anything else is not checked.
 
 ## Not built yet
 
 - Resuming a vine with `each` that merges, switches or exhausts, or with `timeout`, in either mode.
-- Making a journal smaller. It only grows: every line an agent writes is in it. Under `run_from` a bookmark shrinks as the position moves, but the lines of one event still in flight only grow.
+- Making a journal smaller for a stream act that cannot give its items again. Every item it gives is saved until its input item is done.
 - A position for a stage that keeps a count or a running total across events. Such state needs to be saved itself, as the older runner's `Memory::Kept` did.
 - Telling a stream act that the run stopped reading. Dropping a run, or a `catch` that drops the rest of an item's work, leaves the stream act's work going.
 - `retry` waits again on replay, even when the attempts it waits for are saved.

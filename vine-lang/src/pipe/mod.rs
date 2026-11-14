@@ -161,14 +161,61 @@
 //! `last` and `collect` over whole items, `fork`, `catch`, `finalize`,
 //! `retry`, `each` with `concat`, `use`, `branch` and stream acts all can.
 //!
+//! # A stream act that gives its items again
+//!
+//! A stream act registered with
+//! [`Registry::register_stream_act`](crate::Registry::register_stream_act)
+//! is saved item by item: one line for each item it gives, and one for
+//! each output made from them. An agent run that writes a line a second
+//! for a day saves every line, twice over.
+//!
+//! An act registered with
+//! [`Registry::register_replayable_stream_act`](crate::Registry::register_replayable_stream_act)
+//! says it can give its items again from any item it gave, as a host that
+//! stores what a session wrote can. Then the position idea works one level
+//! down. The items a call gives are numbered from 1, and each gets a tag
+//! that holds the tag of the item that started the call. When the last
+//! clone of item `k`'s tag is gone, item `k` is done, and the call's own
+//! position moves past it in order. A batch of the call's items ties them
+//! together, as a batch of input items does. The run saves an
+//! [`Entry::Through`](crate::Entry::Through): the call's position, and how
+//! many outputs made from the items after it were handed out. It saves an
+//! [`Entry::Stopped`](crate::Entry::Stopped) when the call ends, fails, or
+//! is abandoned because a `catch` or `finalize` took over. It saves no item
+//! and no `Emitted` line for an output made from one.
+//!
+//! After a restart the act is asked for its items from the one after the
+//! position. Stages that hold items, such as `collect`, refill the way they
+//! do for input items. The outputs the caller was handed are made again and
+//! not handed out, by count. The keys of acts run for item `k` start with
+//! the call's key and `k`, such as `pipe[1]#0@7/pipe[4]#0`, so they line up
+//! whichever item a restart begins at. When the position passes `k`, the
+//! caller's [`Journal::record`] or [`Bookmark::record`] drops those lines.
+//! So what the caller keeps for a call is a few lines, however many items
+//! it gives.
+//!
+//! The checker saves a call item by item, as if the act did not say it
+//! gives again, where a later item could not rebuild what comes after it:
+//!
+//! - `take` that what the call gives reaches, in the same run of a pipe.
+//!   It counts, and after a restart it would count from the position.
+//! - `collect` that could put the items of two calls, or of the call and of
+//!   something else, in one batch. A batch must hold one call's items.
+//! - `retry` over the call. It drops what a failed attempt gave and tries
+//!   again, so an item it dropped would look done.
+//!
+//! [`Pipe::saves_every_item`] names each such call and why. A vine run by
+//! `use` was checked on its own and cannot change how it saves, so a vine
+//! that refuses what a used vine's call gives cannot be resumed.
+//!
 //! # What this module leaves out
 //!
 //! `finalize` does not run when the caller drops the stream partway: Rust
 //! has no async drop. A run that is dropped and never resumed leaves
-//! behind whatever its acts made. A journal only grows: nothing compacts
-//! it. A bookmark shrinks as the position moves, but the lines of one item
-//! still in flight only grow: a stream act that gives a line a second for
-//! a month keeps every line until its item is done.
+//! behind whatever its acts made. A journal only grows, except for the
+//! lines a [`Journal::record`] drops for a stream act saved by position. A
+//! bookmark shrinks as the position moves. A stream act saved item by item
+//! keeps every line until its item is done.
 
 mod book;
 mod call_sites;
@@ -653,7 +700,9 @@ impl Pipe {
     /// Run the vine so that it can be resumed after a restart.
     ///
     /// Besides each [`Event::Output`], the run gives [`Event::Save`]
-    /// entries. Append each one to what you keep for this run, in order.
+    /// entries. Pass each event to [`Journal::record`] and save the
+    /// journal before you read the next. It appends the entry, and drops
+    /// the entries a stream act saved by position no longer needs.
     /// After a restart, call `run_saved` again with the same input items,
     /// from the first, and the [`Journal`] of what you kept. An empty
     /// journal is a fresh start.
