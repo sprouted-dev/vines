@@ -702,9 +702,9 @@ def violations(shapes):
                 f"{path}: non_test_lines is {counts['non_test_lines']}; the limit is {LIMITS['non_test_lines']}"
                 " (split by concept into a module directory)"
             )
-        for metric in LINE_FOUND:
-            for line, text in lines[metric]:
-                found.append(f"{path}:{line}: {WHAT[metric]}: {text}")
+        in_file = sorted((line, metric, text) for metric in LINE_FOUND for line, text in lines[metric])
+        for line, metric, text in in_file:
+            found.append(f"{path}:{line}: {WHAT[metric]}: {text}")
     return found
 
 

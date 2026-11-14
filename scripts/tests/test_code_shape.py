@@ -109,6 +109,12 @@ class CheckTests(unittest.TestCase):
         self.assertIn("src/b.rs: non_test_lines is 901", result.stderr)
         self.assertIn("src/b.rs:901: history comment", result.stderr)
 
+    def test_findings_in_a_file_are_reported_in_line_order(self):
+        self.repo.write("src/lib.rs", "// Formerly x.\n" + STRING_ERROR + "// Previously y.\n")
+        result = self.repo.run()
+        reported = [line.split(":")[1] for line in result.stderr.splitlines() if line.startswith("  src/lib.rs:")]
+        self.assertEqual(reported, ["1", "2", "5"])
+
     def test_an_unreasoned_allow_is_left_to_clippy(self):
         self.repo.write("src/lib.rs", "#[allow(dead_code)]\nfn unused() {}\n")
         self.assertEqual(self.repo.run().returncode, 0)
