@@ -3,9 +3,9 @@
 //! here. Each method does its whole change under one lock, the way a
 //! database would in one transaction.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
-use vine_lang::{json, Shape, Value};
+use vine_lang::{json, OutputId, Shape, Value};
 
 use super::{Answer, End, Event, Fate, Landing, Move, Read, Refusal, ABANDONED};
 
@@ -17,6 +17,15 @@ pub(super) struct Store {
     next_id: u64,
     /// How many events of the log the reactions have seen.
     pub(super) reacted: usize,
+    /// The key of every output that landed: its request's id joined with
+    /// the output's id, as a unique index on the event log would hold it.
+    landed: BTreeSet<String>,
+}
+
+/// The key under which an output of request `request` lands once. Output
+/// ids are unique within one run, and a request is one run of its vine.
+fn landing_key(request: &str, output: &OutputId) -> String {
+    format!("{request}/{output}")
 }
 
 pub(super) enum Request {
@@ -40,13 +49,6 @@ pub(super) struct Accepted {
     /// The vine's journal, as JSON.
     pub(super) journal: Value,
     pub(super) landings: Vec<Landing>,
-    /// The output landed last, while the entry that records it is not
-    /// kept yet. A crash now means the resumed run gives it again.
-    pub(super) unkept: Option<(String, Value)>,
-    /// Outputs landed before a crash whose entries were never kept. The
-    /// resumed run gives each again, not always first: under an `each`
-    /// that merges, other items can give new outputs before it.
-    pub(super) repeats: Vec<(String, Value)>,
     pub(super) end: Option<End>,
 }
 
@@ -232,30 +234,20 @@ impl Store {
             input,
             journal: json!([]),
             landings: Vec::new(),
-            unkept: None,
-            repeats: Vec::new(),
             end: None,
         })
     }
 
-    /// Keep the journal of request `id` after one more entry, and the
-    /// repeats still to come. The entry a run gives right after an output
-    /// records it, so the output landed last is safe from repeating now.
-    pub(super) fn keep_journal(&mut self, id: &str, journal: Value, repeats: Vec<(String, Value)>) {
-        let a = self.accepted_mut(id);
-        a.journal = journal;
-        a.unkept = None;
-        a.repeats = repeats;
+    /// Keep the journal of request `id` after one more entry.
+    pub(super) fn keep_journal(&mut self, id: &str, journal: Value) {
+        self.accepted_mut(id).journal = journal;
     }
 
-    /// The outputs a resumed run of request `id` gives again: those of
-    /// earlier crashes, and the one landed last if its entry was not kept.
-    pub(super) fn resume(&mut self, id: &str) -> Vec<(String, Value)> {
-        let a = self.accepted_mut(id);
-        if let Some(unkept) = a.unkept.take() {
-            a.repeats.push(unkept);
-        }
-        a.repeats.clone()
+    /// Whether the output `output` of request `id` has landed. A resumed
+    /// run gives again an output whose entry was not kept before a crash,
+    /// with the id it had.
+    pub(super) fn has_landed(&self, id: &str, output: &OutputId) -> bool {
+        self.landed.contains(&landing_key(id, output))
     }
 
     pub(super) fn end(&mut self, id: &str, end: End) {
@@ -263,7 +255,24 @@ impl Store {
     }
 
     /// Turn one output of request `id`'s vine into its event, or into an
-    /// `abandoned` event when an artifact the press read has changed.
+    /// `abandoned` event when an artifact the press read has changed. An
+    /// output that landed already lands nothing again: `None`.
+    pub(super) fn land_once(
+        &mut self,
+        id: &str,
+        decl: &Move,
+        output_id: &OutputId,
+        output: &str,
+        payload: Value,
+    ) -> Option<Landing> {
+        if !self.landed.insert(landing_key(id, output_id)) {
+            return None;
+        }
+        Some(self.land(id, decl, output, payload))
+    }
+
+    /// Turn one output of request `id` into its event, or into an
+    /// `abandoned` one. A move with no vine lands its one event this way.
     pub(super) fn land(&mut self, id: &str, decl: &Move, output: &str, payload: Value) -> Landing {
         let a = self.accepted(id);
         let target = a.target.clone();
@@ -320,9 +329,7 @@ impl Store {
             },
         };
         self.events.push(landing.event.clone());
-        let a = self.accepted_mut(id);
-        a.landings.push(landing.clone());
-        a.unkept = Some((landing.output.clone(), landing.payload.clone()));
+        self.accepted_mut(id).landings.push(landing.clone());
         landing
     }
 }

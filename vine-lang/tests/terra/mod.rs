@@ -39,7 +39,11 @@
 //! Every press has a request id. Terra keeps, per request, what it read,
 //! the vine's journal, and every output it landed or abandoned. A press
 //! with an id Terra has seen attaches to that request: it gives the items
-//! it gave, and then resumes the vine from its journal. A nested press
+//! it gave, and then resumes the vine from its journal. The resumed run
+//! can give again an output that landed before the crash, with the same
+//! output id; Terra keys each landing by its request id and the output id,
+//! and lands it once. Two outputs with the same name and payload are two
+//! events: they have two ids. A nested press
 //! gets its id from its parent's id, its move and its payload, so after a
 //! restart the same press gets the same id. [`Terra::crash_at`] stops
 //! everything at a chosen point, as a crash of the process would.

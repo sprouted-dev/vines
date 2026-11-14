@@ -3,7 +3,9 @@
 //!
 //! The same stream answers an outside press and a vine's `move.<name>`
 //! call. After a crash it gives again, from the store, everything it gave,
-//! and then resumes the vine from the journal it kept.
+//! and then resumes the vine from the journal it kept. The resumed run can
+//! give again an output that landed before the crash; the store knows it
+//! by its id and lands nothing.
 
 use std::collections::{BTreeSet, VecDeque};
 use std::sync::{Arc, Mutex};
@@ -11,7 +13,7 @@ use std::sync::{Arc, Mutex};
 use futures::stream::{self, BoxStream};
 use futures::StreamExt;
 use tokio::sync::Notify;
-use vine_lang::{json, Event as RunEvent, Journal, OpError, Part, RunError, Value};
+use vine_lang::{json, Event as RunEvent, Journal, OpError, Part, PipeOutput, RunError, Value};
 
 use super::store::Admission;
 use super::{End, Fate, Inner, Installed, Landing};
@@ -114,12 +116,6 @@ struct Running {
     installed: Arc<Installed>,
     run: BoxStream<'static, Result<RunEvent, RunError>>,
     journal: Journal,
-    /// Outputs landed and given before a crash, whose entries were never
-    /// kept, so the resumed run gives them again. Each is dropped when it
-    /// comes, and forgotten once the entry after it is kept.
-    repeats: Vec<(String, Value)>,
-    /// A repeat the run just gave again, whose entry is not kept yet.
-    skipped: Option<(String, Value)>,
 }
 
 impl Press {
@@ -188,7 +184,6 @@ impl Press {
             }
             return self.finish(Ok(Part::End(end(&End::Done))));
         };
-        let repeats = store.resume(&self.id);
         let accepted = store.accepted(&self.id);
         let journal =
             Journal::from_json(&accepted.journal).expect("the store keeps journals whole");
@@ -204,8 +199,6 @@ impl Press {
             installed,
             run: vine.run_saved(stream::iter([input]), journal.clone()),
             journal,
-            repeats,
-            skipped: None,
         });
     }
 
@@ -236,37 +229,27 @@ impl Press {
         let live = self.live.as_mut().expect("still live");
         live.journal.record(&event);
         let saved = live.journal.to_json();
-        if let Some(skipped) = live.skipped.take() {
-            let at = live.repeats.iter().position(|r| *r == skipped);
-            live.repeats
-                .remove(at.expect("a skipped repeat is one still to come"));
-        }
-        let repeats = live.repeats.clone();
-        self.inner
-            .store
-            .lock()
-            .unwrap()
-            .keep_journal(&id, saved, repeats);
+        self.inner.store.lock().unwrap().keep_journal(&id, saved);
         tick(&self.inner, || format!("{id} after {kind}")).await;
     }
 
-    /// Land one output and give it to the caller.
-    async fn output(&mut self, out: vine_lang::PipeOutput) {
+    /// Land one output and give it to the caller, unless it landed before
+    /// a crash: the caller was given it then.
+    async fn output(&mut self, out: PipeOutput) {
         let id = self.id.clone();
-        let live = self.live.as_mut().expect("still live");
-        let given = (out.name.clone(), out.payload.clone());
-        if live.repeats.contains(&given) && live.skipped.is_none() {
-            live.skipped = Some(given);
+        if self.inner.store.lock().unwrap().has_landed(&id, &out.id) {
             return;
         }
+        let live = self.live.as_mut().expect("still live");
         let installed = live.installed.clone();
         tick(&self.inner, || format!("{id} before output {}", out.name)).await;
-        let landing =
-            self.inner
-                .store
-                .lock()
-                .unwrap()
-                .land(&id, &installed.decl, &out.name, out.payload);
+        let landing = self
+            .inner
+            .store
+            .lock()
+            .unwrap()
+            .land_once(&id, &installed.decl, &out.id, &out.name, out.payload)
+            .expect("nothing else lands this request's outputs while it is read");
         tick(&self.inner, || {
             format!("{id} after output {}", landing.output)
         })
