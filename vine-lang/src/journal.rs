@@ -51,6 +51,14 @@
 //!   the run hands out again, silently, as many outputs as were handed.
 //!   If the call had stopped, the run reads the act only up to the items it
 //!   gave before and then gives the saved end.
+//! - [`Entry::Timed`]: what a `timeout` decided for one run of the stages
+//!   it covers. Each run gets a scope of its own, numbered in the order
+//!   values reach the `timeout`, such as `pipe[2].timeout@0`, and the keys
+//!   of the acts it covers start with it, such as
+//!   `pipe[2].timeout@0/pipe[0]#0`. On replay, [`Timing::TimedOut`] fails
+//!   the item at once without running the covered stages, and
+//!   [`Timing::InTime`] runs them with no limit. With no decision saved,
+//!   the wait starts again from nothing.
 //!
 //! # Output ids
 //!
@@ -177,6 +185,38 @@ pub enum Entry {
     /// A stream act that gives its items again stopped after giving
     /// `items` items, in the way `how` says.
     Stopped { at: String, items: u64, how: Ending },
+    /// The `timeout` at `at` decided this for one run of the stages it
+    /// covers, such as `pipe[2].timeout@0`. A replay takes the decision
+    /// from here and does not ask the clock again.
+    Timed { at: String, timing: Timing },
+}
+
+/// What a `timeout` decided for one run of the stages it covers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Timing {
+    /// The stages were done before the limit. A replay runs them again
+    /// with no limit, so they end as they did even if they are slower.
+    InTime,
+    /// The limit came first, and the stages were dropped. A replay fails
+    /// the item at once and does not run them.
+    TimedOut,
+}
+
+impl Timing {
+    fn as_str(self) -> &'static str {
+        match self {
+            Timing::InTime => "in_time",
+            Timing::TimedOut => "timed_out",
+        }
+    }
+
+    fn parse(text: &str) -> Option<Timing> {
+        match text {
+            "in_time" => Some(Timing::InTime),
+            "timed_out" => Some(Timing::TimedOut),
+            _ => None,
+        }
+    }
 }
 
 /// How a stream act that gives its items again stopped.
@@ -242,6 +282,9 @@ impl Entry {
                 }
                 v
             }
+            Entry::Timed { at, timing } => {
+                json!({ "kind": "timed", "at": at, "timing": timing.as_str() })
+            }
         }
     }
 
@@ -255,7 +298,8 @@ impl Entry {
             | Entry::Item { at, .. }
             | Entry::Ended { at, .. }
             | Entry::Through { at, .. }
-            | Entry::Stopped { at, .. } => Some(at),
+            | Entry::Stopped { at, .. }
+            | Entry::Timed { at, .. } => Some(at),
             Entry::Emitted { .. } => None,
         }
     }
@@ -362,6 +406,14 @@ impl Entry {
                     other => return Err(format!("unknown way to stop `{other}`")),
                 },
             },
+            "timed" => {
+                let timing = text("timing")?;
+                Entry::Timed {
+                    at: text("at")?,
+                    timing: Timing::parse(&timing)
+                        .ok_or_else(|| format!("unknown timing `{timing}`"))?,
+                }
+            }
             other => return Err(format!("unknown entry kind `{other}`")),
         };
         let known: &[&str] = match &entry {
@@ -376,6 +428,7 @@ impl Entry {
                 Ending::Failed { .. } => &["kind", "at", "items", "how", "code", "message"],
                 Ending::Abandoned => &["kind", "at", "items", "how"],
             },
+            Entry::Timed { .. } => &["kind", "at", "timing"],
         };
         if let Some(extra) = map.keys().find(|k| !known.contains(&k.as_str())) {
             return Err(format!("a `{kind}` entry has no field `{extra}`"));

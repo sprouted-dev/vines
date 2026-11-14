@@ -777,10 +777,6 @@ async fn the_checker_refuses_a_vine_a_restart_from_a_position_cannot_rebuild() {
             "overlap `exhaust`",
         ),
         (
-            events_vine([archive(), timeout(Duration::from_secs(1)), emit("out")]),
-            "is a `timeout`",
-        ),
-        (
             events_vine([use_vine("switching", None).on("out", [emit("out")])]),
             "uses vine `switching`",
         ),
@@ -827,6 +823,8 @@ fn stages_that_start_again_for_each_item_can_run_from_a_position() {
                 emit("out"),
             ],
         )]),
+        // A `timeout` saves what the clock decided for each item.
+        events_vine([archive(), timeout(Duration::from_secs(1)), emit("out")]),
     ] {
         let vine = reg.build_pipe(def).unwrap();
         assert!(vine.resumable_from_position(), "{vine:?}");

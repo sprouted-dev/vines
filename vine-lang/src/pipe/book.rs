@@ -30,7 +30,7 @@ use serde_json::Value;
 use super::flow::lock;
 use super::output::OutputId;
 use super::tag::{Moves, Tag};
-use crate::journal::{item_of_stream, Bookmark, Ending, Entry, Journal, Line};
+use crate::journal::{item_of_stream, Bookmark, Ending, Entry, Journal, Line, Timing};
 use crate::registry::OpError;
 
 /// Where one call of an act is saved: the input item it belongs to, and
@@ -70,6 +70,9 @@ pub(super) struct Book {
     /// input item, handed out or made again, counting outputs handed out
     /// before a restart that are never made again.
     made: HashMap<(u64, String), u64>,
+    /// What each run of a `timeout` decided. Taken out as the replay uses
+    /// them.
+    timings: HashMap<Key, Timing>,
 }
 
 /// One output the caller was handed before a restart.
@@ -297,8 +300,20 @@ impl Book {
                     ))
                 }
             },
+            Entry::Timed { at, timing } => {
+                let k = key(at);
+                if self.timings.contains_key(&k) {
+                    return Err(twice(&k));
+                }
+                self.timings.insert(k, *timing);
+            }
         }
         Ok(())
+    }
+
+    /// The keys of every saved act and decision not used yet.
+    pub(super) fn keys(&self) -> impl Iterator<Item = &Key> {
+        self.saved.keys().chain(self.timings.keys())
     }
 
     /// The saved position of a stream act call. A call saved as started
@@ -465,9 +480,9 @@ impl Cx {
     }
 
     /// The tag for the work of one value that enters the `each` that
-    /// merges at `path`: its group, numbered in the order values with the
-    /// same scope enter, when the run is saved. Unsaved, the value keeps
-    /// its tag.
+    /// merges at `path`, or one run of a `timeout`: its group, numbered in
+    /// the order values with the same scope enter, when the run is saved.
+    /// Unsaved, the value keeps its tag.
     pub(super) fn group(&self, path: &str, tag: &Tag) -> Tag {
         let Some(book) = self.book.as_ref() else {
             return tag.clone();
@@ -481,6 +496,28 @@ impl Cx {
         let group = Tag::group(&site, *count, tag);
         *count += 1;
         group
+    }
+
+    /// One run of the stages a `timeout` at `path` covers, for the value
+    /// with `tag`: the tag the covered stages run under, and where the
+    /// decision is saved, when the run is saved. Each run is a scope of its
+    /// own, numbered in the order values reach the `timeout`, as a group
+    /// of an `each` that merges is. So a replay that skips the covered
+    /// stages of a run that timed out leaves the keys of every other run
+    /// where they were. Unsaved, the value keeps its tag.
+    pub(super) fn timed_run(&self, path: &str, tag: &Tag) -> (Tag, Option<Key>) {
+        let scoped = self.group(&format!("{path}.timeout"), tag);
+        let key = self.book.as_ref().map(|_| Key {
+            item: scoped.item_number(),
+            at: scoped.scope().trim_end_matches('/').to_owned(),
+        });
+        (scoped, key)
+    }
+
+    /// What the run of a `timeout` saved at `key` decided before the
+    /// restart, if it decided.
+    pub(super) fn take_timing(&self, key: &Key) -> Option<Timing> {
+        lock(self.book.as_ref()?).timings.remove(key)
     }
 
     /// Where the groups made within a pipe at `path` of this vine stand:

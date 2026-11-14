@@ -12,15 +12,15 @@ use super::book::Cx;
 use super::call_sites::{CallSites, Feed};
 use super::flow::{
     batches, chain, covering, env_of, fatal, forked, handleable, held, last_of, latest_or_first,
-    one, per_item, per_item_stream, rescued, tidied, Fault, Flow, Flowing, Items, OpFault,
-    Transform,
+    one, per_item, per_item_stream, rescued, tidied, Flow, Flowing, Items, Transform,
 };
 use super::order::{merges_anywhere, View};
+use super::timer::{timed, Covered};
 use super::unit::{add_field, Runner, Unit};
 use super::{Keep, Overlap, Pipe, PipeDef, Stage};
 use crate::error::{LoadError, RunError};
 use crate::expr::{case_key, is_name, Cond, Ref, Template};
-use crate::registry::{OpError, Registry};
+use crate::registry::Registry;
 use crate::run::Output;
 use crate::shape::{Shape, Ty};
 
@@ -53,6 +53,7 @@ pub(super) struct Checker<'a> {
     unresumable: Option<String>,
     unpositioned: Option<String>,
     sites: CallSites,
+    covered: Covered,
 }
 
 /// A checked pipe: what runs it, and the stream act calls whose items
@@ -87,6 +88,7 @@ pub(crate) fn assemble(reg: &Registry, def: PipeDef) -> Result<Pipe, LoadError> 
         unresumable: None,
         unpositioned: None,
         sites: CallSites::default(),
+        covered: Covered::default(),
     };
     let built = cx.pipe(
         &def.stages,
@@ -115,6 +117,7 @@ pub(crate) fn assemble(reg: &Registry, def: PipeDef) -> Result<Pipe, LoadError> 
         unpositioned: cx.unpositioned,
         saves_every_item: settled.saves_every_item,
         by_position: settled.by_position,
+        covered: cx.covered,
         transform: built.transform,
     })
 }
@@ -216,6 +219,7 @@ impl Checker<'_> {
             return Err(malformed(path, "a pipe needs at least one stage"));
         }
         let mark = self.sites.mark();
+        let acts_mark = self.covered.mark();
         // The stages before the last covering stage run once per item.
         let last_cover = stages.iter().rposition(|s| covers(s).is_some());
         let mut one_item = last_cover.is_some() || single;
@@ -260,6 +264,9 @@ impl Checker<'_> {
                 transforms.push(t);
                 if matches!(stage, Stage::Retry { .. }) {
                     self.sites.retry(&here, mark);
+                }
+                if matches!(stage, Stage::Timeout(_)) {
+                    self.covered.timeout(acts_mark, &here);
                 }
                 feeds.extend(handler_feeds.into_iter().map(Feed::out_of_nested));
                 known = None;
@@ -446,32 +453,7 @@ impl Checker<'_> {
                         "`timeout` is longer than nothing",
                     ));
                 }
-                self.not_resumable(format!(
-                    "{path} is a `timeout`, and a replay cannot know where the time ran out"
-                ));
-                let at = path.to_owned();
-                let t = covering(move |item, tag, cx| {
-                    let (body, at) = (body.clone(), at.clone());
-                    async move {
-                        let run = body(one(Ok(Flowing::Value(item.clone(), tag.clone()))), cx)
-                            .collect::<Vec<Flow>>();
-                        match tokio::time::timeout(limit, run).await {
-                            Ok(out) => out,
-                            Err(_) => vec![Err(Fault::Op(Box::new(OpFault {
-                                path: at,
-                                from: "timeout".into(),
-                                error: OpError::new(
-                                    "timeout",
-                                    format!("took longer than {}s", limit.as_secs_f64()),
-                                ),
-                                item,
-                                tag,
-                            })))],
-                        }
-                    }
-                    .boxed()
-                });
-                Ok((t, Vec::new()))
+                Ok((timed(body, path.to_owned(), limit), Vec::new()))
             }
             _ => unreachable!("only covering stages get here"),
         }
@@ -518,6 +500,7 @@ impl Checker<'_> {
                     });
                 };
                 self.acts.insert(act.clone());
+                self.covered.act(path);
                 (spec, runner, act, with, keep, end, format!("{path}.with"))
             }
             _ => unreachable!("only operators and acts are units"),
@@ -985,6 +968,7 @@ impl Checker<'_> {
                 self.acts.extend(other.acts().iter().cloned());
                 self.uses.insert(vine.clone());
                 self.uses.extend(other.uses().iter().cloned());
+                self.covered.used(path, vine, &other.covered);
                 let (keep, at) = (keep.clone(), path.to_owned());
                 let t: Transform = Arc::new(move |items: Items, cx: Cx| {
                     let (other, with, keep, arms, at) = (

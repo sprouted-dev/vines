@@ -266,6 +266,7 @@ mod order;
 mod output;
 mod stream_call;
 mod tag;
+mod timer;
 mod unit;
 #[cfg(feature = "yaml")]
 mod yaml;
@@ -286,6 +287,7 @@ use crate::shape::Shape;
 use book::{Book, Cx};
 use drive::Saving;
 use flow::{fatal, Flowing, Items, Transform};
+use timer::Covered;
 
 pub(crate) use check::assemble;
 pub use output::{OutputId, PipeOutput};
@@ -658,6 +660,9 @@ pub struct Pipe {
     by_position: bool,
     /// It holds an `each` that merges, here or in a vine it uses.
     merges: bool,
+    /// Which acts each `timeout` covers, to refuse a journal saved before
+    /// one was added.
+    covered: Covered,
     transform: Transform,
 }
 
@@ -800,7 +805,7 @@ impl Pipe {
         if let Some(why) = &self.unresumable {
             return stream::once(ready(Err(self.refused(why)))).boxed();
         }
-        match Book::from_journal(&journal) {
+        match self.book(Book::from_journal(&journal)) {
             Ok(book) => self
                 .drive(input, Saving::Journal(book))
                 .filter_map(|r| {
@@ -861,7 +866,7 @@ impl Pipe {
         if let Some(why) = self.unresumable.as_ref().or(self.unpositioned.as_ref()) {
             return stream::once(ready(Err(self.refused(why)))).boxed();
         }
-        match Book::from_bookmark(&bookmark) {
+        match self.book(Book::from_bookmark(&bookmark)) {
             Ok(book) => self.drive(
                 input,
                 Saving::Position {
@@ -872,6 +877,14 @@ impl Pipe {
             ),
             Err(problem) => stream::once(ready(Err(RunError::ReplayMisfit { problem }))).boxed(),
         }
+    }
+
+    /// The book read from what the caller saved, once it is known to be
+    /// saved for this vine as it is now, as far as the run can tell.
+    fn book(&self, read: Result<Book, String>) -> Result<Book, String> {
+        let book = read?;
+        self.covered.check(book.keys())?;
+        Ok(book)
     }
 
     /// Run as a stage of another vine.

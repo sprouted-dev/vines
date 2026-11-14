@@ -193,7 +193,7 @@ async fn an_act_on_the_value_last_picked_after_a_merge_is_refused() {
 }
 
 #[tokio::test]
-async fn switch_exhaust_and_timeout_still_cannot_be_resumed() {
+async fn switch_and_exhaust_still_cannot_be_resumed() {
     for (overlap, word) in [(Overlap::Switch, "switch"), (Overlap::Exhaust, "exhaust")] {
         refused(
             jobs_vine([each(overlap, [one(), done()])]),
@@ -201,11 +201,6 @@ async fn switch_exhaust_and_timeout_still_cannot_be_resumed() {
         )
         .await;
     }
-    refused(
-        jobs_vine([merge(vec![one(), timeout(Duration::from_secs(9)), done()])]),
-        "is a `timeout`",
-    )
-    .await;
 }
 
 #[test]
@@ -250,6 +245,10 @@ fn what_works_one_value_at_a_time_after_or_inside_a_merge_can_be_resumed() {
         (
             "`retry` inside the merge",
             jobs_vine([merge(vec![one(), retry(1, Duration::ZERO), done()])]),
+        ),
+        (
+            "`timeout` inside the merge",
+            jobs_vine([merge(vec![one(), timeout(Duration::from_secs(9)), done()])]),
         ),
         (
             "`use` inside the merge",

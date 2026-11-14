@@ -948,13 +948,6 @@ async fn run_saved_refuses_a_vine_that_cannot_replay_in_one_order() {
     let exhausted = reg
         .build_pipe(numbers([each(Overlap::Exhaust, [emit("out")])]))
         .unwrap();
-    let timed = reg
-        .build_pipe(numbers([
-            op("set", json!({})),
-            timeout(Duration::from_secs(1)),
-            emit("out"),
-        ]))
-        .unwrap();
     let inner = reg
         .build_pipe(
             pipe("inner")
@@ -969,7 +962,6 @@ async fn run_saved_refuses_a_vine_that_cannot_replay_in_one_order() {
         .unwrap();
     for (vine, says) in [
         (exhausted, "overlap `exhaust`"),
-        (timed, "timeout"),
         (using, "uses vine `inner`"),
     ] {
         assert!(!vine.resumable());
@@ -983,6 +975,13 @@ async fn run_saved_refuses_a_vine_that_cannot_replay_in_one_order() {
         );
     }
     assert!(built([emit("out")]).resumable());
+    // What the clock decides is saved, so a `timeout` replays.
+    assert!(built([
+        op("set", json!({})),
+        timeout(Duration::from_secs(1)),
+        emit("out")
+    ])
+    .resumable());
 }
 
 #[tokio::test]
