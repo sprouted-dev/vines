@@ -11,6 +11,7 @@ use futures::StreamExt;
 use serde_json::{json, Value};
 
 use super::book::Cx;
+use super::tag::Tag;
 use super::unit::add_field;
 use crate::error::RunError;
 use crate::expr::Env;
@@ -18,17 +19,21 @@ use crate::registry::OpError;
 use crate::run::Output;
 
 /// What flows between stages: a value still being worked on, or a value
-/// already sent to an output. Later stages leave an output alone.
-#[derive(Debug, Clone)]
+/// already sent to an output. Later stages leave an output alone. Each
+/// carries the [`Tag`] of the input items it came from.
+#[derive(Clone)]
 pub(super) enum Flowing {
-    Value(Value),
-    Out(Output),
+    Value(Value, Tag),
+    Out(Output, Tag),
 }
 
+/// A failure on its way to a `catch` or to the end of the run. It carries
+/// the tag of the item that failed, so that item is not done while the
+/// failure is in flight.
 pub(super) enum Fault {
     /// An operator or act failed.
     Op(Box<OpFault>),
-    Fatal(Box<RunError>),
+    Fatal(Box<RunError>, Tag),
 }
 
 pub(super) struct OpFault {
@@ -37,10 +42,35 @@ pub(super) struct OpFault {
     pub(super) error: OpError,
     /// The item as it was when the stage failed.
     pub(super) item: Value,
+    pub(super) tag: Tag,
+}
+
+impl Fault {
+    /// The failure, held for the item with this tag.
+    pub(super) fn of(self, tag: &Tag) -> Fault {
+        match self {
+            Fault::Op(mut f) => {
+                f.tag.or(tag);
+                Fault::Op(f)
+            }
+            Fault::Fatal(e, mut held) => {
+                held.or(tag);
+                Fault::Fatal(e, held)
+            }
+        }
+    }
+}
+
+/// A value made for the item with `tag`, or its failure, held for it.
+pub(super) fn held(made: Result<Value, Fault>, tag: &Tag) -> Flow {
+    match made {
+        Ok(v) => Ok(Flowing::Value(v, tag.clone())),
+        Err(fault) => Err(fault.of(tag)),
+    }
 }
 
 pub(super) fn fatal(e: RunError) -> Fault {
-    Fault::Fatal(Box::new(e))
+    Fault::Fatal(Box::new(e), Tag::default())
 }
 
 pub(super) fn misfit(problem: impl Into<String>) -> Fault {
@@ -59,7 +89,7 @@ pub(super) fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 
 pub(super) fn run_error(fault: Fault) -> RunError {
     match fault {
-        Fault::Fatal(e) => *e,
+        Fault::Fatal(e, _) => *e,
         Fault::Op(fault) => {
             let OpFault {
                 path, from, error, ..
@@ -100,7 +130,7 @@ pub(super) fn chain(transforms: Vec<Transform>) -> Transform {
 /// pass through.
 pub(super) fn per_item<F>(f: F) -> Transform
 where
-    F: Fn(Value, Cx) -> BoxFuture<'static, Result<Value, Fault>> + Send + Sync + 'static,
+    F: Fn(Value, Tag, Cx) -> BoxFuture<'static, Result<Value, Fault>> + Send + Sync + 'static,
 {
     let f = Arc::new(f);
     Arc::new(move |items: Items, cx: Cx| {
@@ -110,7 +140,10 @@ where
                 let (f, cx) = (f.clone(), cx.clone());
                 async move {
                     match flow {
-                        Ok(Flowing::Value(v)) => f(v, cx).await.map(Flowing::Value),
+                        Ok(Flowing::Value(v, tag)) => match f(v, tag.clone(), cx).await {
+                            Ok(v) => Ok(Flowing::Value(v, tag)),
+                            Err(fault) => Err(fault.of(&tag)),
+                        },
                         other => other,
                     }
                 }
@@ -123,14 +156,14 @@ where
 /// other. Outputs and failures pass through.
 pub(super) fn per_item_stream<F>(f: F) -> Transform
 where
-    F: Fn(Value, Cx) -> Items + Send + Sync + 'static,
+    F: Fn(Value, Tag, Cx) -> Items + Send + Sync + 'static,
 {
     let f = Arc::new(f);
     Arc::new(move |items: Items, cx: Cx| {
         let f = f.clone();
         items
             .map(move |flow| match flow {
-                Ok(Flowing::Value(v)) => f(v, cx.clone()),
+                Ok(Flowing::Value(v, tag)) => f(v, tag, cx.clone()),
                 other => one(other),
             })
             .flatten()
@@ -149,9 +182,9 @@ pub(super) fn latest_or_first(outer: Items, inner: Transform, switch: bool, cx: 
         if let Some(upstream) = outer.as_mut() {
             loop {
                 match upstream.poll_next_unpin(task) {
-                    Poll::Ready(Some(Ok(Flowing::Value(v)))) => {
+                    Poll::Ready(Some(Ok(Flowing::Value(v, tag)))) => {
                         if switch || current.is_none() {
-                            current = Some(inner(one(Ok(Flowing::Value(v))), cx.clone()));
+                            current = Some(inner(one(Ok(Flowing::Value(v, tag))), cx.clone()));
                         }
                     }
                     Poll::Ready(Some(other)) => passing.push_back(other),
@@ -184,18 +217,19 @@ pub(super) fn latest_or_first(outer: Items, inner: Transform, switch: bool, cx: 
 
 /// When the stream ends, give its final value.
 pub(super) fn last_of(mut items: Items) -> Items {
-    let mut held: Option<Value> = None;
+    let mut held: Option<(Value, Tag)> = None;
     let mut done = false;
     stream::poll_fn(move |task| loop {
         if done {
             return Poll::Ready(None);
         }
         match items.poll_next_unpin(task) {
-            Poll::Ready(Some(Ok(Flowing::Value(v)))) => held = Some(v),
+            // The value before is dropped, and with it its hold on its item.
+            Poll::Ready(Some(Ok(Flowing::Value(v, tag)))) => held = Some((v, tag)),
             Poll::Ready(Some(other)) => return Poll::Ready(Some(other)),
             Poll::Ready(None) => {
                 done = true;
-                return Poll::Ready(held.take().map(|v| Ok(Flowing::Value(v))));
+                return Poll::Ready(held.take().map(|(v, tag)| Ok(Flowing::Value(v, tag))));
             }
             Poll::Pending => return Poll::Pending,
         }
@@ -205,26 +239,28 @@ pub(super) fn last_of(mut items: Items) -> Items {
 
 /// Batches of `size`, and what is left when the stream ends.
 pub(super) fn batches(mut items: Items, size: usize, into: Option<String>, path: String) -> Items {
-    let mut buf: Vec<Value> = Vec::new();
+    let mut buf: Vec<(Value, Tag)> = Vec::new();
     let mut done = false;
-    let batch = move |items: Vec<Value>| -> Flow {
+    let batch = move |kept: Vec<(Value, Tag)>| -> Flow {
+        let (items, tags): (Vec<Value>, Vec<Tag>) = kept.into_iter().unzip();
+        let tag = Tag::batch(tags);
         let count = items.len();
-        match &into {
-            None => Ok(Flowing::Value(json!({ "items": items, "count": count }))),
+        let value = match &into {
+            None => Ok(json!({ "items": items, "count": count })),
             Some(name) => {
                 let last = items.last().cloned().unwrap_or(Value::Null);
                 add_field(&path, last, name, json!({ "items": items, "count": count }))
-                    .map(Flowing::Value)
             }
-        }
+        };
+        held(value, &tag)
     };
     stream::poll_fn(move |task| loop {
         if done {
             return Poll::Ready(None);
         }
         match items.poll_next_unpin(task) {
-            Poll::Ready(Some(Ok(Flowing::Value(v)))) => {
-                buf.push(v);
+            Poll::Ready(Some(Ok(Flowing::Value(v, tag)))) => {
+                buf.push((v, tag));
                 if buf.len() >= size {
                     return Poll::Ready(Some(batch(std::mem::take(&mut buf))));
                 }
@@ -315,7 +351,7 @@ pub(super) fn forked(mut upstream: Items, sides: Vec<Transform>, cx: Cx) -> Item
             };
             match side.poll_next_unpin(task) {
                 // A value that reaches the end of a side pipe is dropped.
-                Poll::Ready(Some(Ok(Flowing::Value(_)))) => {}
+                Poll::Ready(Some(Ok(Flowing::Value(..)))) => {}
                 Poll::Ready(Some(other)) => ready_out.push_back(other),
                 Poll::Ready(None) => {
                     outs[i] = None;
@@ -338,16 +374,17 @@ pub(super) fn forked(mut upstream: Items, sides: Vec<Transform>, cx: Cx) -> Item
             return Poll::Ready(None);
         }
         match upstream.poll_next_unpin(task) {
-            Poll::Ready(Some(Ok(Flowing::Value(v)))) => {
+            Poll::Ready(Some(Ok(Flowing::Value(v, tag)))) => {
                 for (input, out) in inputs.iter().zip(&outs) {
                     if out.is_some() {
                         let mut s = lock(input);
-                        s.queue.push_back(Ok(Flowing::Value(v.clone())));
+                        s.queue
+                            .push_back(Ok(Flowing::Value(v.clone(), tag.clone())));
                         s.starved = false;
                         s.wake();
                     }
                 }
-                held = Some(Ok(Flowing::Value(v)));
+                held = Some(Ok(Flowing::Value(v, tag)));
                 draining = Some(0);
             }
             Poll::Ready(Some(other)) => return Poll::Ready(Some(other)),
@@ -369,9 +406,9 @@ pub(super) fn forked(mut upstream: Items, sides: Vec<Transform>, cx: Cx) -> Item
 /// Pass on what the body gives. When it ends, or at its first failure,
 /// run the cleanup, and only then pass on the failure: a caller stops
 /// reading at a failure, and the cleanup must not be skipped.
-pub(super) fn tidied(body: Items, cleanup: Transform, item: Value, cx: Cx) -> Items {
+pub(super) fn tidied(body: Items, cleanup: Transform, item: Value, tag: Tag, cx: Cx) -> Items {
     let mut body = Some(body);
-    let mut start = Some((cleanup, item, cx));
+    let mut start = Some((cleanup, item, tag, cx));
     let mut tidy: Option<Items> = None;
     let mut after: VecDeque<Flow> = VecDeque::new();
     let mut done = false;
@@ -388,8 +425,8 @@ pub(super) fn tidied(body: Items, cleanup: Transform, item: Value, cx: Cx) -> It
             }
             continue;
         }
-        if let Some((cleanup, item, cx)) = start.take() {
-            tidy = Some(cleanup(one(Ok(Flowing::Value(item))), cx));
+        if let Some((cleanup, item, tag, cx)) = start.take() {
+            tidy = Some(cleanup(one(Ok(Flowing::Value(item, tag))), cx));
         }
         if let Some(t) = tidy.as_mut() {
             match t.poll_next_unpin(task) {
@@ -437,7 +474,11 @@ pub(super) fn rescued(body: Items, handler: Transform, cx: Cx) -> Items {
                     unreachable!("a handleable result is a failed operator")
                 };
                 let OpFault {
-                    from, error, item, ..
+                    from,
+                    error,
+                    item,
+                    tag,
+                    ..
                 } = *fault;
                 let failure = json!({
                     "code": error.code,
@@ -451,7 +492,7 @@ pub(super) fn rescued(body: Items, handler: Transform, cx: Cx) -> Items {
                     }
                     other => json!({ "item": other, "error": failure }),
                 };
-                rescue = Some(handler(one(Ok(Flowing::Value(failed))), cx.clone()));
+                rescue = Some(handler(one(Ok(Flowing::Value(failed, tag))), cx.clone()));
             }
             Poll::Ready(None) => {
                 body = None;
@@ -467,7 +508,7 @@ pub(super) fn rescued(body: Items, handler: Transform, cx: Cx) -> Items {
 /// it gives back. Outputs and failures from upstream pass through.
 pub(super) fn covering<F>(f: F) -> Transform
 where
-    F: Fn(Value, Cx) -> BoxFuture<'static, Vec<Flow>> + Send + Sync + 'static,
+    F: Fn(Value, Tag, Cx) -> BoxFuture<'static, Vec<Flow>> + Send + Sync + 'static,
 {
     let f = Arc::new(f);
     Arc::new(move |items: Items, cx: Cx| {
@@ -477,7 +518,7 @@ where
                 let (f, cx) = (f.clone(), cx.clone());
                 async move {
                     match flow {
-                        Ok(Flowing::Value(item)) => f(item, cx).await,
+                        Ok(Flowing::Value(item, tag)) => f(item, tag, cx).await,
                         other => vec![other],
                     }
                 }

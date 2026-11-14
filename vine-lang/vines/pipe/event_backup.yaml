@@ -1,0 +1,24 @@
+# Back up an endless stream of events in batches of 5: one store per
+# batch, one output per batch.
+#
+# Run it with `run_from` and keep a bookmark. `collect` holds the events
+# of the batch it is filling, so the position stays before them. After a
+# restart they are fed again and the same batch is made again. A batch
+# that was being stored at the kill is not stored twice: its store is
+# saved under the batch's last event.
+vine: event_backup
+input: { seq: int, body: text }
+outputs:
+  stored: { name: text, first: int, last: int, count: int }
+pipe:
+  - collect: { size: 5 }
+  - call: backup.store
+    with: { items: $item.items }
+    into: stored
+  - emit:
+      to: stored
+      with:
+        name: $item.stored.name
+        first: $item.stored.first
+        last: $item.stored.last
+        count: $item.count

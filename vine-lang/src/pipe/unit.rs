@@ -10,8 +10,9 @@ use futures::{FutureExt, StreamExt};
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
-use super::book::{Cx, Saved};
-use super::flow::{env_of, fatal, misfit, one, Fault, Flow, Flowing, Items, OpFault};
+use super::book::{Cx, Key, Saved};
+use super::flow::{env_of, fatal, held, misfit, one, Fault, Flow, Flowing, Items, OpFault};
+use super::tag::Tag;
 use super::Keep;
 use crate::error::RunError;
 use crate::expr::Template;
@@ -53,17 +54,23 @@ impl Unit {
         Ok(resolved)
     }
 
-    pub(super) fn failed(&self, error: OpError, item: &Value) -> Fault {
+    pub(super) fn failed(&self, error: OpError, item: &Value, tag: &Tag) -> Fault {
         Fault::Op(Box::new(OpFault {
             path: self.path.clone(),
             from: self.spec.name.clone(),
             error,
             item: item.clone(),
+            tag: tag.clone(),
         }))
     }
 
     /// Run for one item and give back the raw result.
-    pub(super) fn result(&self, item: Value, cx: Cx) -> BoxFuture<'static, Result<Value, Fault>> {
+    pub(super) fn result(
+        &self,
+        item: Value,
+        tag: Tag,
+        cx: Cx,
+    ) -> BoxFuture<'static, Result<Value, Fault>> {
         let unit = self.clone();
         async move {
             let resolved = unit.resolve(&item)?;
@@ -72,7 +79,7 @@ impl Unit {
                 Runner::Act(h) => (h.clone(), true),
                 Runner::Stream(_) => unreachable!("a stream act runs through `stream`"),
             };
-            let key = if saved { cx.key(&unit.path) } else { None };
+            let key = if saved { cx.key(&unit.path, &tag) } else { None };
             if let Some(key) = &key {
                 match cx.take(key) {
                     None => {}
@@ -82,7 +89,7 @@ impl Unit {
                                 "`{key}` was saved for input {input}, and the run gave it {resolved}"
                             )));
                         }
-                        return outcome.map_err(|e| unit.failed(e, &item));
+                        return outcome.map_err(|e| unit.failed(e, &item, &tag));
                     }
                     Some(Saved::Stream { .. }) => {
                         return Err(misfit(format!(
@@ -96,17 +103,18 @@ impl Unit {
             let result = match handler(resolved.clone(), cx_op).await {
                 Ok(v) => v,
                 Err(error) => {
-                    if let Some(at) = key {
+                    if let Some(key) = &key {
                         if error.code != OpError::CANCELLED {
-                            cx.save(Entry::Failed {
-                                at,
+                            let entry = Entry::Failed {
+                                at: key.at.clone(),
                                 input: resolved,
                                 code: error.code.clone(),
                                 message: error.message.clone(),
-                            });
+                            };
+                            cx.save(key, entry);
                         }
                     }
-                    return Err(unit.failed(error, &item));
+                    return Err(unit.failed(error, &item, &tag));
                 }
             };
             if let Some(shape) = &unit.spec.returns {
@@ -118,12 +126,13 @@ impl Unit {
                     })
                 })?;
             }
-            if let Some(at) = key {
-                cx.save(Entry::Done {
-                    at,
+            if let Some(key) = &key {
+                let entry = Entry::Done {
+                    at: key.at.clone(),
                     input: resolved,
                     result: result.clone(),
-                });
+                };
+                cx.save(key, entry);
             }
             Ok(result)
         }
@@ -131,10 +140,15 @@ impl Unit {
     }
 
     /// Run for one item and give back the item that flows on.
-    pub(super) fn apply(&self, item: Value, cx: Cx) -> BoxFuture<'static, Result<Value, Fault>> {
+    pub(super) fn apply(
+        &self,
+        item: Value,
+        tag: Tag,
+        cx: Cx,
+    ) -> BoxFuture<'static, Result<Value, Fault>> {
         let unit = self.clone();
         async move {
-            let result = unit.result(item.clone(), cx).await?;
+            let result = unit.result(item.clone(), tag, cx).await?;
             unit.merge(item, result)
         }
         .boxed()
@@ -149,19 +163,20 @@ impl Unit {
     }
 
     /// Run a stream act for one item: one item out per value it gives.
-    pub(super) fn stream(&self, item: Value, cx: Cx) -> Items {
+    pub(super) fn stream(&self, item: Value, tag: Tag, cx: Cx) -> Items {
         let Runner::Stream(handler) = &self.runner else {
             unreachable!("only a stream act runs as a stream")
         };
         let input = match self.resolve(&item) {
             Ok(v) => v,
-            Err(fault) => return one(Err(fault)),
+            Err(fault) => return one(Err(fault.of(&tag))),
         };
-        let key = cx.key(&self.path);
+        let key = cx.key(&self.path, &tag);
         let mut run = StreamRun {
             unit: self.clone(),
             handler: handler.clone(),
             item,
+            tag: tag.clone(),
             input,
             cx: cx.clone(),
             key: key.clone(),
@@ -180,7 +195,8 @@ impl Unit {
                         return one(Err(misfit(format!(
                             "`{key}` was saved for input {input}, and the run gave it {}",
                             run.input
-                        ))));
+                        ))
+                        .of(&tag)));
                     }
                     run.replay = items;
                     run.replay_end = end;
@@ -190,7 +206,8 @@ impl Unit {
                     return one(Err(misfit(format!(
                     "`{key}` was saved as an act that gives one result, and `{}` is a stream act",
                     self.spec.name
-                ))))
+                ))
+                    .of(&tag)))
                 }
             }
         }
@@ -204,9 +221,10 @@ pub(super) struct StreamRun {
     handler: StreamHandler,
     /// The item as it reached the stage.
     item: Value,
+    tag: Tag,
     input: Value,
     cx: Cx,
-    key: Option<String>,
+    key: Option<Key>,
     replay: VecDeque<Value>,
     replay_end: Option<Result<Value, OpError>>,
     started: bool,
@@ -232,10 +250,13 @@ impl StreamRun {
         if self.live.is_none() {
             if !self.started {
                 if let Some(at) = &self.key {
-                    self.cx.save(Entry::Started {
-                        at: at.clone(),
-                        input: self.input.clone(),
-                    });
+                    self.cx.save(
+                        at,
+                        Entry::Started {
+                            at: at.at.clone(),
+                            input: self.input.clone(),
+                        },
+                    );
                 }
                 self.started = true;
             }
@@ -257,10 +278,13 @@ impl StreamRun {
                     }
                 }
                 if let Some(at) = &self.key {
-                    self.cx.save(Entry::Item {
-                        at: at.clone(),
-                        value: value.clone(),
-                    });
+                    self.cx.save(
+                        at,
+                        Entry::Item {
+                            at: at.at.clone(),
+                            value: value.clone(),
+                        },
+                    );
                 }
                 self.given += 1;
                 let flow = self.item_with(value);
@@ -281,12 +305,15 @@ impl StreamRun {
             Some(Err(error)) => {
                 if let Some(at) = &self.key {
                     if error.code != OpError::CANCELLED {
-                        self.cx.save(Entry::Failed {
-                            at: at.clone(),
-                            input: self.input.clone(),
-                            code: error.code.clone(),
-                            message: error.message.clone(),
-                        });
+                        self.cx.save(
+                            at,
+                            Entry::Failed {
+                                at: at.at.clone(),
+                                input: self.input.clone(),
+                                code: error.code.clone(),
+                                message: error.message.clone(),
+                            },
+                        );
                     }
                 }
                 self.finish(Err(error))
@@ -306,27 +333,33 @@ impl StreamRun {
 
     pub(super) fn ended(mut self, value: Value) -> Option<(Flow, StreamRun)> {
         if let Some(at) = &self.key {
-            self.cx.save(Entry::Ended {
-                at: at.clone(),
-                value: value.clone(),
-            });
+            self.cx.save(
+                at,
+                Entry::Ended {
+                    at: at.at.clone(),
+                    value: value.clone(),
+                },
+            );
         }
         self.live = None;
         self.finish(Ok(value))
     }
 
+    /// The call is over. What it gives last carries the item's tag; the
+    /// call lets go of its own, so the item can be done as soon as that
+    /// last value is, without waiting to be asked for more.
     pub(super) fn finish(mut self, end: Result<Value, OpError>) -> Option<(Flow, StreamRun)> {
         self.done = true;
         self.live = None;
+        let tag = std::mem::take(&mut self.tag);
         match end {
             Ok(value) => {
                 let name = self.unit.end.clone()?;
-                let flow =
-                    add_field(&self.unit.path, self.item.clone(), &name, value).map(Flowing::Value);
-                Some((flow, self))
+                let made = add_field(&self.unit.path, self.item.clone(), &name, value);
+                Some((held(made, &tag), self))
             }
             Err(error) => {
-                let fault = self.unit.failed(error, &self.item);
+                let fault = self.unit.failed(error, &self.item, &tag);
                 Some((Err(fault), self))
             }
         }
@@ -335,16 +368,22 @@ impl StreamRun {
     pub(super) fn fail_hard(mut self, e: RunError) -> Option<(Flow, StreamRun)> {
         self.done = true;
         self.live = None;
-        Some((Err(fatal(e)), self))
+        let fault = fatal(e).of(&std::mem::take(&mut self.tag));
+        Some((Err(fault), self))
     }
 
     pub(super) fn item_with(&self, value: Value) -> Flow {
         match &self.unit.keep {
             Keep::Into(name) => {
-                add_field(&self.unit.path, self.item.clone(), name, value).map(Flowing::Value)
+                self.tagged(add_field(&self.unit.path, self.item.clone(), name, value))
             }
-            _ => Ok(Flowing::Value(value)),
+            _ => Ok(Flowing::Value(value, self.tag.clone())),
         }
+    }
+
+    /// A value made for this call's item, or its failure, held for it.
+    fn tagged(&self, made: Result<Value, Fault>) -> Flow {
+        held(made, &self.tag)
     }
 }
 

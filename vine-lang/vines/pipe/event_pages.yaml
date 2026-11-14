@@ -1,0 +1,25 @@
+# Fetch every page of each event of an endless stream. `feed.pages` is a
+# stream act: one event starts it, and it gives one item per page and
+# then its end.
+#
+# Run it with `run_from` and keep a bookmark. The position passes an
+# event only when its stream has ended and its `fetched` output was
+# handed out. After a restart mid stream, the saved pages flow again
+# without being handed out twice, and the act is asked to go on from the
+# page after them.
+vine: event_pages
+input: { seq: int, pages: int }
+outputs:
+  page: { seq: int, page: int }
+  fetched: { seq: int, pages: int }
+pipe:
+  - call: feed.pages
+    with: { seq: $item.seq, pages: $item.pages }
+    into: page
+    end: ended
+  - fork:
+      - - filter: $item.page
+        - emit: { to: page, with: { seq: $item.seq, page: $item.page.page } }
+  # Only the end item goes on: it has `ended` and no `page`.
+  - filter: $item.ended
+  - emit: { to: fetched, with: { seq: $item.seq, pages: $item.ended.pages } }

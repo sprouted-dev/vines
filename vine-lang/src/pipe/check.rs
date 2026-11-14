@@ -10,8 +10,9 @@ use serde_json::Value;
 
 use super::book::Cx;
 use super::flow::{
-    batches, chain, covering, env_of, fatal, forked, handleable, last_of, latest_or_first, one,
-    per_item, per_item_stream, rescued, tidied, Fault, Flow, Flowing, Items, OpFault, Transform,
+    batches, chain, covering, env_of, fatal, forked, handleable, held, last_of, latest_or_first,
+    one, per_item, per_item_stream, rescued, tidied, Fault, Flow, Flowing, Items, OpFault,
+    Transform,
 };
 use super::unit::{add_field, Runner, Unit};
 use super::{Keep, Overlap, Pipe, PipeDef, Stage};
@@ -25,11 +26,28 @@ use crate::shape::{Shape, Ty};
 /// nothing.
 pub(super) type Known = Option<Shape>;
 
+/// For a run from a saved position: what a pipe's stages see of the input
+/// stream. A stage that keeps something between values only matters when
+/// those values come from more than one input item.
+#[derive(Debug, Clone)]
+pub(super) enum Stream {
+    /// One input item's own work: inside `each`, `branch`, `catch`,
+    /// `finalize` and the arms of `use`, and before a covering stage. A
+    /// stage's state starts again for each item.
+    PerItem,
+    /// The whole stream, each value still one whole input item.
+    Whole,
+    /// The whole stream, after the stage named here made many values from
+    /// one input item.
+    Pieces(String),
+}
+
 pub(super) struct Checker<'a> {
     reg: &'a Registry,
     outputs: Arc<BTreeMap<String, Shape>>,
     reach: BTreeSet<String>,
     unresumable: Option<String>,
+    unpositioned: Option<String>,
 }
 
 pub(crate) fn assemble(reg: &Registry, def: PipeDef) -> Result<Pipe, LoadError> {
@@ -53,8 +71,15 @@ pub(crate) fn assemble(reg: &Registry, def: PipeDef) -> Result<Pipe, LoadError> 
         outputs: Arc::new(def.outputs),
         reach: BTreeSet::new(),
         unresumable: None,
+        unpositioned: None,
     };
-    let (transform, _) = cx.pipe(&def.stages, "pipe", Some(def.input.clone()), false)?;
+    let (transform, _) = cx.pipe(
+        &def.stages,
+        "pipe",
+        Some(def.input.clone()),
+        false,
+        Stream::Whole,
+    )?;
     if !emits(&def.stages) {
         return Err(LoadError::MissingOutput {
             path: "pipe".into(),
@@ -66,6 +91,7 @@ pub(crate) fn assemble(reg: &Registry, def: PipeDef) -> Result<Pipe, LoadError> 
         outputs: cx.outputs,
         reach: cx.reach,
         unresumable: cx.unresumable,
+        unpositioned: cx.unpositioned,
         transform,
     })
 }
@@ -149,13 +175,15 @@ pub(super) fn emits_anywhere(stages: &[Stage]) -> bool {
 impl Checker<'_> {
     /// Check a pipe and build it. `single` says the stream reaching it is
     /// one item, as inside `each`, `branch`, `catch`, `finalize` and the
-    /// arms of `use`.
+    /// arms of `use`. `stream` says whether it sees the whole input stream,
+    /// which matters for a run from a saved position.
     fn pipe(
         &mut self,
         stages: &[Stage],
         path: &str,
         mut known: Known,
         single: bool,
+        stream: Stream,
     ) -> Result<(Transform, Known), LoadError> {
         if stages.is_empty() {
             return Err(malformed(path, "a pipe needs at least one stage"));
@@ -164,6 +192,12 @@ impl Checker<'_> {
         let last_cover = stages.iter().rposition(|s| covers(s).is_some());
         let mut one_item = last_cover.is_some() || single;
         let mut many = false;
+        // The stage that first made many values from one input item, at
+        // the scope of the whole stream.
+        let mut maker = match &stream {
+            Stream::Pieces(by) => Some(by.clone()),
+            _ => None,
+        };
         let mut transforms: Vec<Transform> = Vec::new();
         for (i, stage) in stages.iter().enumerate() {
             let here = format!("{path}[{i}]");
@@ -209,15 +243,42 @@ impl Checker<'_> {
                     ));
                 }
             }
-            let (t, next) = self.stage(stage, &here, known, one_item)?;
+            let here_stream = match stream {
+                Stream::PerItem => Stream::PerItem,
+                _ if last_cover.is_some_and(|c| i < c) => Stream::PerItem,
+                _ => match &maker {
+                    Some(by) => Stream::Pieces(by.clone()),
+                    None => Stream::Whole,
+                },
+            };
+            self.check_position(stage, &here, &here_stream);
+            let (t, next) = self.stage(stage, &here, known, one_item, here_stream)?;
             transforms.push(t);
             known = next;
             if self.makes_many(stage) {
                 many = true;
                 one_item = false;
             }
+            if maker.is_none() && self.makes_many_anywhere(stage) {
+                maker = Some(here.clone());
+            }
         }
         Ok((chain(transforms), known))
+    }
+
+    /// Refuse, for a run from a saved position, a stage that keeps
+    /// something across input items that a restart from the position
+    /// cannot rebuild.
+    fn check_position(&mut self, stage: &Stage, here: &str, stream: &Stream) {
+        match (stage, stream) {
+            (Stage::Take(_), Stream::Whole | Stream::Pieces(_)) => self.not_positioned(format!(
+                "{here} is a `take` over the whole stream: it counts items, and a run from a position would count from nothing again; a vine that ends itself has an end, so run it with `run_saved`"
+            )),
+            (Stage::Collect { .. }, Stream::Pieces(by)) => self.not_positioned(format!(
+                "{here} gathers batches over the whole stream after {by}, which makes many items from one; a batch could end partway through an input item, and the position could not pass it"
+            )),
+            _ => {}
+        }
     }
 
     /// Whether a stage can turn one item into many.
@@ -228,6 +289,21 @@ impl Checker<'_> {
             }
             Stage::Call { act, .. } => self.reg.get_stream_act(act).is_some(),
             _ => false,
+        }
+    }
+
+    /// Whether a stage can turn one item into many, counting the stages a
+    /// covering stage runs instead.
+    fn makes_many_anywhere(&self, stage: &Stage) -> bool {
+        match stage {
+            Stage::Catch(stages) => stages.iter().any(|s| self.makes_many(s)),
+            _ => self.makes_many(stage),
+        }
+    }
+
+    fn not_positioned(&mut self, why: String) {
+        if self.unpositioned.is_none() {
+            self.unpositioned = Some(why);
         }
     }
 
@@ -248,10 +324,16 @@ impl Checker<'_> {
         match stage {
             Stage::Catch(stages) => {
                 // The item as it was when it failed is not known here.
-                let (handler, _) = self.pipe(stages, &format!("{path}.catch"), None, true)?;
-                Ok(per_item_stream(move |item, cx| {
+                let (handler, _) = self.pipe(
+                    stages,
+                    &format!("{path}.catch"),
+                    None,
+                    true,
+                    Stream::PerItem,
+                )?;
+                Ok(per_item_stream(move |item, tag, cx| {
                     rescued(
-                        body(one(Ok(Flowing::Value(item))), cx.clone()),
+                        body(one(Ok(Flowing::Value(item, tag))), cx.clone()),
                         handler.clone(),
                         cx,
                     )
@@ -265,10 +347,13 @@ impl Checker<'_> {
                         "`finalize` is for cleanup and may not emit",
                     ));
                 }
-                let (cleanup, _) = self.pipe(stages, &here, None, true)?;
-                Ok(per_item_stream(move |item, cx| {
-                    let work = body(one(Ok(Flowing::Value(item.clone()))), cx.clone());
-                    tidied(work, cleanup.clone(), item, cx)
+                let (cleanup, _) = self.pipe(stages, &here, None, true, Stream::PerItem)?;
+                Ok(per_item_stream(move |item, tag, cx| {
+                    let work = body(
+                        one(Ok(Flowing::Value(item.clone(), tag.clone()))),
+                        cx.clone(),
+                    );
+                    tidied(work, cleanup.clone(), item, tag, cx)
                 }))
             }
             Stage::Retry { times, wait } => {
@@ -279,15 +364,13 @@ impl Checker<'_> {
                         "`retry` tries again at least once",
                     ));
                 }
-                Ok(covering(move |item, cx| {
+                Ok(covering(move |item, tag, cx| {
                     let body = body.clone();
                     async move {
                         let mut left = times;
                         loop {
-                            let out: Vec<Flow> =
-                                body(one(Ok(Flowing::Value(item.clone()))), cx.clone())
-                                    .collect()
-                                    .await;
+                            let attempt = one(Ok(Flowing::Value(item.clone(), tag.clone())));
+                            let out: Vec<Flow> = body(attempt, cx.clone()).collect().await;
                             if left == 0 || !out.iter().any(handleable) {
                                 return out;
                             }
@@ -310,11 +393,11 @@ impl Checker<'_> {
                     "{path} is a `timeout`, and a replay cannot know where the time ran out"
                 ));
                 let at = path.to_owned();
-                Ok(covering(move |item, cx| {
+                Ok(covering(move |item, tag, cx| {
                     let (body, at) = (body.clone(), at.clone());
                     async move {
-                        let run =
-                            body(one(Ok(Flowing::Value(item.clone()))), cx).collect::<Vec<Flow>>();
+                        let run = body(one(Ok(Flowing::Value(item.clone(), tag.clone()))), cx)
+                            .collect::<Vec<Flow>>();
                         match tokio::time::timeout(limit, run).await {
                             Ok(out) => out,
                             Err(_) => vec![Err(Fault::Op(Box::new(OpFault {
@@ -325,6 +408,7 @@ impl Checker<'_> {
                                     format!("took longer than {}s", limit.as_secs_f64()),
                                 ),
                                 item,
+                                tag,
                             })))],
                         }
                     }
@@ -455,14 +539,21 @@ impl Checker<'_> {
         path: &str,
         known: Known,
         single: bool,
+        stream: Stream,
     ) -> Result<(Transform, Known), LoadError> {
         match stage {
             Stage::Op { .. } | Stage::Call { .. } => {
                 let (unit, next) = self.unit(stage, path, &known)?;
                 if matches!(unit.runner, Runner::Stream(_)) {
-                    Ok((per_item_stream(move |item, cx| unit.stream(item, cx)), next))
+                    Ok((
+                        per_item_stream(move |item, tag, cx| unit.stream(item, tag, cx)),
+                        next,
+                    ))
                 } else {
-                    Ok((per_item(move |item, cx| unit.apply(item, cx)), next))
+                    Ok((
+                        per_item(move |item, tag, cx| unit.apply(item, tag, cx)),
+                        next,
+                    ))
                 }
             }
             Stage::Split { from, into } => {
@@ -487,20 +578,25 @@ impl Checker<'_> {
                     items
                         .flat_map(move |flow| {
                             let many: Vec<Flow> = match flow {
-                                Ok(Flowing::Value(item)) => match from.resolve(&env_of(&item)) {
-                                    Value::Array(parts) => parts
-                                        .into_iter()
-                                        .map(|part| match &into {
-                                            Some(name) => add_field(&at, item.clone(), name, part)
-                                                .map(Flowing::Value),
-                                            None => Ok(Flowing::Value(part)),
+                                Ok(Flowing::Value(item, tag)) => {
+                                    match from.resolve(&env_of(&item)) {
+                                        Value::Array(parts) => parts
+                                            .into_iter()
+                                            .map(|part| match &into {
+                                                Some(name) => held(
+                                                    add_field(&at, item.clone(), name, part),
+                                                    &tag,
+                                                ),
+                                                None => Ok(Flowing::Value(part, tag.clone())),
+                                            })
+                                            .collect(),
+                                        _ => vec![Err(fatal(RunError::ItemMisfit {
+                                            path: at.clone(),
+                                            problem: "`split` needs a list".into(),
                                         })
-                                        .collect(),
-                                    _ => vec![Err(fatal(RunError::ItemMisfit {
-                                        path: at.clone(),
-                                        problem: "`split` needs a list".into(),
-                                    }))],
-                                },
+                                        .of(&tag))],
+                                    }
+                                }
                                 other => vec![other],
                             };
                             stream::iter(many)
@@ -518,7 +614,7 @@ impl Checker<'_> {
                     items
                         .filter(move |flow| {
                             ready(match flow {
-                                Ok(Flowing::Value(item)) => cond.eval(&env_of(item)),
+                                Ok(Flowing::Value(item, _)) => cond.eval(&env_of(item)),
                                 _ => true,
                             })
                         })
@@ -617,13 +713,13 @@ impl Checker<'_> {
                     next = next.map(|s| s.required(&field, Ty::Any));
                     units.push((field, unit));
                 }
-                let t = per_item(move |item, cx| {
+                let t = per_item(move |item, tag, cx| {
                     let units = units.clone();
                     async move {
                         let results = join_all(
                             units
                                 .iter()
-                                .map(|(_, u)| u.result(item.clone(), cx.clone())),
+                                .map(|(_, u)| u.result(item.clone(), tag.clone(), cx.clone())),
                         )
                         .await;
                         let mut item = item;
@@ -662,7 +758,8 @@ impl Checker<'_> {
                         }
                     ));
                 }
-                let (inner, _) = self.pipe(pipe, &format!("{here}.do"), known, true)?;
+                let (inner, _) =
+                    self.pipe(pipe, &format!("{here}.do"), known, true, Stream::PerItem)?;
                 let (overlap, at_once) = (*overlap, *at_once);
                 let t: Transform = Arc::new(move |items: Items, cx: Cx| {
                     let inner = inner.clone();
@@ -671,8 +768,8 @@ impl Checker<'_> {
                         Overlap::Exhaust => latest_or_first(items, inner, false, cx),
                         Overlap::Concat | Overlap::Merge => {
                             let runs = items.map(move |flow| match flow {
-                                Ok(Flowing::Value(v)) => {
-                                    inner(one(Ok(Flowing::Value(v))), cx.clone())
+                                Ok(Flowing::Value(v, tag)) => {
+                                    inner(one(Ok(Flowing::Value(v, tag))), cx.clone())
                                 }
                                 other => one(other),
                             });
@@ -693,7 +790,8 @@ impl Checker<'_> {
                 }
                 let mut built = Vec::new();
                 for (j, side) in sides.iter().enumerate() {
-                    let (t, _) = self.pipe(side, &format!("{here}[{j}]"), known.clone(), single)?;
+                    let at = format!("{here}[{j}]");
+                    let (t, _) = self.pipe(side, &at, known.clone(), single, stream.clone())?;
                     built.push(t);
                 }
                 let t: Transform =
@@ -762,7 +860,8 @@ impl Checker<'_> {
                     if arms.contains_key(output) {
                         return Err(malformed(&at, "this output is listed twice"));
                     }
-                    arms.insert(output.clone(), self.pipe(stages, &at, None, true)?.0);
+                    let (arm, _) = self.pipe(stages, &at, None, true, Stream::PerItem)?;
+                    arms.insert(output.clone(), arm);
                 }
                 if let Some(missing) = other.outputs().keys().find(|o| !arms.contains_key(*o)) {
                     return Err(malformed(
@@ -787,8 +886,8 @@ impl Checker<'_> {
                     );
                     items
                         .map(move |flow| {
-                            let item = match flow {
-                                Ok(Flowing::Value(item)) => item,
+                            let (item, tag) = match flow {
+                                Ok(Flowing::Value(item, tag)) => (item, tag),
                                 other => return one(other),
                             };
                             let input = match &with {
@@ -799,20 +898,19 @@ impl Checker<'_> {
                             let inner_cx = cx.within(&at, other.name());
                             let cx = cx.clone();
                             other
-                                .flow(one(Ok(Flowing::Value(input))), inner_cx)
+                                .flow(one(Ok(Flowing::Value(input, tag))), inner_cx)
                                 .map(move |flow| match flow {
-                                    Ok(Flowing::Out(out)) => {
+                                    Ok(Flowing::Out(out, tag)) => {
                                         let next = match &keep {
                                             Keep::Into(field) => {
                                                 add_field(&at, item.clone(), field, out.payload)
                                             }
                                             _ => Ok(out.payload),
                                         };
-                                        match next {
-                                            Ok(v) => arms[&out.name](
-                                                one(Ok(Flowing::Value(v))),
-                                                cx.clone(),
-                                            ),
+                                        match held(next, &tag) {
+                                            Ok(value) => {
+                                                arms[&out.name](one(Ok(value)), cx.clone())
+                                            }
                                             Err(fault) => one(Err(fault)),
                                         }
                                     }
@@ -843,23 +941,27 @@ impl Checker<'_> {
                     if arms.contains_key(key) {
                         return Err(malformed(&at, "this case is listed twice"));
                     }
-                    let (arm, _) = self.pipe(pipe, &at, known.clone(), true)?;
+                    let (arm, _) = self.pipe(pipe, &at, known.clone(), true, Stream::PerItem)?;
                     arms.insert(key.clone(), arm);
                 }
                 let fallback = match otherwise {
-                    Some(pipe) => Some(self.pipe(pipe, &format!("{here}.else"), known, true)?.0),
+                    Some(pipe) => {
+                        let at = format!("{here}.else");
+                        Some(self.pipe(pipe, &at, known, true, Stream::PerItem)?.0)
+                    }
                     None => None,
                 };
                 let t: Transform = Arc::new(move |items: Items, cx: Cx| {
                     let (on, arms, fallback) = (on.clone(), arms.clone(), fallback.clone());
                     items
                         .map(move |flow| match flow {
-                            Ok(Flowing::Value(item)) => {
+                            Ok(Flowing::Value(item, tag)) => {
                                 let key = case_key(&on.resolve(&env_of(&item)));
                                 let arm = key.and_then(|k| arms.get(&k)).or(fallback.as_ref());
+                                let flow = one(Ok(Flowing::Value(item, tag)));
                                 match arm {
-                                    Some(arm) => arm(one(Ok(Flowing::Value(item))), cx.clone()),
-                                    None => one(Ok(Flowing::Value(item))),
+                                    Some(arm) => arm(flow, cx.clone()),
+                                    None => flow,
                                 }
                             }
                             other => one(other),
@@ -909,21 +1011,25 @@ impl Checker<'_> {
                         (to.clone(), at.clone(), with.clone(), shape.clone());
                     items
                         .map(move |flow| match flow {
-                            Ok(Flowing::Value(item)) => {
+                            Ok(Flowing::Value(item, tag)) => {
                                 let payload = match &with {
                                     Some(t) => t.resolve(&env_of(&item)),
                                     None => item,
                                 };
                                 match shape.check(&payload) {
-                                    Ok(()) => Ok(Flowing::Out(Output {
-                                        name: to.clone(),
-                                        payload,
-                                    })),
+                                    Ok(()) => Ok(Flowing::Out(
+                                        Output {
+                                            name: to.clone(),
+                                            payload,
+                                        },
+                                        tag,
+                                    )),
                                     Err(problem) => Err(fatal(RunError::OutputMisfit {
                                         path: at.clone(),
                                         output: to.clone(),
                                         problem,
-                                    })),
+                                    })
+                                    .of(&tag)),
                                 }
                             }
                             other => other,

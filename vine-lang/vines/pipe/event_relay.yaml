@@ -1,0 +1,15 @@
+# Archive every event of an endless stream, one act and one output each.
+#
+# Run it with `run_from` and keep a bookmark. The position passes an
+# event once it is archived and its output was handed out. After a
+# restart, feed the events after the position with the bookmark: an
+# event that was in flight is not archived twice.
+vine: event_relay
+input: { seq: int, body: text }
+outputs:
+  archived: { seq: int, receipt: text }
+pipe:
+  - call: archive.put
+    with: { seq: $item.seq, body: $item.body }
+    into: archived
+  - emit: { to: archived, with: { seq: $item.seq, receipt: $item.archived.receipt } }

@@ -21,7 +21,9 @@
 //! - Running, cancellation, pause and resume: [`run`] module docs.
 //! - Stream vines and writing stream operators: [`stream`] module docs.
 //! - Pipes, stream acts and `fork`: [`pipe`] module docs.
-//! - Saving a pipe run and resuming it after a restart: [`journal`] module docs.
+//! - Saving a pipe run and resuming it after a restart, from a journal for a
+//!   run that ends or from a saved position for an endless stream:
+//!   [`journal`] module docs.
 //!
 //! A vine holds no state, names no other vine, and knows nothing about what
 //! starts it. Its reach, [`Vine::reach`], is everything its operators touch.
@@ -38,7 +40,7 @@ pub mod stream;
 pub mod vine;
 
 pub use error::{LoadError, RegistryError, RunError};
-pub use journal::{Entry, Event, Journal};
+pub use journal::{Bookmark, Entry, Event, Journal, Line, Progress};
 pub use pipe::Pipe;
 pub use registry::{ActStream, OpContext, OpError, OperatorSpec, Part, Registry};
 pub use run::Output;

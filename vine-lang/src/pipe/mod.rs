@@ -117,7 +117,7 @@
 //! # Surviving a restart
 //!
 //! [`Pipe::run_saved`] runs a vine and hands the caller, besides what it
-//! emits, [`Entry`] values to save. After a restart the caller runs the
+//! emits, [`Entry`](crate::Entry) values to save. After a restart the caller runs the
 //! vine again over the same input with the [`Journal`] it saved. The run
 //! replays: an act with a saved result is not called again, a stream act
 //! gives its saved items again and then carries on from where it was, and
@@ -129,23 +129,58 @@
 //! a vine with `each` that merges, switches or exhausts, or with a
 //! `timeout`, cannot be resumed, and `run_saved` refuses it.
 //!
+//! # Endless streams: a saved position
+//!
+//! A journal suits a run that ends, such as one job. A vine over an
+//! endless stream would replay from the first item ever, and its journal
+//! would never shrink. [`Pipe::run_from`] runs it with a saved position
+//! instead. It gives the same outputs and the same entries, each as a
+//! [`Line`](crate::Line) naming the input item it belongs to, and
+//! [`Progress::Through`] with `n` once every input item through `n` is
+//! fully done. The caller keeps a [`Bookmark`]: the position and the lines
+//! past it. After a restart it feeds the items after the position, and the
+//! items that were in flight replay from their lines.
+//!
+//! The run knows an item is done by a tag. Each input item gets one when it
+//! goes in, and every value, output and failure made from it carries a
+//! clone. A batch from `collect` carries the tags of its items, and ties
+//! them together so the position never stops partway through a batch. An
+//! output's tag is dropped when the output is handed out. When the last
+//! clone of an item's tag is gone, nothing holds anything made from it.
+//!
+//! A stage that keeps something across items other than the items it
+//! holds cannot be rebuilt by feeding the items after the position. So
+//! `run_from` refuses, besides what `run_saved` refuses:
+//!
+//! - `take` over the whole stream: it counts, and the count would start
+//!   again. A vine that ends itself has an end, so use `run_saved`.
+//! - `collect` over the whole stream after a stage that makes many items
+//!   from one: a batch could end partway through an input item.
+//!
+//! [`Pipe::resumable_from_position`] says whether a vine can run this way.
+//! `last` and `collect` over whole items, `fork`, `catch`, `finalize`,
+//! `retry`, `each` with `concat`, `use`, `branch` and stream acts all can.
+//!
 //! # What this module leaves out
 //!
 //! `finalize` does not run when the caller drops the stream partway: Rust
 //! has no async drop. A run that is dropped and never resumed leaves
 //! behind whatever its acts made. A journal only grows: nothing compacts
-//! it.
+//! it. A bookmark shrinks as the position moves, but the lines of one item
+//! still in flight only grow: a stream act that gives a line a second for
+//! a month keeps every line until its item is done.
 
 mod book;
 mod check;
 mod drive;
 mod flow;
+mod tag;
 mod unit;
 #[cfg(feature = "yaml")]
 mod yaml;
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
 use futures::future::ready;
@@ -154,11 +189,12 @@ use futures::{Stream, StreamExt};
 use serde_json::Value;
 
 use crate::error::RunError;
-use crate::journal::{Event, Journal};
+use crate::journal::{Bookmark, Event, Journal, Progress};
 use crate::run::Output;
 use crate::shape::Shape;
 
 use book::{Book, Cx};
+use drive::Saving;
 use flow::{fatal, Flowing, Items, Transform};
 
 pub(crate) use check::assemble;
@@ -517,6 +553,8 @@ pub struct Pipe {
     reach: BTreeSet<String>,
     /// Why the vine cannot be resumed, if it cannot.
     unresumable: Option<String>,
+    /// Why the vine cannot run from a saved position, if it cannot.
+    unpositioned: Option<String>,
     transform: Transform,
 }
 
@@ -553,6 +591,18 @@ impl Pipe {
         self.unresumable.is_none()
     }
 
+    /// Whether [`Pipe::run_from`] can run this vine.
+    pub fn resumable_from_position(&self) -> bool {
+        self.unresumable.is_none() && self.unpositioned.is_none()
+    }
+
+    fn refused(&self, why: &str) -> RunError {
+        RunError::NotResumable {
+            vine: self.name.clone(),
+            why: why.to_owned(),
+        }
+    }
+
     /// Run the vine over a stream of items. What comes back is the stream
     /// of what it emits. A failure no `catch` handles is the last thing
     /// on the stream. Dropping the stream stops the run.
@@ -560,11 +610,11 @@ impl Pipe {
     where
         S: Stream<Item = Value> + Send + 'static,
     {
-        self.drive(input, None)
+        self.drive(input, Saving::Not)
             .filter_map(|r| {
                 ready(match r {
-                    Ok(Event::Output(out)) => Some(Ok(out)),
-                    Ok(Event::Save(_)) => None,
+                    Ok(Progress::Output(out)) => Some(Ok(out)),
+                    Ok(Progress::Save(_) | Progress::Through(_)) => None,
                     Err(e) => Some(Err(e)),
                 })
             })
@@ -579,7 +629,7 @@ impl Pipe {
     /// from the first, and the [`Journal`] of what you kept. An empty
     /// journal is a fresh start.
     ///
-    /// The run hands out an output and then the [`Entry::Emitted`] that
+    /// The run hands out an output and then the [`Entry::Emitted`](crate::Entry::Emitted) that
     /// records it. If you save after every entry, no output is handed out
     /// twice. If the run stops after an output and before you saved the
     /// entry after it, that output comes again.
@@ -596,14 +646,67 @@ impl Pipe {
         S: Stream<Item = Value> + Send + 'static,
     {
         if let Some(why) = &self.unresumable {
-            let e = RunError::NotResumable {
-                vine: self.name.clone(),
-                why: why.clone(),
-            };
-            return stream::once(ready(Err(e))).boxed();
+            return stream::once(ready(Err(self.refused(why)))).boxed();
         }
         match Book::from_journal(&journal) {
-            Ok(book) => self.drive(input, Some(Arc::new(Mutex::new(book)))),
+            Ok(book) => self
+                .drive(input, Saving::Journal(book))
+                .filter_map(|r| {
+                    ready(match r {
+                        Ok(Progress::Output(out)) => Some(Ok(Event::Output(out))),
+                        Ok(Progress::Save(line)) => Some(Ok(Event::Save(line.entry))),
+                        // A journal covers the whole run: there is no
+                        // position to move.
+                        Ok(Progress::Through(_)) => None,
+                        Err(e) => Some(Err(e)),
+                    })
+                })
+                .boxed(),
+            Err(problem) => stream::once(ready(Err(RunError::ReplayMisfit { problem }))).boxed(),
+        }
+    }
+
+    /// Run the vine over an endless stream so that it can carry on after a
+    /// restart from a saved position.
+    ///
+    /// Feed it the input items after `bookmark`'s position: for a fresh
+    /// start, [`Bookmark::new`] and every item from the first. The run
+    /// numbers them on from there. Besides each [`Progress::Output`], it
+    /// gives [`Progress::Save`] lines and [`Progress::Through`]. Pass each
+    /// one to [`Bookmark::record`], and save the bookmark, before you read
+    /// the next. After a restart, call `run_from` again with the bookmark
+    /// you saved and the input items after its position.
+    ///
+    /// `Through(n)` says every input item through `n` is fully done: every
+    /// act it caused finished, every output it caused was handed out, and
+    /// no stage holds anything made from it. A stage that holds items, such
+    /// as `collect`, keeps the position before them. The bookmark keeps
+    /// only the lines of the items past the position, so it stays as small
+    /// as the work in flight.
+    ///
+    /// The items past the position replay from their lines, as in
+    /// [`Pipe::run_saved`]: an act with a saved result is not called again,
+    /// and an output already handed out is not handed out again. If the run
+    /// stops after an output and before you saved the line after it, that
+    /// output comes again.
+    ///
+    /// A vine that cannot replay in one order, or that keeps a count or a
+    /// batch across items in a way a restart cannot rebuild, is refused: the
+    /// run gives one [`RunError::NotResumable`] and ends.
+    /// [`Pipe::resumable_from_position`] says so before you run it.
+    pub fn run_from<S>(
+        &self,
+        input: S,
+        bookmark: Bookmark,
+    ) -> BoxStream<'static, Result<Progress, RunError>>
+    where
+        S: Stream<Item = Value> + Send + 'static,
+    {
+        if let Some(why) = self.unresumable.as_ref().or(self.unpositioned.as_ref()) {
+            return stream::once(ready(Err(self.refused(why)))).boxed();
+        }
+        match Book::from_bookmark(&bookmark) {
+            Ok(book) => self.drive(input, Saving::Position(book, bookmark.position())),
             Err(problem) => stream::once(ready(Err(RunError::ReplayMisfit { problem }))).boxed(),
         }
     }
@@ -612,9 +715,9 @@ impl Pipe {
     fn flow(&self, items: Items, cx: Cx) -> Items {
         let shape = self.input.clone();
         let checked = items.map(move |flow| match flow {
-            Ok(Flowing::Value(v)) => match shape.check(&v) {
-                Ok(()) => Ok(Flowing::Value(v)),
-                Err(p) => Err(fatal(RunError::InputMisfit(p))),
+            Ok(Flowing::Value(v, tag)) => match shape.check(&v) {
+                Ok(()) => Ok(Flowing::Value(v, tag)),
+                Err(p) => Err(fatal(RunError::InputMisfit(p)).of(&tag)),
             },
             other => other,
         });

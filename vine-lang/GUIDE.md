@@ -36,6 +36,12 @@ The stages are in `src/pipe.rs`. Worked examples are in `vines/pipe/`.
 
 **Run a vine that holds long work with `run_saved`, and save every entry it hands you.** Save each entry in order, before you read the next event. After a restart, run the vine again with the same input and the journal you saved. Acts that finished are not run again. A stream act is asked to go on from where it was, so it must start the work the first time and attach to it after that. Outputs you were already handed are not handed out again, as long as you saved the entry that came after each one.
 
+**Run a vine over an endless stream with `run_from`, and keep the bookmark it builds.** A vine that reads events for months must not replay from the first event after a restart. `run_from` tells you when every event through a number is fully done: its acts finished, its outputs were handed out, and no stage holds it. Pass every event it gives you to `Bookmark::record` and save the bookmark before you read the next. After a restart, feed the events after `bookmark.position()` with the bookmark you saved. The bookmark holds only the lines of events still in flight, so it stays small. See `vines/pipe/event_relay.yaml`, `event_backup.yaml` and `event_pages.yaml`.
+
+**Pick the mode by whether the run ends.** One job, one plan launch: `run_saved` and a journal. A stream of events with no end: `run_from` and a bookmark. They save the same entries. A bookmark's lines also say which input item each belongs to, and the position is where the caller may cut.
+
+**Expect `collect` to hold the position back.** The events in a half full batch are not done, so the position stays before them, and after a restart they are fed again. A batch ties its events together: the position moves by whole batches, even when a `fork` sends each event on down the main pipe too.
+
 **Start long work and move on when it does not report as it goes.** If the work gives no stream to attach to, start it with one act, emit `started`, and let a second vine pick up when it ends. `job_launch` and `job_session_ended` are that pair.
 
 **Use `fork` to do more than one thing with each item.** Each item goes down every side pipe, then on down the main pipe. A side pipe sees the whole stream, so `collect` and `last` work in it. Write `filter: $item.line` first in a side pipe that should skip a stream act's end item.
@@ -85,6 +91,16 @@ The stages are in `src/pipe.rs`. Worked examples are in `vines/pipe/`.
 
 **Don't use `run_saved` on a vine that cannot replay in one order.** A replay calls the acts in the same order as the first run. `each` that merges, switches or exhausts, and `timeout`, break that, so `run_saved` refuses such a vine. Resume the same vine with the same input: the journal is keyed by where each act stands in the pipe.
 
+**Don't use `run_from` on a vine that counts the whole stream.** A `take` over the whole stream would count from nothing again after a restart. A vine that ends itself has an end: run it with `run_saved`. `take` inside `each`, or before a covering stage, counts one item's own stream and is fine.
+
+**Don't batch pieces of events across the whole stream with `run_from`.** A `collect` after `split`, a stream act, `each`, `use` or `branch` at the top of the pipe could end a batch partway through one event, and the position could never pass it. Batch whole events, or batch inside `each` where the batch belongs to one event.
+
+**Don't expect a restart to get past a failure nothing catches.** The position stays before the event that failed, and its saved failure replays: the run stops at the same place every time. Add a `catch` to the vine and run it again from the same bookmark. The act keeps its path, so the saved failure is handled without asking the act again. Dropping the event's lines asks the act again instead.
+
+**Don't feed `run_from` anything but the events after the position, in the order you fed them before.** A saved act whose input does not match is a run error. A bookmark whose keys happen to fit another vine is not caught.
+
+**Don't let one event's stream act run for months under `run_from`.** Its lines stay in the bookmark until the event is done. The bookmark is bounded by the work in flight, and one endless stream act is endless work in flight.
+
 **Don't emit from `finalize`.** It is for cleanup. The checker refuses it.
 
 **Don't `retry` an act that is not safe to repeat.** A retry runs every covered stage again from the item as it arrived.
@@ -107,6 +123,7 @@ The stages are in `src/pipe.rs`. Worked examples are in `vines/pipe/`.
 - `collect` with a size of 0.
 - `last` or `collect` where they could only ever see one item.
 - `tap` on a stream act, a stream act inside `together`, and `end` on an act that is not a stream act.
+- For `run_from`, besides what `run_saved` refuses: `take` over the whole stream, and `collect` over the whole stream after a stage that makes many items from one. `Pipe::resumable_from_position` says so, and `run_from` gives `NotResumable` with the reason and the stage's path.
 
 ## What it does not catch
 
@@ -118,8 +135,9 @@ The stages are in `src/pipe.rs`. Worked examples are in `vines/pipe/`.
 
 ## Not built yet
 
-- Resuming a vine with `each` that merges, switches or exhausts, or with `timeout`.
-- Making a journal smaller. It only grows: every line an agent writes is in it.
+- Resuming a vine with `each` that merges, switches or exhausts, or with `timeout`, in either mode.
+- Making a journal smaller. It only grows: every line an agent writes is in it. Under `run_from` a bookmark shrinks as the position moves, but the lines of one event still in flight only grow.
+- A position for a stage that keeps a count or a running total across events. Such state needs to be saved itself, as the older runner's `Memory::Kept` did.
 - Telling a stream act that the run stopped reading. Dropping a run, or a `catch` that drops the rest of an item's work, leaves the stream act's work going.
 - `retry` waits again on replay, even when the attempts it waits for are saved.
 - Waiting stages such as `debounce`, and `take_until` to stop work when a cancel arrives.

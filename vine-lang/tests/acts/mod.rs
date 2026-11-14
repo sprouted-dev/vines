@@ -5,6 +5,8 @@
 #![allow(dead_code)]
 
 pub mod agent;
+pub mod feed;
+pub mod restart;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};

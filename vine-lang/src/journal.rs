@@ -1,20 +1,34 @@
 //! What a resumable run asks its caller to save, and gets back after a
 //! restart.
 //!
-//! [`Pipe::run_saved`](crate::Pipe::run_saved) gives a stream of
-//! [`Event`]s. An [`Event::Output`] is something the vine emitted. An
-//! [`Event::Save`] is one [`Entry`] the caller appends to its store. The
-//! library stores nothing. To resume, the caller builds a [`Journal`] from
-//! what it stored and runs the vine again over the same input items.
+//! There are two ways to survive a restart, and they share one save format.
 //!
-//! The journal is plain data. [`Entry::to_json`] and [`Journal::from_json`]
-//! turn it into JSON and back.
+//! - A run that ends, such as one job, uses
+//!   [`Pipe::run_saved`](crate::Pipe::run_saved). It gives a stream of
+//!   [`Event`]s. An [`Event::Output`] is something the vine emitted. An
+//!   [`Event::Save`] is one [`Entry`] the caller appends to its store. To
+//!   resume, the caller builds a [`Journal`] from what it stored and runs
+//!   the vine again over the same input items, from the first.
+//! - A run over an endless stream uses
+//!   [`Pipe::run_from`](crate::Pipe::run_from). It gives [`Progress`]: the
+//!   same outputs, the same entries as [`Line`]s that name the input item
+//!   they belong to, and [`Progress::Through`], which says every input item
+//!   through a number is fully done. The caller keeps a [`Bookmark`]: the
+//!   position and the lines past it. To resume, it feeds input from the
+//!   item after the position, with the bookmark.
+//!
+//! The library stores nothing. Both are plain data: [`Entry::to_json`],
+//! [`Journal::from_json`] and [`Bookmark::from_json`] turn them into JSON
+//! and back.
 //!
 //! # What an entry means
 //!
 //! Each act a run calls has a key: the path of its stage and a count of how
-//! many times that stage ran before in the run, such as `pipe[1]#0`. A
-//! replay calls the stages in the same order, so the keys line up.
+//! many times that stage ran before, such as `pipe[1]#0`. In a journal the
+//! count runs over the whole run. In a bookmark it runs over the work of
+//! one input item, so the keys of item 7 are the same whether the run
+//! started at item 1 or at item 5. A replay calls the stages in the same
+//! order, so the keys line up.
 //!
 //! - [`Entry::Done`] and [`Entry::Failed`]: an act gave this result or
 //!   failed this way. On replay the act is not called. Its saved result is
@@ -26,6 +40,24 @@
 //!   number of items saved, and the run carries on from there.
 //! - [`Entry::Emitted`]: the caller was handed this output. On replay the
 //!   same output is made again and not handed out twice.
+//!
+//! # Which input item a line belongs to
+//!
+//! Input items are numbered from 1, counted from the first item ever. A
+//! line belongs to the input item the act's value came from. A value made
+//! from several items, such as a batch from `collect`, belongs to the last
+//! of them. A batch ties its items together: the position never stops
+//! between them, so a restart feeds the whole batch again.
+//!
+//! # The cut line
+//!
+//! [`Progress::Through`] with `n` means nothing in the run still holds
+//! anything derived from items 1 to `n`: every act they caused has
+//! finished, every output they caused was handed out, and no stage holds
+//! them. Their lines will never be read again. [`Bookmark::record`] drops
+//! them. A bookmark that still has some, because the caller saved the
+//! position and crashed before it dropped them, is fine: a run ignores
+//! lines at or before the position.
 
 use serde_json::{json, Value};
 
@@ -207,5 +239,143 @@ impl FromIterator<Entry> for Journal {
         Journal {
             entries: iter.into_iter().collect(),
         }
+    }
+}
+
+/// What a run over an endless stream gives its caller. See the module docs.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Progress {
+    /// The vine emitted this.
+    Output(Output),
+    /// Keep this line until the position passes its input item.
+    Save(Line),
+    /// Every input item through this number is fully done. Keep it as the
+    /// position, and drop every line at or before it.
+    Through(u64),
+}
+
+/// One entry of a run over an endless stream, with the input item it
+/// belongs to.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Line {
+    /// The input item, counted from 1.
+    pub item: u64,
+    pub entry: Entry,
+}
+
+impl Line {
+    /// The line as plain JSON: the entry's JSON with `item` added.
+    pub fn to_json(&self) -> Value {
+        let mut v = self.entry.to_json();
+        v["item"] = json!(self.item);
+        v
+    }
+
+    /// Read a line written by [`Line::to_json`].
+    pub fn from_json(v: &Value) -> Result<Line, String> {
+        let Some(map) = v.as_object() else {
+            return Err("a line is a map".into());
+        };
+        let Some(item) = map.get("item").and_then(Value::as_u64) else {
+            return Err("a line needs `item`, a whole number".into());
+        };
+        if item == 0 {
+            return Err("input items are counted from 1".into());
+        }
+        let mut rest = map.clone();
+        rest.remove("item");
+        let entry = Entry::from_json(&Value::Object(rest))?;
+        Ok(Line { item, entry })
+    }
+}
+
+/// What the caller of [`Pipe::run_from`](crate::Pipe::run_from) keeps: the
+/// position, and the lines of the input items past it. It is bounded by
+/// the work in flight, not by the length of the stream.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct Bookmark {
+    position: u64,
+    lines: Vec<Line>,
+}
+
+impl Bookmark {
+    /// A fresh start: nothing done, nothing saved.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Every input item through `position` is done, and nothing else is
+    /// saved. A run from here does again whatever was in flight past the
+    /// position: acts are called again and outputs handed out again.
+    pub fn at(position: u64) -> Self {
+        Bookmark {
+            position,
+            lines: Vec::new(),
+        }
+    }
+
+    /// Every input item through this number is done. Feed input from the
+    /// item after it.
+    pub fn position(&self) -> u64 {
+        self.position
+    }
+
+    pub fn lines(&self) -> &[Line] {
+        &self.lines
+    }
+
+    /// How many lines are kept.
+    pub fn len(&self) -> usize {
+        self.lines.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.lines.is_empty()
+    }
+
+    /// Keep what the run handed out: append a line, or move the position
+    /// and drop the lines it passed. An output changes nothing.
+    pub fn record(&mut self, progress: &Progress) {
+        match progress {
+            Progress::Output(_) => {}
+            Progress::Save(line) => self.lines.push(line.clone()),
+            Progress::Through(n) => {
+                self.position = *n;
+                self.lines.retain(|line| line.item > *n);
+            }
+        }
+    }
+
+    /// The bookmark as `{ "position": n, "lines": [..] }`.
+    pub fn to_json(&self) -> Value {
+        json!({
+            "position": self.position,
+            "lines": self.lines.iter().map(Line::to_json).collect::<Vec<_>>(),
+        })
+    }
+
+    /// Read a bookmark written by [`Bookmark::to_json`].
+    pub fn from_json(v: &Value) -> Result<Bookmark, String> {
+        let Some(map) = v.as_object() else {
+            return Err("a bookmark is a map".into());
+        };
+        if let Some(extra) = map
+            .keys()
+            .find(|k| !["position", "lines"].contains(&k.as_str()))
+        {
+            return Err(format!("a bookmark has no field `{extra}`"));
+        }
+        let Some(position) = map.get("position").and_then(Value::as_u64) else {
+            return Err("a bookmark needs `position`, a whole number".into());
+        };
+        let Some(list) = map.get("lines").and_then(Value::as_array) else {
+            return Err("a bookmark needs `lines`, a list".into());
+        };
+        let lines = list
+            .iter()
+            .enumerate()
+            .map(|(i, l)| Line::from_json(l).map_err(|p| format!("line {i}: {p}")))
+            .collect::<Result<_, _>>()?;
+        Ok(Bookmark { position, lines })
     }
 }
