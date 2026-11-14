@@ -4,6 +4,11 @@
 #
 # The item carries what the vine has learned so far. `into: tree` keeps
 # the item and adds the working copy to it, so later stages can use it.
+#
+# Starting an agent can hang. The `timeout` covers the three acts before
+# it and fails the launch with the code `timeout` after a minute. A saved
+# run saves that decision, so after a restart a launch that timed out
+# times out again at once and starts no agent.
 vine: job_launch
 input: { job: id, plan_branch: text, brief: text }
 outputs:
@@ -18,17 +23,23 @@ pipe:
   - call: agent.start
     with: { dir: $item.tree.path, brief: $item.brief }
     into: session
+  - timeout: 60s
   - emit:
       to: started
       with: { job: $item.job, session: $item.session.id, tree: $item.tree.path }
   - catch:
       # The item is as it was when the stage failed. If the agent failed
       # to start, the working copy exists and nothing will ever report
-      # the agent's end, so remove it here.
+      # the agent's end, so remove it here. A timeout gives the item as
+      # it reached the stages it covers, with no `tree`, so remove the
+      # working copy by the job's name.
       - branch:
           on: $item.error.from
           cases:
             agent.start:
               - tap: git.worktree_remove
                 with: { path: $item.tree.path }
+            timeout:
+              - tap: git.worktree_remove
+                with: { name: $item.job }
       - emit: { to: failed, with: { job: $item.job, reason: $item.error.message } }

@@ -115,9 +115,22 @@ impl World {
         self.state.lock().unwrap().slow.insert(act.into(), takes);
     }
 
-    /// Wait as long as the named act takes.
-    async fn take_time(&self, act: &str) {
-        let takes = self.state.lock().unwrap().slow.get(act).copied();
+    /// Make the named act take this long when it acts on `detail`, such
+    /// as `agent.start` in `/trees/j-2`, whatever [`World::slow`] says.
+    pub fn slow_for(&self, act: &str, detail: &str, takes: std::time::Duration) {
+        let key = format!("{act} {detail}");
+        self.state.lock().unwrap().slow.insert(key, takes);
+    }
+
+    /// Wait as long as the named act takes on `detail`.
+    async fn take_time(&self, act: &str, detail: &str) {
+        let takes = {
+            let s = self.state.lock().unwrap();
+            s.slow
+                .get(&format!("{act} {detail}"))
+                .or_else(|| s.slow.get(act))
+                .copied()
+        };
         if let Some(takes) = takes {
             tokio::time::sleep(takes).await;
         }
@@ -278,7 +291,7 @@ pub fn registry(world: &Arc<World>) -> Registry {
             let w = w.clone();
             async move {
                 let dir = text(&v, "dir");
-                w.take_time("agent.start").await;
+                w.take_time("agent.start", &dir).await;
                 w.run("agent.start", &dir)?;
                 Ok(json!({ "id": w.start_agent(&dir) }))
             }
@@ -425,7 +438,7 @@ pub fn with(mut base: Value, fields: Value) -> Value {
 
 /// `vines/pipe/job_launch.yaml`, built in Rust.
 pub fn job_launch_pipe() -> vine_lang::pipe::PipeDef {
-    use vine_lang::pipe::{branch, call, catch, emit_with, pipe, tap};
+    use vine_lang::pipe::{branch, call, catch, emit_with, pipe, tap, timeout};
     let job = || Shape::new().required("job", Ty::Id);
     pipe("job_launch")
         .input(
@@ -455,6 +468,7 @@ pub fn job_launch_pipe() -> vine_lang::pipe::PipeDef {
                 json!({ "dir": "$item.tree.path", "brief": "$item.brief" }),
             )
             .into("session"),
+            timeout(std::time::Duration::from_secs(60)),
             emit_with(
                 "started",
                 json!({ "job": "$item.job", "session": "$item.session.id", "tree": "$item.tree.path" }),
@@ -462,13 +476,22 @@ pub fn job_launch_pipe() -> vine_lang::pipe::PipeDef {
             catch([
                 branch(
                     "$item.error.from",
-                    [(
-                        "agent.start",
-                        [tap(
-                            "git.worktree_remove",
-                            json!({ "path": "$item.tree.path" }),
-                        )],
-                    )],
+                    [
+                        (
+                            "agent.start",
+                            [tap(
+                                "git.worktree_remove",
+                                json!({ "path": "$item.tree.path" }),
+                            )],
+                        ),
+                        (
+                            "timeout",
+                            [tap(
+                                "git.worktree_remove",
+                                json!({ "name": "$item.job" }),
+                            )],
+                        ),
+                    ],
                     None,
                 ),
                 emit_with(
