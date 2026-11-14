@@ -3,7 +3,7 @@
 
 use vine_lang::{json, Ty, Value};
 
-use super::{Gate, Lands, Move, Need, Pick, Reaction, Trellis, Trigger, VineSource};
+use super::{Gate, Lands, Move, Need, Pick, Reaction, Trellis, Trigger};
 
 /// The `launch` move on a job. Its `started` event moves the job on, so
 /// a second launch of it is refused by `state`.
@@ -152,9 +152,11 @@ pub fn undo_abandoned_launch() -> Reaction {
 
 /// A vine of `vines/pipe`, as YAML.
 #[cfg(feature = "yaml")]
-pub fn yaml(name: &str) -> VineSource {
+pub fn yaml(name: &str) -> super::VineSource {
     let path = format!("{}/vines/pipe/{name}.yaml", env!("CARGO_MANIFEST_DIR"));
-    VineSource::Yaml(std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {path}: {e}")))
+    super::VineSource::Yaml(
+        std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {path}: {e}")),
+    )
 }
 
 /// The jobs trellis: launching jobs one by one or a plan's at once,
