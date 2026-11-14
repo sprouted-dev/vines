@@ -5,6 +5,7 @@
 #![allow(dead_code)]
 
 pub mod agent;
+pub mod desk;
 pub mod feed;
 pub mod restart;
 

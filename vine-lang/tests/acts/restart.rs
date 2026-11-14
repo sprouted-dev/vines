@@ -3,7 +3,7 @@
 //! JSON each time.
 
 use futures::{stream, StreamExt};
-use vine_lang::{Bookmark, Event, Journal, Pipe, Progress, RunError, Value};
+use vine_lang::{Bookmark, Entry, Event, Journal, Pipe, Progress, RunError, Value};
 
 /// Everything a caller saw and kept over one or more runs.
 pub struct Caller {
@@ -12,6 +12,8 @@ pub struct Caller {
     pub outs: Vec<(String, Value)>,
     /// Every position the runs reported, in order.
     pub throughs: Vec<u64>,
+    /// Every item the runs reported done past the position, in order.
+    pub dones: Vec<u64>,
     /// The most lines the bookmark held at once.
     pub most: usize,
     /// The largest the saved bookmark was, in bytes of JSON.
@@ -38,6 +40,7 @@ impl From<Bookmark> for Caller {
             saved: bookmark.to_json(),
             outs: Vec::new(),
             throughs: Vec::new(),
+            dones: Vec::new(),
             most: 0,
             largest: 0,
         }
@@ -74,6 +77,7 @@ pub async fn run(vine: &Pipe, input: &[Value], caller: &mut Caller, kill: Option
         match &progress {
             Progress::Output(o) => caller.outs.push((o.name.clone(), o.payload.clone())),
             Progress::Through(n) => caller.throughs.push(*n),
+            Progress::Done(n) => caller.dones.push(*n),
             Progress::Save(_) => {}
         }
         bookmark.record(&progress);
@@ -90,6 +94,35 @@ pub async fn run(vine: &Pipe, input: &[Value], caller: &mut Caller, kill: Option
     End::Ended
 }
 
+/// Where an output handed out right before a kill comes again after the
+/// restart.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Repeat {
+    /// First: the run makes its outputs in one order.
+    First,
+    /// Somewhere after the restart: under an `each` that merges, other
+    /// items can hand out new outputs before the one whose line was lost
+    /// is made again.
+    Later,
+}
+
+/// Take the repeat of `outs[at]` out of what came after `mark`, where
+/// `repeat` says it comes.
+fn take_repeat(outs: &mut Vec<(String, Value)>, mark: usize, at: usize, repeat: Repeat) {
+    let again = match repeat {
+        Repeat::First => Some(mark).filter(|&m| outs.get(m) == outs.get(at)),
+        Repeat::Later => (mark..outs.len()).find(|&i| outs[i] == outs[at]),
+    };
+    let again = again.unwrap_or_else(|| {
+        panic!(
+            "the output {:?} handed out before the kill comes again {repeat:?}: {:?}",
+            outs[at],
+            &outs[mark..]
+        )
+    });
+    outs.remove(again);
+}
+
 /// Run with kills after each count of events in `kills`, then to the end.
 /// An output handed out right before a kill comes again first in the next
 /// run, since its line was never saved; that one repeat is checked and
@@ -100,6 +133,17 @@ pub async fn run_with_kills(
     caller: &mut Caller,
     kills: &[usize],
 ) -> usize {
+    run_with_kills_where(vine, input, caller, kills, Repeat::First).await
+}
+
+/// [`run_with_kills`], where the repeat comes where `repeat` says.
+pub async fn run_with_kills_where(
+    vine: impl Fn() -> Pipe,
+    input: &[Value],
+    caller: &mut Caller,
+    kills: &[usize],
+    repeat: Repeat,
+) -> usize {
     let mut repeats = 0;
     let mut repeat_of: Option<usize> = None;
     let plan = kills.iter().map(|&k| Some(k)).chain([None]);
@@ -107,12 +151,7 @@ pub async fn run_with_kills(
         let mark = caller.outs.len();
         let end = run(&vine(), input, caller, kill).await;
         if let Some(at) = repeat_of.take() {
-            assert_eq!(
-                caller.outs.get(mark),
-                caller.outs.get(at),
-                "the output handed out before the kill comes again first"
-            );
-            caller.outs.remove(mark);
+            take_repeat(&mut caller.outs, mark, at, repeat);
             repeats += 1;
         }
         match end {
@@ -155,6 +194,9 @@ pub struct Keeper {
     /// The journal, as a store would hold it.
     pub saved: Value,
     pub outs: Vec<(String, Value)>,
+    /// How many act results and failures the runs handed out and the
+    /// keeper saved, counted before the journal drops any.
+    pub results: usize,
     /// The most entries the journal held at once.
     pub most: usize,
     /// The largest the saved journal was, in bytes of JSON.
@@ -191,8 +233,10 @@ pub async fn run_saved(
             Ok(e) => e,
             Err(e) => return End::Failed(e),
         };
-        if let Event::Output(o) = &event {
-            keeper.outs.push((o.name.clone(), o.payload.clone()));
+        match &event {
+            Event::Output(o) => keeper.outs.push((o.name.clone(), o.payload.clone())),
+            Event::Save(Entry::Done { .. } | Entry::Failed { .. }) => keeper.results += 1,
+            Event::Save(_) => {}
         }
         journal.record(&event);
         keeper.saved = journal.to_json();
@@ -218,6 +262,17 @@ pub async fn run_saved_with_kills(
     keeper: &mut Keeper,
     kills: &[usize],
 ) -> usize {
+    run_saved_with_kills_where(vine, input, keeper, kills, Repeat::First).await
+}
+
+/// [`run_saved_with_kills`], where the repeat comes where `repeat` says.
+pub async fn run_saved_with_kills_where(
+    vine: impl Fn() -> Pipe,
+    input: &[Value],
+    keeper: &mut Keeper,
+    kills: &[usize],
+    repeat: Repeat,
+) -> usize {
     let mut repeats = 0;
     let mut repeat_of: Option<usize> = None;
     let plan = kills.iter().map(|&k| Some(k)).chain([None]);
@@ -225,12 +280,7 @@ pub async fn run_saved_with_kills(
         let mark = keeper.outs.len();
         let end = run_saved(&vine(), input, keeper, kill).await;
         if let Some(at) = repeat_of.take() {
-            assert_eq!(
-                keeper.outs.get(mark),
-                keeper.outs.get(at),
-                "the output handed out before the kill comes again first"
-            );
-            keeper.outs.remove(mark);
+            take_repeat(&mut keeper.outs, mark, at, repeat);
             repeats += 1;
         }
         match end {

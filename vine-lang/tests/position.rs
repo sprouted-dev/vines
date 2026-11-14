@@ -223,6 +223,9 @@ async fn the_position_waits_for_a_stream_act_to_end_and_never_passes_an_item_sti
                 o.payload["seq"]
             ),
             Progress::Through(n) => position = n,
+            Progress::Done(n) => {
+                panic!("item {n} finished out of order with no `each` that merges")
+            }
             Progress::Save(_) => {}
         }
     }
@@ -239,6 +242,7 @@ async fn no_output_is_handed_out_for_an_item_the_position_has_passed() {
             match progress.unwrap() {
                 Progress::Output(o) => assert!(item_of(&o.name, &o.payload) > position),
                 Progress::Through(n) => position = n,
+                Progress::Done(n) => panic!("item {n} finished out of order"),
                 Progress::Save(_) => {}
             }
         }
@@ -587,6 +591,7 @@ async fn a_bookmark_that_does_not_fit_the_vine_or_its_input_is_a_run_error() {
     // Another output was handed out for this item.
     let other = Entry::Emitted {
         output: "other".into(),
+        within: None,
     };
     let p = misfit(kept(0, vec![(1, other)]), events(1, 1)).await;
     assert!(p.contains("output `other`"), "{p}");
@@ -594,6 +599,7 @@ async fn a_bookmark_that_does_not_fit_the_vine_or_its_input_is_a_run_error() {
     // ends.
     let handed = || Entry::Emitted {
         output: "archived".into(),
+        within: None,
     };
     let p = misfit(kept(0, vec![(1, handed()), (1, handed())]), events(1, 1)).await;
     assert!(p.contains("1 more outputs"), "{p}");
@@ -629,6 +635,7 @@ fn a_bookmark_survives_json_and_one_that_is_not_one_is_refused() {
             8,
             Entry::Emitted {
                 output: "out".into(),
+                within: None,
             },
         )],
     );
@@ -671,6 +678,7 @@ fn recording_the_position_drops_the_lines_it_passed() {
             item,
             entry: Entry::Emitted {
                 output: "out".into(),
+                within: None,
             },
         })
     };
@@ -726,15 +734,15 @@ fn archive() -> Stage {
 async fn the_checker_refuses_a_vine_a_restart_from_a_position_cannot_rebuild() {
     let world = World::new();
     let mut reg = feed_registry(&world);
-    let merging = reg
+    let switching = reg
         .build_pipe(
-            pipe("merging")
+            pipe("switching")
                 .input(Shape::open())
                 .output("out", Shape::open())
-                .stages([each(Overlap::Merge, [emit("out")])]),
+                .stages([each(Overlap::Switch, [emit("out")])]),
         )
         .unwrap();
-    reg.add_vine(merging).unwrap();
+    reg.add_vine(switching).unwrap();
     let cases: Vec<(PipeDef, &str)> = vec![
         (
             events_vine([take(3), emit("out")]),
@@ -757,10 +765,6 @@ async fn the_checker_refuses_a_vine_a_restart_from_a_position_cannot_rebuild() {
             "pipe[1].fork[0][0] gathers batches over the whole stream after pipe[0]",
         ),
         (
-            events_vine([each(Overlap::Merge, [emit("out")])]),
-            "overlap `merge`",
-        ),
-        (
             events_vine([each(Overlap::Switch, [emit("out")])]),
             "overlap `switch`",
         ),
@@ -773,8 +777,8 @@ async fn the_checker_refuses_a_vine_a_restart_from_a_position_cannot_rebuild() {
             "is a `timeout`",
         ),
         (
-            events_vine([use_vine("merging", None).on("out", [emit("out")])]),
-            "uses vine `merging`",
+            events_vine([use_vine("switching", None).on("out", [emit("out")])]),
+            "uses vine `switching`",
         ),
     ];
     for (def, says) in cases {

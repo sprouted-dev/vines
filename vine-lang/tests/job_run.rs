@@ -57,7 +57,8 @@ async fn run(
                 }
             }
             Event::Save(entry) => {
-                let logged = matches!(&entry, Entry::Emitted { output } if output == "log_line");
+                let logged =
+                    matches!(&entry, Entry::Emitted { output, .. } if output == "log_line");
                 saved.push(entry.to_json());
                 if let Drop::AfterSaving(k) = drop {
                     if logged && log_lines(outs) == k {

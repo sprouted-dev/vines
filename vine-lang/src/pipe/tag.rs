@@ -1,4 +1,5 @@
-//! Which input items a value came from, and when an input item is done.
+//! Which input items a value came from, when an input item is done, and
+//! which group of work a value belongs to.
 //!
 //! In a run that saves its position, each input item gets a [`Tag`] when
 //! it goes in. Every value, output and failure derived from it carries a
@@ -16,6 +17,18 @@
 //! holds the tag of the value the act was given, so that value is not done
 //! while any item the act gave is in flight. When the call's ledger moves,
 //! it says so on [`Moves`], and the run saves how far the call got.
+//!
+//! # Groups
+//!
+//! In a saved run, each value that enters an `each` that merges starts a
+//! group: the work of that one value, numbered in the order the values
+//! enter. Its tag holds the tag of the value as it entered, and names the
+//! group in its scope, such as `pipe[1].each@3/`. The keys of acts run for
+//! the group, and the outputs made from it, start with that scope, so they
+//! line up after a restart in whatever order the groups finish. Values that
+//! leave the `each` keep the group's tag, so the stages after it key their
+//! acts by group too, until `last` picks one value out of many groups and
+//! [lifts](Tag::lifted) it back out.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::{Arc, Mutex};
@@ -23,31 +36,45 @@ use std::sync::{Arc, Mutex};
 use super::book::Key;
 use super::flow::lock;
 
-/// The input items a value came from. Empty in a run that does not save
-/// its position.
+/// The input items a value came from, and the group of work it belongs
+/// to. Empty in a run that saves nothing.
 #[derive(Clone, Default)]
 pub(super) struct Tag(Option<Arc<Hold>>);
 
 struct Hold {
+    /// For a value a ledger counts: which of its items it came from.
+    count: Option<Count>,
+    /// For a batch: the tags of the values in it. Empty for one item.
+    parts: Vec<Tag>,
+    /// For an item a stream act call gave, or a batch of them: the call.
+    call: Option<Arc<Key>>,
+    /// For the work of one value inside an `each` that merges: where that
+    /// `each` stands, with the scope of the vine it is in, such as
+    /// `pipe[1].each`.
+    group: Option<Arc<str>>,
+    /// Where the keys of acts run for this value start.
+    scope: Arc<str>,
+    /// The input item a line for this value belongs to.
+    item: u64,
+    /// The tag this one was made from: the value a stream act was given,
+    /// the value that started a group, or the value `last` lifted out of
+    /// its groups. It is held so that value is not done while this one is
+    /// in flight, and read only to find a group.
+    up: Tag,
+}
+
+struct Count {
     /// The first and last item this value came from, as `ledger` counts
     /// them: input items, or the items one stream act call gave.
     first: u64,
     last: u64,
     ledger: Arc<Mutex<Ledger>>,
-    /// For a batch: the tags of the values in it. Empty for one item.
-    parts: Vec<Tag>,
-    /// For an item a stream act call gave, or a batch of them: the call.
-    call: Option<Arc<Key>>,
-    /// For an item a stream act call gave: the tag of the value the call
-    /// was given. It is held, never read, so that value is not done while
-    /// this item is in flight.
-    _up: Tag,
 }
 
 impl Drop for Hold {
     fn drop(&mut self) {
-        if self.parts.is_empty() {
-            lock(&self.ledger).done(self.first);
+        if let (Some(count), true) = (&self.count, self.parts.is_empty()) {
+            lock(&count.ledger).done(count.first);
         }
     }
 }
@@ -56,12 +83,17 @@ impl Tag {
     /// The tag of input item `n`.
     pub(super) fn item(n: u64, ledger: &Arc<Mutex<Ledger>>) -> Tag {
         Tag(Some(Arc::new(Hold {
-            first: n,
-            last: n,
-            ledger: ledger.clone(),
+            count: Some(Count {
+                first: n,
+                last: n,
+                ledger: ledger.clone(),
+            }),
             parts: Vec::new(),
             call: None,
-            _up: Tag::default(),
+            group: None,
+            scope: "".into(),
+            item: n,
+            up: Tag::default(),
         })))
     }
 
@@ -70,40 +102,110 @@ impl Tag {
     /// given.
     pub(super) fn given(n: u64, ledger: &Arc<Mutex<Ledger>>, call: &Arc<Key>, up: &Tag) -> Tag {
         Tag(Some(Arc::new(Hold {
-            first: n,
-            last: n,
-            ledger: ledger.clone(),
+            count: Some(Count {
+                first: n,
+                last: n,
+                ledger: ledger.clone(),
+            }),
             parts: Vec::new(),
             call: Some(call.clone()),
-            _up: up.clone(),
+            group: None,
+            scope: format!("{}@{n}/", call.at).into(),
+            item: call.item,
+            up: up.clone(),
+        })))
+    }
+
+    /// The tag of group `n` of the `each` at `site`, started by the value
+    /// with tag `up`.
+    pub(super) fn group(site: &str, n: u64, up: &Tag) -> Tag {
+        Tag(Some(Arc::new(Hold {
+            count: None,
+            parts: Vec::new(),
+            call: None,
+            group: Some(site.into()),
+            scope: format!("{}{site}@{n}/", up.scope()).into(),
+            item: up.item_number(),
+            up: up.clone(),
         })))
     }
 
     /// The tag of a batch made of values with these tags. The items in it
     /// are done together: the position never stops between them. The
     /// batch is counted by the ledger of its last value. The checker keeps
-    /// the items of two stream act calls out of one batch.
+    /// the items of two stream act calls, and of two groups, out of one
+    /// batch.
     pub(super) fn batch(parts: Vec<Tag>) -> Tag {
         let Some(newest) = parts.iter().rev().find_map(|t| t.0.as_ref()) else {
             return Tag::default();
         };
-        let ledger = newest.ledger.clone();
-        let call = newest.call.clone();
-        let holds: Vec<&Arc<Hold>> = parts
-            .iter()
-            .filter_map(|t| t.0.as_ref())
-            .filter(|h| Arc::ptr_eq(&h.ledger, &ledger))
-            .collect();
-        let first = holds.iter().map(|h| h.first).min().unwrap_or(newest.first);
-        let last = holds.iter().map(|h| h.last).max().unwrap_or(newest.last);
-        lock(&ledger).join(first, last);
+        let counted = newest.counted();
+        let (count, call) = match counted {
+            Some((hold, count)) => {
+                let ledger = count.ledger.clone();
+                let spans: Vec<&Count> = parts
+                    .iter()
+                    .filter_map(|t| t.0.as_ref()?.counted())
+                    .map(|(_, c)| c)
+                    .filter(|c| Arc::ptr_eq(&c.ledger, &ledger))
+                    .collect();
+                let first = spans.iter().map(|c| c.first).min().unwrap_or(count.first);
+                let last = spans.iter().map(|c| c.last).max().unwrap_or(count.last);
+                lock(&ledger).join(first, last);
+                // A batch of a call's items belongs to the call, unless it
+                // was made inside a group within one of them.
+                let call = hold.call.clone().filter(|_| std::ptr::eq(hold, &**newest));
+                (
+                    Some(Count {
+                        first,
+                        last,
+                        ledger,
+                    }),
+                    call,
+                )
+            }
+            None => (None, None),
+        };
+        let (scope, item) = match (&call, &count) {
+            (Some(call), Some(count)) => (format!("{}@{}/", call.at, count.last).into(), call.item),
+            (None, Some(count)) if newest.scope.is_empty() => ("".into(), count.last),
+            _ => (newest.scope.clone(), newest.item),
+        };
         Tag(Some(Arc::new(Hold {
-            first,
-            last,
-            ledger,
+            count,
             parts,
             call,
-            _up: Tag::default(),
+            group: None,
+            scope,
+            item,
+            up: Tag::default(),
+        })))
+    }
+
+    /// This value, lifted out of every group started by an `each` whose
+    /// site starts with `within`: it keeps its hold on what it came from,
+    /// and its keys and outputs start where they did before the outermost
+    /// of those groups.
+    pub(super) fn lifted(&self, within: &str) -> Tag {
+        let mut outer: Option<Arc<str>> = None;
+        let mut at = self.0.as_ref();
+        while let Some(hold) = at {
+            if hold.group.as_deref().is_some_and(|s| s.starts_with(within)) {
+                outer = Some(hold.up.scope().into());
+            }
+            at = hold.up.0.as_ref();
+        }
+        let Some(scope) = outer else {
+            return self.clone();
+        };
+        Tag(Some(Arc::new(Hold {
+            count: None,
+            parts: Vec::new(),
+            call: None,
+            group: None,
+            scope,
+            item: self.item_number(),
+            up: self.clone(),
         })))
     }
 
@@ -117,31 +219,40 @@ impl Tag {
     /// The input item a journal line for this value belongs to: the last
     /// item it came from. 0 in a run that does not save its position.
     pub(super) fn item_number(&self) -> u64 {
-        match &self.0 {
-            None => 0,
-            Some(h) => match &h.call {
-                Some(call) => call.item,
-                None => h.last,
-            },
-        }
+        self.0.as_ref().map_or(0, |h| h.item)
     }
 
     /// Where the keys of acts run for this value start. Empty unless the
-    /// value came from an item a stream act gives again: then it is that
-    /// call's key and the item's number, such as `pipe[1]#0@7/`, so the
-    /// keys of item 7 are the same whichever item a restart begins at.
-    pub(super) fn scope(&self) -> String {
-        match self.stream() {
-            Some((call, n)) => format!("{}@{n}/", call.at),
-            None => String::new(),
-        }
+    /// value came from an item a stream act gives again, or from a group.
+    /// For item 7 of a call it is that call's key and the number, such as
+    /// `pipe[1]#0@7/`. For group 3 of an `each` it is where the `each`
+    /// stands and the number, such as `pipe[1].each@3/`. Scopes nest, so
+    /// the keys of a group or an item are the same whichever item a
+    /// restart begins at and whatever order the groups finish in.
+    pub(super) fn scope(&self) -> &str {
+        self.0.as_ref().map_or("", |h| &h.scope)
     }
 
     /// The stream act call this value came from, and the number of its
-    /// item, when the call gives its items again.
+    /// item, when the call gives its items again and no group stands
+    /// between the call's item and this value.
     pub(super) fn stream(&self) -> Option<(Arc<Key>, u64)> {
         let hold = self.0.as_ref()?;
-        Some((hold.call.clone()?, hold.last))
+        Some((hold.call.clone()?, hold.count.as_ref()?.last))
+    }
+}
+
+impl Hold {
+    /// The nearest hold that a ledger counts: this one, or the one it was
+    /// made from, through groups and lifts.
+    fn counted(&self) -> Option<(&Hold, &Count)> {
+        let mut at = self;
+        loop {
+            if let Some(count) = &at.count {
+                return Some((at, count));
+            }
+            at = at.up.0.as_deref()?;
+        }
     }
 }
 
@@ -169,15 +280,23 @@ pub(super) struct Ledger {
     joins: BTreeMap<u64, u64>,
     /// For the ledger of a stream act call: where to say it moved.
     notify: Option<Notify>,
+    /// For the ledger of input items: items done past the position that
+    /// the run has not told its caller about yet. An item in a run of
+    /// items done together is told only once the whole run is done.
+    finished: VecDeque<u64>,
 }
 
 impl Ledger {
-    /// A ledger for a run that resumes after `position`.
-    pub(super) fn after(position: u64) -> Ledger {
-        Ledger {
+    /// A ledger for a run that resumes after `position`, where the items
+    /// in `done` past it are done already.
+    pub(super) fn after(position: u64, done: impl IntoIterator<Item = u64>) -> Ledger {
+        let mut ledger = Ledger {
             position,
+            done: done.into_iter().filter(|&n| n > position).collect(),
             ..Ledger::default()
-        }
+        };
+        ledger.advance();
+        ledger
     }
 
     /// A ledger for the items the stream act call `call` gives, when the
@@ -195,13 +314,52 @@ impl Ledger {
         self.position
     }
 
+    /// Whether item `n` is done.
+    pub(super) fn is_done(&self, n: u64) -> bool {
+        n <= self.position || self.done.contains(&n)
+    }
+
+    /// The next item done past the position that the caller has not been
+    /// told about.
+    pub(super) fn next_finished(&mut self) -> Option<u64> {
+        while let Some(n) = self.finished.pop_front() {
+            if n > self.position {
+                return Some(n);
+            }
+        }
+        None
+    }
+
     fn done(&mut self, n: u64) {
-        if n > self.position {
-            let before = self.position;
-            self.done.insert(n);
-            self.advance();
-            if let Some(notify) = self.notify.as_ref().filter(|_| self.position > before) {
-                lock(&notify.moves).push_back((notify.call.clone(), self.position));
+        if n <= self.position {
+            return;
+        }
+        let before = self.position;
+        self.done.insert(n);
+        self.advance();
+        if let Some(notify) = self.notify.as_ref().filter(|_| self.position > before) {
+            lock(&notify.moves).push_back((notify.call.clone(), self.position));
+        }
+        if self.notify.is_none() && n > self.position {
+            self.tell_finished(n);
+        }
+    }
+
+    /// Item `n` is done past the position. Tell the caller, once the run
+    /// of items done together that holds it is done too.
+    fn tell_finished(&mut self, n: u64) {
+        let run = self
+            .joins
+            .range(..=n)
+            .next_back()
+            .filter(|(_, &last)| last >= n)
+            .map(|(&first, &last)| (first, last));
+        match run {
+            None => self.finished.push_back(n),
+            Some((first, last)) => {
+                if (first..=last).all(|k| self.done.contains(&k)) {
+                    self.finished.extend(first..=last);
+                }
             }
         }
     }
@@ -298,5 +456,44 @@ mod tests {
         l.done(6);
         assert_eq!(l.position(), 6);
         assert!(l.done.is_empty() && l.joins == BTreeMap::from([(9, 10)]));
+    }
+
+    #[test]
+    fn an_item_done_past_the_position_is_told_once_its_batch_is_done() {
+        let l = ledger();
+        let tags: Vec<Tag> = (1..=5).map(|n| Tag::item(n, &l)).collect();
+        let batch = Tag::batch(vec![tags[2].clone(), tags[3].clone()]);
+        let [one, two, three, four, five] = <[Tag; 5]>::try_from(tags).ok().unwrap();
+        drop(five);
+        drop(two);
+        drop(three);
+        drop(four);
+        assert_eq!(lock(&l).next_finished(), Some(5));
+        assert_eq!(lock(&l).next_finished(), Some(2));
+        // Items 3 and 4 are done together, and the batch still holds them.
+        assert_eq!(lock(&l).next_finished(), None);
+        drop(batch);
+        assert_eq!(lock(&l).next_finished(), Some(3));
+        assert_eq!(lock(&l).next_finished(), Some(4));
+        drop(one);
+        assert_eq!(lock(&l).position(), 5);
+        assert_eq!(lock(&l).next_finished(), None);
+    }
+
+    #[test]
+    fn a_group_holds_the_value_that_started_it_and_lifts_back_to_its_scope() {
+        let l = ledger();
+        let item = Tag::item(1, &l);
+        let group = Tag::group("pipe[1].each", 3, &item);
+        assert_eq!(group.scope(), "pipe[1].each@3/");
+        assert_eq!(group.item_number(), 1);
+        let inner = Tag::group("pipe[1].each.do[0].each", 0, &group);
+        assert_eq!(inner.scope(), "pipe[1].each@3/pipe[1].each.do[0].each@0/");
+        let lifted = inner.lifted("pipe[");
+        assert_eq!(lifted.scope(), "");
+        drop((item, group, inner));
+        assert_eq!(lock(&l).position(), 0, "the lifted value holds item 1");
+        drop(lifted);
+        assert_eq!(lock(&l).position(), 1);
     }
 }

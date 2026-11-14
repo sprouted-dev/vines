@@ -39,7 +39,10 @@
 //!   [`OpContext::resume_from`](crate::OpContext::resume_from) set to the
 //!   number of items saved, and the run carries on from there.
 //! - [`Entry::Emitted`]: the caller was handed this output. On replay the
-//!   same output is made again and not handed out twice.
+//!   same output is made again and not handed out twice. The outputs of
+//!   one group of work are matched in order, so an output made in a group
+//!   of an `each` that merges names its group, and the groups need not
+//!   finish in the same order again.
 //! - [`Entry::Through`] and [`Entry::Stopped`]: for a stream act that gives
 //!   its items again, how far a call got, how many outputs made from the
 //!   items after that were handed out, and how it stopped. They take the
@@ -56,6 +59,18 @@
 //! before it for the same call, and drops every entry whose key belongs to
 //! an item of that call it passed: the keys of item 7 of `pipe[1]#0` start
 //! `pipe[1]#0@7/`. [`Journal::push`] appends and drops nothing.
+//!
+//! # Groups of work
+//!
+//! An `each` that merges runs its values side by side, so their acts and
+//! outputs can interleave in another order after a restart. In a saved
+//! run each value that enters it starts a group, numbered in the order the
+//! values enter, and the keys of the acts run for it start with the
+//! group's scope, such as `pipe[1].each@3/pipe[1].each.do[0]#0`. Its
+//! outputs are saved with `within` set to the scope, such as
+//! `pipe[1].each@3/`. A replay matches each group's own acts and outputs in
+//! that group's own order. A vine with no such `each` saves exactly the
+//! lines it did before groups existed.
 //!
 //! # Which input item a line belongs to
 //!
@@ -74,6 +89,16 @@
 //! them. A bookmark that still has some, because the caller saved the
 //! position and crashed before it dropped them, is fine: a run ignores
 //! lines at or before the position.
+//!
+//! Items can finish out of order under an `each` that merges: item 5 can
+//! be done while item 3 is still running. [`Progress::Done`] with 5 says
+//! so. The position stays at 2, and [`Bookmark::record`] keeps 5 as done
+//! and drops its lines. After a restart the caller feeds items from 3 on,
+//! as always, and the run skips item 5 without running it again. So what
+//! a bookmark keeps is the lines of the items still in flight, plus the
+//! numbers of the items done past the position, kept as runs of numbers.
+
+use std::collections::BTreeMap;
 
 use serde_json::{json, Value};
 
@@ -111,8 +136,15 @@ pub enum Entry {
     Item { at: String, value: Value },
     /// The stream act at `at` ended with `value`.
     Ended { at: String, value: Value },
-    /// The caller was handed one output with this name.
-    Emitted { output: String },
+    /// The caller was handed one output with this name. `within` names
+    /// the group of work it was made in, such as `pipe[1].each@3/`, when
+    /// it was made in a group of an `each` that merges. A replay matches
+    /// the outputs of one group in order, whatever order the groups
+    /// finish in.
+    Emitted {
+        output: String,
+        within: Option<String>,
+    },
     /// For a stream act that gives its items again: every item it gave
     /// through number `items` is fully done, and `handed` outputs made
     /// from the items after them were handed out. A later `Through` for
@@ -153,7 +185,10 @@ impl Entry {
             Entry::Started { at, input } => json!({ "kind": "started", "at": at, "input": input }),
             Entry::Item { at, value } => json!({ "kind": "item", "at": at, "value": value }),
             Entry::Ended { at, value } => json!({ "kind": "ended", "at": at, "value": value }),
-            Entry::Emitted { output } => json!({ "kind": "emitted", "output": output }),
+            Entry::Emitted { output, within } => match within {
+                None => json!({ "kind": "emitted", "output": output }),
+                Some(within) => json!({ "kind": "emitted", "output": output, "within": within }),
+            },
             Entry::Through { at, items, handed } => {
                 json!({ "kind": "through", "at": at, "items": items, "handed": handed })
             }
@@ -193,7 +228,8 @@ impl Entry {
 
     /// Whether `through`, an [`Entry::Through`], makes this entry useless:
     /// it is an earlier `Through` for the same stream act, or it belongs to
-    /// an item of that stream that is now done.
+    /// an item of that stream that is now done. An output made in a group
+    /// belongs to the item its group's scope names.
     fn passed_by(&self, through: &Entry) -> bool {
         let Entry::Through {
             at: call, items, ..
@@ -203,6 +239,10 @@ impl Entry {
         };
         match self {
             Entry::Through { at, .. } if at == call => true,
+            Entry::Emitted {
+                within: Some(within),
+                ..
+            } => item_of_stream(within, call).is_some_and(|n| n <= *items),
             _ => self
                 .at()
                 .and_then(|at| item_of_stream(at, call))
@@ -258,6 +298,10 @@ impl Entry {
             },
             "emitted" => Entry::Emitted {
                 output: text("output")?,
+                within: match map.get("within") {
+                    None => None,
+                    Some(_) => Some(text("within")?),
+                },
             },
             "through" => Entry::Through {
                 at: text("at")?,
@@ -284,7 +328,8 @@ impl Entry {
             Entry::Failed { .. } => &["kind", "at", "input", "code", "message"],
             Entry::Started { .. } => &["kind", "at", "input"],
             Entry::Item { .. } | Entry::Ended { .. } => &["kind", "at", "value"],
-            Entry::Emitted { .. } => &["kind", "output"],
+            Entry::Emitted { within: None, .. } => &["kind", "output"],
+            Entry::Emitted { .. } => &["kind", "output", "within"],
             Entry::Through { .. } => &["kind", "at", "items", "handed"],
             Entry::Stopped { how, .. } => match how {
                 Ending::Ended(_) => &["kind", "at", "items", "how", "value"],
@@ -393,6 +438,10 @@ pub enum Progress {
     /// Every input item through this number is fully done. Keep it as the
     /// position, and drop every line at or before it.
     Through(u64),
+    /// This input item, past the position, is fully done while an item
+    /// before it is not. Keep it as done, and drop its lines. Only an
+    /// `each` that merges finishes items out of order.
+    Done(u64),
 }
 
 /// One entry of a run over an endless stream, with the input item it
@@ -431,12 +480,15 @@ impl Line {
 }
 
 /// What the caller of [`Pipe::run_from`](crate::Pipe::run_from) keeps: the
-/// position, and the lines of the input items past it. It is bounded by
-/// the work in flight, not by the length of the stream.
+/// position, the lines of the input items past it, and which items past
+/// it are done already. It is bounded by the work in flight, not by the
+/// length of the stream.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Bookmark {
     position: u64,
     lines: Vec<Line>,
+    /// Items done past the position, as runs of numbers: first to last.
+    done: BTreeMap<u64, u64>,
 }
 
 impl Bookmark {
@@ -451,7 +503,7 @@ impl Bookmark {
     pub fn at(position: u64) -> Self {
         Bookmark {
             position,
-            lines: Vec::new(),
+            ..Bookmark::default()
         }
     }
 
@@ -463,6 +515,44 @@ impl Bookmark {
 
     pub fn lines(&self) -> &[Line] {
         &self.lines
+    }
+
+    /// The items past the position that are done already, in order. A run
+    /// from this bookmark skips them.
+    pub fn done(&self) -> impl Iterator<Item = u64> + '_ {
+        self.done.iter().flat_map(|(&first, &last)| first..=last)
+    }
+
+    /// Whether item `n` is done: at or before the position, or past it and
+    /// done already.
+    pub fn is_done(&self, n: u64) -> bool {
+        n <= self.position
+            || self
+                .done
+                .range(..=n)
+                .next_back()
+                .is_some_and(|(_, &last)| last >= n)
+    }
+
+    /// Keep items `first` to `last` as done, joined to the runs of numbers
+    /// they touch.
+    fn mark_done(&mut self, first: u64, last: u64) {
+        let (mut first, mut last) = (first.max(self.position + 1), last);
+        if first > last {
+            return;
+        }
+        let touching: Vec<(u64, u64)> = self
+            .done
+            .range(..=last.saturating_add(1))
+            .filter(|(_, &l)| l.saturating_add(1) >= first)
+            .map(|(&f, &l)| (f, l))
+            .collect();
+        for (f, l) in touching {
+            self.done.remove(&f);
+            first = first.min(f);
+            last = last.max(l);
+        }
+        self.done.insert(first, last);
     }
 
     /// How many lines are kept.
@@ -477,11 +567,18 @@ impl Bookmark {
     /// Keep what the run handed out: append a line, or move the position
     /// and drop the lines it passed. A line with an [`Entry::Through`]
     /// replaces the one before it for the same stream act, and drops the
-    /// lines of the items of that stream it passed. An output changes
+    /// lines of the items of that stream it passed. [`Progress::Done`]
+    /// keeps the item as done and drops its lines. An output changes
     /// nothing.
     pub fn record(&mut self, progress: &Progress) {
         match progress {
             Progress::Output(_) => {}
+            Progress::Done(n) => {
+                if *n > self.position {
+                    self.mark_done(*n, *n);
+                    self.lines.retain(|line| line.item != *n);
+                }
+            }
             Progress::Save(line) => {
                 if matches!(line.entry, Entry::Through { .. }) {
                     self.lines.retain(|kept| {
@@ -493,16 +590,29 @@ impl Bookmark {
             Progress::Through(n) => {
                 self.position = *n;
                 self.lines.retain(|line| line.item > *n);
+                let passed: Vec<(u64, u64)> =
+                    self.done.range(..=*n).map(|(&f, &l)| (f, l)).collect();
+                for (first, last) in passed {
+                    self.done.remove(&first);
+                    if last > *n {
+                        self.done.insert(*n + 1, last);
+                    }
+                }
             }
         }
     }
 
-    /// The bookmark as `{ "position": n, "lines": [..] }`.
+    /// The bookmark as `{ "position": n, "lines": [..] }`, with
+    /// `"done": [[first, last], ..]` when items past the position are done.
     pub fn to_json(&self) -> Value {
-        json!({
+        let mut v = json!({
             "position": self.position,
             "lines": self.lines.iter().map(Line::to_json).collect::<Vec<_>>(),
-        })
+        });
+        if !self.done.is_empty() {
+            v["done"] = self.done.iter().map(|(f, l)| json!([f, l])).collect();
+        }
+        v
     }
 
     /// Read a bookmark written by [`Bookmark::to_json`].
@@ -512,7 +622,7 @@ impl Bookmark {
         };
         if let Some(extra) = map
             .keys()
-            .find(|k| !["position", "lines"].contains(&k.as_str()))
+            .find(|k| !["position", "lines", "done"].contains(&k.as_str()))
         {
             return Err(format!("a bookmark has no field `{extra}`"));
         }
@@ -527,6 +637,34 @@ impl Bookmark {
             .enumerate()
             .map(|(i, l)| Line::from_json(l).map_err(|p| format!("line {i}: {p}")))
             .collect::<Result<_, _>>()?;
-        Ok(Bookmark { position, lines })
+        let mut bookmark = Bookmark {
+            position,
+            lines,
+            done: BTreeMap::new(),
+        };
+        let runs = match map.get("done") {
+            None => &[][..],
+            Some(v) => v
+                .as_array()
+                .ok_or("a bookmark's `done` is a list of runs")?,
+        };
+        for (i, run) in runs.iter().enumerate() {
+            let pair = run.as_array().map(|p| (p.len(), p.first(), p.get(1)));
+            let (Some(first), Some(last)) = (
+                pair.and_then(|(_, f, _)| f?.as_u64()),
+                pair.and_then(|(len, _, l)| if len == 2 { l?.as_u64() } else { None }),
+            ) else {
+                return Err(format!(
+                    "done run {i}: a run is [first, last], whole numbers"
+                ));
+            };
+            if first > last || first <= position {
+                return Err(format!(
+                    "done run {i}: a run lies past the position, first to last"
+                ));
+            }
+            bookmark.mark_done(first, last);
+        }
+        Ok(bookmark)
     }
 }

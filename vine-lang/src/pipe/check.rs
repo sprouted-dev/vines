@@ -15,6 +15,7 @@ use super::flow::{
     one, per_item, per_item_stream, rescued, tidied, Fault, Flow, Flowing, Items, OpFault,
     Transform,
 };
+use super::order::{merges_anywhere, View};
 use super::unit::{add_field, Runner, Unit};
 use super::{Keep, Overlap, Pipe, PipeDef, Stage};
 use crate::error::{LoadError, RunError};
@@ -92,7 +93,7 @@ pub(crate) fn assemble(reg: &Registry, def: PipeDef) -> Result<Pipe, LoadError> 
         "pipe",
         Some(def.input.clone()),
         false,
-        Stream::Whole,
+        View::whole(),
         Vec::new(),
     )?;
     if !emits(&def.stages) {
@@ -101,7 +102,9 @@ pub(crate) fn assemble(reg: &Registry, def: PipeDef) -> Result<Pipe, LoadError> 
         });
     }
     let settled = cx.sites.settle();
+    let merges = merges_anywhere(reg, &def.stages);
     Ok(Pipe {
+        merges,
         name: def.name,
         input: def.input,
         outputs: cx.outputs,
@@ -195,17 +198,18 @@ pub(super) fn emits_anywhere(stages: &[Stage]) -> bool {
 impl Checker<'_> {
     /// Check a pipe and build it. `single` says the stream reaching it is
     /// one item, as inside `each`, `branch`, `catch`, `finalize` and the
-    /// arms of `use`. `stream` says whether it sees the whole input stream,
-    /// which matters for a run from a saved position. `feeds` are the
-    /// stream act calls whose items reach its start: a fork's side pipe
-    /// sees what reaches the fork.
+    /// arms of `use`. `view` says what it sees of the stream: the whole
+    /// input stream or one item's work, which matters for a run from a
+    /// saved position, and the order values reach it in, which matters for
+    /// a replay. `feeds` are the stream act calls whose items reach its
+    /// start: a fork's side pipe sees what reaches the fork.
     fn pipe(
         &mut self,
         stages: &[Stage],
         path: &str,
         mut known: Known,
         single: bool,
-        stream: Stream,
+        mut view: View,
         mut feeds: Vec<Feed>,
     ) -> Result<Built, LoadError> {
         if stages.is_empty() {
@@ -218,7 +222,7 @@ impl Checker<'_> {
         let mut many = false;
         // The stage that first made many values from one input item, at
         // the scope of the whole stream.
-        let mut maker = match &stream {
+        let mut maker = match &view.stream {
             Stream::Pieces(by) => Some(by.clone()),
             _ => None,
         };
@@ -244,8 +248,15 @@ impl Checker<'_> {
                         ),
                     ));
                 }
+                if matches!(stage, Stage::Catch(_) | Stage::Finalize(_))
+                    && merges_anywhere(self.reg, &stages[..i])
+                {
+                    self.not_resumable(format!(
+                        "{here} is a `{word}` over an `each` that merges, and drops the items still running when one fails; how far they got depends on timing, so a restart could drop them elsewhere; put the `{word}` inside the `each`"
+                    ));
+                }
                 let body = chain(std::mem::take(&mut transforms));
-                let (t, handler_feeds) = self.cover(stage, &here, body)?;
+                let (t, handler_feeds) = self.cover(stage, &here, body, &view)?;
                 transforms.push(t);
                 if matches!(stage, Stage::Retry { .. }) {
                     self.sites.retry(&here, mark);
@@ -276,7 +287,7 @@ impl Checker<'_> {
                     ));
                 }
             }
-            let here_stream = match stream {
+            let here_stream = match view.stream {
                 Stream::PerItem => Stream::PerItem,
                 _ if last_cover.is_some_and(|c| i < c) => Stream::PerItem,
                 _ => match &maker {
@@ -285,9 +296,14 @@ impl Checker<'_> {
                 },
             };
             self.check_position(stage, &here, &here_stream);
-            let (t, next) = self.stage(stage, &here, known, one_item, here_stream, &mut feeds)?;
+            let here_view = view.with_stream(here_stream);
+            if let Some(why) = here_view.refusal(self.reg, stage, &here) {
+                self.not_resumable(why);
+            }
+            let (t, next) = self.stage(stage, &here, known, one_item, &here_view, &mut feeds)?;
             transforms.push(t);
             known = next;
+            view.after(self.reg, stage, &here);
             if self.makes_many(stage) {
                 many = true;
                 one_item = false;
@@ -358,18 +374,13 @@ impl Checker<'_> {
         stage: &Stage,
         path: &str,
         body: Transform,
+        view: &View,
     ) -> Result<(Transform, Vec<Feed>), LoadError> {
         match stage {
             Stage::Catch(stages) => {
                 // The item as it was when it failed is not known here.
-                let built = self.pipe(
-                    stages,
-                    &format!("{path}.catch"),
-                    None,
-                    true,
-                    Stream::PerItem,
-                    Vec::new(),
-                )?;
+                let at = format!("{path}.catch");
+                let built = self.pipe(stages, &at, None, true, view.per_value(&at), Vec::new())?;
                 let handler = built.transform;
                 let t = per_item_stream(move |item, tag, cx| {
                     rescued(
@@ -390,7 +401,7 @@ impl Checker<'_> {
                 }
                 // What the cleanup gives is dropped, so no feed comes out.
                 let cleanup = self
-                    .pipe(stages, &here, None, true, Stream::PerItem, Vec::new())?
+                    .pipe(stages, &here, None, true, view.per_value(&here), Vec::new())?
                     .transform;
                 let t = per_item_stream(move |item, tag, cx| {
                     let work = body(
@@ -590,7 +601,7 @@ impl Checker<'_> {
         path: &str,
         known: Known,
         single: bool,
-        stream: Stream,
+        view: &View,
         feeds: &mut Vec<Feed>,
     ) -> Result<(Transform, Known), LoadError> {
         match stage {
@@ -693,7 +704,13 @@ impl Checker<'_> {
                 Ok((t, known))
             }
             Stage::Last => {
-                let t: Transform = Arc::new(|items: Items, _cx: Cx| last_of(items));
+                // After items run side by side, the value it gives is lifted
+                // out of the groups made in this pipe, so what is made from
+                // it is keyed the same whichever value it is.
+                let root = view.mixed.as_ref().map(|_| view.root.clone());
+                let t: Transform = Arc::new(move |items: Items, cx: Cx| {
+                    last_of(items, root.as_ref().map(|r| cx.sites_within(r)))
+                });
                 Ok((t, known))
             }
             Stage::Collect { size, into } => {
@@ -807,25 +824,17 @@ impl Checker<'_> {
                 if *at_once == Some(0) {
                     return Err(malformed(&here, "`at_once` is at least 1"));
                 }
-                if *overlap != Overlap::Concat {
+                if let Some(word) = match overlap {
+                    Overlap::Switch => Some("switch"),
+                    Overlap::Exhaust => Some("exhaust"),
+                    Overlap::Concat | Overlap::Merge => None,
+                } {
                     self.not_resumable(format!(
-                        "{here} runs items with overlap `{}`, and a replay needs one order",
-                        match overlap {
-                            Overlap::Merge => "merge",
-                            Overlap::Switch => "switch",
-                            Overlap::Exhaust => "exhaust",
-                            Overlap::Concat => "concat",
-                        }
+                        "{here} runs items with overlap `{word}`, which drops or skips work by when items arrive, and a replay cannot know when they did"
                     ));
                 }
-                let built = self.pipe(
-                    pipe,
-                    &format!("{here}.do"),
-                    known,
-                    true,
-                    Stream::PerItem,
-                    Vec::new(),
-                )?;
+                let at = format!("{here}.do");
+                let built = self.pipe(pipe, &at, known, true, view.per_value(&at), Vec::new())?;
                 feeds.extend(built.feeds.into_iter().map(Feed::out_of_nested));
                 let inner = built.transform;
                 let (overlap, at_once) = (*overlap, *at_once);
@@ -834,18 +843,30 @@ impl Checker<'_> {
                     match overlap {
                         Overlap::Switch => latest_or_first(items, inner, true, cx),
                         Overlap::Exhaust => latest_or_first(items, inner, false, cx),
-                        Overlap::Concat | Overlap::Merge => {
-                            let runs = items.map(move |flow| match flow {
+                        Overlap::Concat => items
+                            .map(move |flow| match flow {
                                 Ok(Flowing::Value(v, tag)) => {
                                     inner(one(Ok(Flowing::Value(v, tag))), cx.clone())
                                 }
                                 other => one(other),
-                            });
-                            if overlap == Overlap::Concat {
-                                runs.flatten().boxed()
-                            } else {
-                                runs.flatten_unordered(at_once).boxed()
-                            }
+                            })
+                            .flatten()
+                            .boxed(),
+                        // Each value starts a group of its own, numbered in
+                        // the order the values enter, so its work replays
+                        // in its own order whatever order the groups end.
+                        Overlap::Merge => {
+                            let here = here.clone();
+                            items
+                                .map(move |flow| match flow {
+                                    Ok(Flowing::Value(v, tag)) => {
+                                        let group = cx.group(&here, &tag);
+                                        inner(one(Ok(Flowing::Value(v, group))), cx.clone())
+                                    }
+                                    other => one(other),
+                                })
+                                .flatten_unordered(at_once)
+                                .boxed()
                         }
                     }
                 });
@@ -865,7 +886,7 @@ impl Checker<'_> {
                         &at,
                         known.clone(),
                         single,
-                        stream.clone(),
+                        view.clone(),
                         feeds.clone(),
                     )?;
                     built.push(side.transform);
@@ -938,7 +959,8 @@ impl Checker<'_> {
                     if arms.contains_key(output) {
                         return Err(malformed(&at, "this output is listed twice"));
                     }
-                    let arm = self.pipe(stages, &at, None, true, Stream::PerItem, Vec::new())?;
+                    let arm =
+                        self.pipe(stages, &at, None, true, view.per_value(&at), Vec::new())?;
                     feeds.extend(arm.feeds.into_iter().map(Feed::out_of_nested));
                     arms.insert(output.clone(), arm.transform);
                 }
@@ -1029,15 +1051,22 @@ impl Checker<'_> {
                     if arms.contains_key(key) {
                         return Err(malformed(&at, "this case is listed twice"));
                     }
-                    let arm =
-                        self.pipe(pipe, &at, known.clone(), true, Stream::PerItem, Vec::new())?;
+                    let arm = self.pipe(
+                        pipe,
+                        &at,
+                        known.clone(),
+                        true,
+                        view.per_value(&at),
+                        Vec::new(),
+                    )?;
                     feeds.extend(arm.feeds.into_iter().map(Feed::out_of_nested));
                     arms.insert(key.clone(), arm.transform);
                 }
                 let fallback = match otherwise {
                     Some(pipe) => {
                         let at = format!("{here}.else");
-                        let arm = self.pipe(pipe, &at, known, true, Stream::PerItem, Vec::new())?;
+                        let arm =
+                            self.pipe(pipe, &at, known, true, view.per_value(&at), Vec::new())?;
                         feeds.extend(arm.feeds.into_iter().map(Feed::out_of_nested));
                         Some(arm.transform)
                     }

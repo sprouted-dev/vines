@@ -43,7 +43,8 @@ async fn run(
         match event? {
             Event::Output(out) => outs.push(out),
             Event::Save(entry) => {
-                let logged = matches!(&entry, Entry::Emitted { output } if output == "log_line");
+                let logged =
+                    matches!(&entry, Entry::Emitted { output, .. } if output == "log_line");
                 saved.push(entry.to_json());
                 let lines = outs.iter().filter(|o| o.name == "log_line").count();
                 if logged && Some(lines) == drop_after {

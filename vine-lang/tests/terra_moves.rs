@@ -514,9 +514,10 @@ fn install_refuses_a_payload_field_named_request() {
 #[test]
 fn install_refuses_a_vine_that_cannot_be_resumed() {
     // Terra keeps every press's journal, so it runs every vine with
-    // `run_saved`. An `each` that merges cannot replay in one order.
+    // `run_saved`. An `each` that switches drops work by when items
+    // arrive, which a replay cannot know.
     let doc = "vine: wide\ninput: { job: id, items: list }\noutputs: { one: { job: id } }\n\
-        pipe:\n  - split: $item.items\n    into: it\n  - each:\n      overlap: merge\n      do:\n        \
+        pipe:\n  - split: $item.items\n    into: it\n  - each:\n      overlap: switch\n      do:\n        \
         - emit: { to: one, with: { job: $item.job } }\n";
     let err = broken(|t| {
         t.vines.push(VineSource::Yaml(doc.into()));

@@ -912,6 +912,7 @@ fn every_kind_of_entry_survives_a_trip_through_json() {
         },
         Entry::Emitted {
             output: "out".into(),
+            within: None,
         },
     ]);
     let text = serde_json::to_string(&journal.to_json()).unwrap();
@@ -943,8 +944,8 @@ fn a_journal_that_is_not_a_list_of_known_entries_is_refused() {
 #[tokio::test]
 async fn run_saved_refuses_a_vine_that_cannot_replay_in_one_order() {
     let mut reg = counting().1;
-    let merged = reg
-        .build_pipe(numbers([each(Overlap::Merge, [emit("out")])]))
+    let exhausted = reg
+        .build_pipe(numbers([each(Overlap::Exhaust, [emit("out")])]))
         .unwrap();
     let timed = reg
         .build_pipe(numbers([
@@ -966,7 +967,7 @@ async fn run_saved_refuses_a_vine_that_cannot_replay_in_one_order() {
         .build_pipe(numbers([use_vine("inner", None).on("out", [emit("out")])]))
         .unwrap();
     for (vine, says) in [
-        (merged, "merge"),
+        (exhausted, "overlap `exhaust`"),
         (timed, "timeout"),
         (using, "uses vine `inner`"),
     ] {
@@ -1226,6 +1227,7 @@ async fn a_journal_that_does_not_fit_the_run_is_a_run_error() {
         "output `other`",
         vec![Entry::Emitted {
             output: "other".into(),
+            within: None,
         }],
         a(),
     )
@@ -1236,12 +1238,15 @@ async fn a_journal_that_does_not_fit_the_run_is_a_run_error() {
         vec![
             Entry::Emitted {
                 output: "out".into(),
+                within: None,
             },
             Entry::Emitted {
                 output: "out".into(),
+                within: None,
             },
             Entry::Emitted {
                 output: "out".into(),
+                within: None,
             },
         ],
         a(),

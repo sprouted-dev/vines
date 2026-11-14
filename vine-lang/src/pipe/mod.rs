@@ -222,6 +222,7 @@ mod call_sites;
 mod check;
 mod drive;
 mod flow;
+mod order;
 mod stream_call;
 mod tag;
 mod unit;
@@ -614,6 +615,8 @@ pub struct Pipe {
     /// Some stream act call, here or in a vine this one uses, is saved by
     /// position.
     by_position: bool,
+    /// It holds an `each` that merges, here or in a vine it uses.
+    merges: bool,
     transform: Transform,
 }
 
@@ -710,7 +713,7 @@ impl Pipe {
             .filter_map(|r| {
                 ready(match r {
                     Ok(Progress::Output(out)) => Some(Ok(out)),
-                    Ok(Progress::Save(_) | Progress::Through(_)) => None,
+                    Ok(Progress::Save(_) | Progress::Through(_) | Progress::Done(_)) => None,
                     Err(e) => Some(Err(e)),
                 })
             })
@@ -755,7 +758,7 @@ impl Pipe {
                         Ok(Progress::Save(line)) => Some(Ok(Event::Save(line.entry))),
                         // A journal covers the whole run: there is no
                         // position to move.
-                        Ok(Progress::Through(_)) => None,
+                        Ok(Progress::Through(_) | Progress::Done(_)) => None,
                         Err(e) => Some(Err(e)),
                     })
                 })
@@ -804,7 +807,14 @@ impl Pipe {
             return stream::once(ready(Err(self.refused(why)))).boxed();
         }
         match Book::from_bookmark(&bookmark) {
-            Ok(book) => self.drive(input, Saving::Position(book, bookmark.position())),
+            Ok(book) => self.drive(
+                input,
+                Saving::Position {
+                    book,
+                    position: bookmark.position(),
+                    done: bookmark.done().collect(),
+                },
+            ),
             Err(problem) => stream::once(ready(Err(RunError::ReplayMisfit { problem }))).boxed(),
         }
     }

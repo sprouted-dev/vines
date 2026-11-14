@@ -215,8 +215,9 @@ pub(super) fn latest_or_first(outer: Items, inner: Transform, switch: bool, cx: 
     .boxed()
 }
 
-/// When the stream ends, give its final value.
-pub(super) fn last_of(mut items: Items) -> Items {
+/// When the stream ends, give its final value. With `lift`, the value is
+/// lifted out of the groups whose sites start with it.
+pub(super) fn last_of(mut items: Items, lift: Option<String>) -> Items {
     let mut held: Option<(Value, Tag)> = None;
     let mut done = false;
     stream::poll_fn(move |task| loop {
@@ -229,7 +230,13 @@ pub(super) fn last_of(mut items: Items) -> Items {
             Poll::Ready(Some(other)) => return Poll::Ready(Some(other)),
             Poll::Ready(None) => {
                 done = true;
-                return Poll::Ready(held.take().map(|(v, tag)| Ok(Flowing::Value(v, tag))));
+                return Poll::Ready(held.take().map(|(v, tag)| {
+                    let tag = match &lift {
+                        Some(within) => tag.lifted(within),
+                        None => tag,
+                    };
+                    Ok(Flowing::Value(v, tag))
+                }));
             }
             Poll::Pending => return Poll::Pending,
         }

@@ -10,6 +10,11 @@
 //! each call got and how many outputs made from the items after that were
 //! handed out. A replay hands those out again silently, in order, and then
 //! hands out the rest.
+//!
+//! The outputs a caller was handed are kept per input item and per group
+//! of work. A replay matches the outputs of one group in that group's own
+//! order, so groups of an `each` that merges can finish in another order
+//! after a restart.
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::fmt;
@@ -51,8 +56,8 @@ pub(super) struct Book {
     /// New lines for the caller to keep.
     pub(super) fresh: VecDeque<Line>,
     /// The outputs the caller was already handed, oldest first, per input
-    /// item.
-    handed: HashMap<u64, VecDeque<String>>,
+    /// item and per group of work: the scope the output was made in.
+    handed: HashMap<(u64, String), VecDeque<String>>,
     /// For each stream act call that gives its items again: how far it got.
     calls: HashMap<Key, CallState>,
 }
@@ -124,12 +129,12 @@ impl Book {
         Ok(book)
     }
 
-    /// Read a bookmark. Lines at or before its position are done and are
-    /// not read.
+    /// Read a bookmark. Lines of items at or before its position, or done
+    /// past it, are not read.
     pub(super) fn from_bookmark(bookmark: &Bookmark) -> Result<Book, String> {
         let mut book = Book::default();
         for (i, Line { item, entry }) in bookmark.lines().iter().enumerate() {
-            if *item <= bookmark.position() {
+            if bookmark.is_done(*item) {
                 continue;
             }
             book.read(*item, entry)
@@ -218,9 +223,9 @@ impl Book {
                     ))
                 }
             },
-            Entry::Emitted { output } => self
+            Entry::Emitted { output, within } => self
                 .handed
-                .entry(item)
+                .entry((item, within.clone().unwrap_or_default()))
                 .or_default()
                 .push_back(output.clone()),
             Entry::Through { at, items, handed } => match self.position_of(key(at)) {
@@ -231,6 +236,11 @@ impl Book {
                 }) => {
                     *through = *items;
                     *was = *handed;
+                    // Outputs made in groups within the items it passed
+                    // are never made again.
+                    self.handed.retain(|(of, within), _| {
+                        *of != item || item_of_stream(within, at).is_none_or(|n| n > *items)
+                    });
                 }
                 _ => {
                     return Err(format!(
@@ -305,8 +315,22 @@ impl Book {
         self.fresh.push_back(line);
     }
 
+    /// Every input item through `position` is done: forget what the run
+    /// counted for them. What it was handed stays, so an output the
+    /// caller was handed and the replay never made is still a misfit.
+    pub(super) fn passed(&mut self, position: u64) {
+        self.counts.retain(|(item, _), _| *item > position);
+    }
+
+    /// Input item `n` is done past the position: forget what the run
+    /// counted for it.
+    pub(super) fn finished(&mut self, n: u64) {
+        self.counts.retain(|(item, _), _| *item != n);
+    }
+
     /// Whether the output `name`, made from a value with `tag`, is new to
-    /// the caller. A new one is recorded as handed out.
+    /// the caller. A new one is recorded as handed out. Outputs are
+    /// matched in order within the group of work they were made in.
     pub(super) fn hand(&mut self, tag: &Tag, name: &str) -> Handing {
         if let Some((call, n)) = tag.stream() {
             let state = self.calls.entry((*call).clone()).or_default();
@@ -320,7 +344,11 @@ impl Book {
             return Handing::Fresh;
         }
         let item = tag.item_number();
-        let before = self.handed.get_mut(&item).and_then(VecDeque::pop_front);
+        let within = tag.scope();
+        let before = self
+            .handed
+            .get_mut(&(item, within.to_owned()))
+            .and_then(VecDeque::pop_front);
         match before {
             Some(was) if was == name => Handing::Before,
             Some(was) => Handing::Misfit(was),
@@ -329,6 +357,7 @@ impl Book {
                     item,
                     entry: Entry::Emitted {
                         output: name.to_owned(),
+                        within: (!within.is_empty()).then(|| within.to_owned()),
                     },
                 });
                 Handing::Fresh
@@ -370,6 +399,31 @@ impl Cx {
         };
         *count += 1;
         Some(key)
+    }
+
+    /// The tag for the work of one value that enters the `each` that
+    /// merges at `path`: its group, numbered in the order values with the
+    /// same scope enter, when the run is saved. Unsaved, the value keeps
+    /// its tag.
+    pub(super) fn group(&self, path: &str, tag: &Tag) -> Tag {
+        let Some(book) = self.book.as_ref() else {
+            return tag.clone();
+        };
+        let site = format!("{}{path}", self.scope);
+        let mut book = lock(book);
+        let count = book
+            .counts
+            .entry((tag.item_number(), format!("{}{site}", tag.scope())))
+            .or_insert(0);
+        let group = Tag::group(&site, *count, tag);
+        *count += 1;
+        group
+    }
+
+    /// Where the groups made within a pipe at `path` of this vine stand:
+    /// every one of them starts with this.
+    pub(super) fn sites_within(&self, path: &str) -> String {
+        format!("{}{path}[", self.scope)
     }
 
     pub(super) fn take(&self, key: &Key) -> Option<Saved> {
