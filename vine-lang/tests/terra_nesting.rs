@@ -5,12 +5,12 @@
 //! stand-in refuses a trellis that `use`s a vine a move starts.
 #![cfg(feature = "yaml")]
 
-mod acts;
+mod fake;
 mod terra;
 
 use std::sync::Arc;
 
-use acts::{registry, World};
+use fake::{registry, World};
 use terra::moves::{jobs_trellis, yaml};
 use terra::{Answer, End, Event, InstallError, Lands, Move, Need, Terra, Trellis, VineSource};
 use vine_lang::{json, LoadError, Ty, Value};
@@ -325,7 +325,7 @@ fn a_vine_of_one_trellis_can_neither_use_nor_press_into_another() {
             matches!(
                 err,
                 InstallError::Load {
-                    error: LoadError::UnknownVine { .. } | LoadError::UnknownAct { .. },
+                    error: LoadError::UnknownVine { .. } | LoadError::UnknownOperator { .. },
                     ..
                 }
             ),
@@ -335,7 +335,7 @@ fn a_vine_of_one_trellis_can_neither_use_nor_press_into_another() {
 }
 
 #[test]
-fn the_press_act_checks_the_payload_the_outer_vine_sends_at_install() {
+fn the_press_operator_checks_the_payload_the_outer_vine_sends_at_install() {
     let world = World::new();
     // `launch` takes a job id; this vine sends a number.
     let doc = "vine: wrong\ninput: { job: id, request: text }\noutputs: { ended: {} }\n\

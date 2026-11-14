@@ -3,9 +3,9 @@
 # agent has started. It does not wait for the agent to finish.
 #
 # The item carries what the vine has learned so far. `into: tree` keeps
-# the item and adds the working copy to it, so later stages can use it.
+# the item and adds the working copy to it, so later operators can use it.
 #
-# Starting an agent can hang. The `timeout` covers the three acts before
+# Starting an agent can hang. The `timeout` applies to the three operators before
 # it and fails the launch with the code `timeout` after a minute. A saved
 # run saves that decision, so after a restart a launch that timed out
 # times out again at once and starts no agent.
@@ -28,10 +28,10 @@ pipe:
       to: started
       with: { job: $item.job, session: $item.session.id, tree: $item.tree.path }
   - catchError:
-      # The item is as it was when the stage failed. If the agent failed
+      # The item is as it was when the operator failed. If the agent failed
       # to start, the working copy exists and nothing will ever report
       # the agent's end, so remove it here. A timeout gives the item as
-      # it reached the stages it covers, with no `tree`, so remove the
+      # it reached the operators it applies to, with no `tree`, so remove the
       # working copy by the job's name.
       - branch:
           on: $item.error.from

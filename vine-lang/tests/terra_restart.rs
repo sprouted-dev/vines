@@ -6,12 +6,12 @@
 //! copy or agent is made.
 #![cfg(feature = "yaml")]
 
-mod acts;
+mod fake;
 mod terra;
 
 use std::sync::Arc;
 
-use acts::{registry, World};
+use fake::{registry, World};
 use terra::moves::jobs_trellis;
 use terra::{Answer, Event, Refusal, Terra};
 use vine_lang::{json, Value};
@@ -68,9 +68,9 @@ async fn clean() -> Clean {
     }
 }
 
-/// The world's log after a crash at a point where an act had run and
-/// its result was not yet kept: the same log with that act's line twice.
-fn with_one_act_again(log: &[String], got: &[String]) -> bool {
+/// The world's log after a crash at a point where an operator had run and
+/// its result was not yet kept: the same log with that operator's line twice.
+fn with_one_call_again(log: &[String], got: &[String]) -> bool {
     got.len() == log.len() + 1
         && (0..got.len()).any(|i| {
             let mut without = got.to_vec();
@@ -90,7 +90,7 @@ async fn an_uninterrupted_run_has_crash_points_inside_the_nested_presses() {
 async fn a_crash_at_any_point_then_a_restart_ends_as_an_uninterrupted_run() {
     let clean = clean().await;
     let mut inner_points = 0;
-    let mut acts_again = 0;
+    let mut calls_again = 0;
     for k in 1..=clean.points {
         let (world, terra) = setup();
         terra.crash_at(k);
@@ -110,12 +110,12 @@ async fn a_crash_at_any_point_then_a_restart_ends_as_an_uninterrupted_run() {
         );
         assert_eq!(world.trees(), clean.trees, "crash at {point}");
         assert_eq!(world.agents(), clean.agents, "crash at {point}");
-        // An act whose result was lost in the crash runs again. Each act
+        // An operator whose result was lost in the crash runs again. Each operator
         // here is safe to run twice, so the world ends the same.
         if point.ends_with(" before done") {
-            acts_again += 1;
+            calls_again += 1;
             assert!(
-                with_one_act_again(&clean.log, &world.log()),
+                with_one_call_again(&clean.log, &world.log()),
                 "crash at {point}: {:?}",
                 world.log()
             );
@@ -123,7 +123,7 @@ async fn a_crash_at_any_point_then_a_restart_ends_as_an_uninterrupted_run() {
             assert_eq!(world.log(), clean.log, "crash at {point}");
         }
     }
-    assert!(inner_points > 0 && acts_again > 0);
+    assert!(inner_points > 0 && calls_again > 0);
 }
 
 #[tokio::test]
@@ -131,7 +131,7 @@ async fn many_crashes_in_one_run_still_end_as_an_uninterrupted_run() {
     let clean = clean().await;
     for every in [2, 3, 5, 7] {
         let (world, terra) = setup();
-        let (mut crashes, mut acts_again) = (0, 0);
+        let (mut crashes, mut calls_again) = (0, 0);
         let answer = loop {
             terra.crash_at(every);
             if let Some(answer) = terra.press_as("r-1", "launch_all", launch_all()).await {
@@ -139,7 +139,7 @@ async fn many_crashes_in_one_run_still_end_as_an_uninterrupted_run() {
             }
             crashes += 1;
             let point = terra.crash_point().unwrap();
-            acts_again += usize::from(point.ends_with(" before done"));
+            calls_again += usize::from(point.ends_with(" before done"));
             assert!(crashes < 1000, "no progress crashing every {every}");
             terra.restart();
         };
@@ -152,8 +152,8 @@ async fn many_crashes_in_one_run_still_end_as_an_uninterrupted_run() {
         assert_eq!(terra.requests_of("launch"), clean.launches);
         assert_eq!(world.trees(), clean.trees);
         assert_eq!(world.agents(), clean.agents);
-        // Each crash that lost an act's result ran that one act again.
-        assert_eq!(world.log().len(), clean.log.len() + acts_again);
+        // Each crash that lost an operator's result ran that one operator again.
+        assert_eq!(world.log().len(), clean.log.len() + calls_again);
     }
 }
 

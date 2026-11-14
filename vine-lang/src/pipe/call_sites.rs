@@ -1,10 +1,10 @@
-//! Where a stream act that gives its items again can be saved by position,
-//! and where it cannot.
+//! Where a stream operator that gives its items again can be saved by
+//! position, and where it cannot.
 //!
 //! A call saved by position replays from the item after its position. The
-//! stages after it rebuild what they held because the items flow again.
-//! That fails for a stage that keeps something across the items of a call
-//! other than the items it holds, and for a stage that drops what a call
+//! operators after it rebuild what they held because the items flow again.
+//! That fails for an operator that keeps something across the items of a
+//! call other than the items it holds, and for one that drops what a call
 //! gave and runs it again. So the checker follows what each call gives
 //! down the pipe, as a [`Feed`], and refuses:
 //!
@@ -13,11 +13,12 @@
 //! - `bufferCount` where it could gather the items of more than one call, or
 //!   of the call and of something else: a batch must hold one call's
 //!   items to be rebuilt.
-//! - `retry` over the call: it drops what a failed attempt gave and runs
-//!   the attempt again, so an item it dropped looks done when it is not.
+//! - `retry` applied to the call: it drops what a failed attempt gave and
+//!   runs the attempt again, so an item it dropped looks done when it is
+//!   not.
 //!
-//! A refused call is saved item by item instead, as an act that does not
-//! give its items again is. A vine run by `use` was checked on its own, so
+//! A refused call is saved item by item instead, as a call to a stream
+//! operator that does not give its items again is. A vine run by `use` was checked on its own, so
 //! when its calls are saved by position and the outer vine refuses them,
 //! the outer vine cannot be resumed at all.
 
@@ -27,7 +28,7 @@ use super::stream_call::ItemSaving;
 use super::SavesEveryItem;
 use crate::registry::Gives;
 
-/// What a stream act call gives, reaching a point in a pipe.
+/// What a stream operator call gives, reaching a point in a pipe.
 #[derive(Clone)]
 pub(super) struct Feed {
     owner: Owner,
@@ -64,7 +65,7 @@ enum Batch {
 
 impl Feed {
     /// The feed as it comes out of the pipe it is in, into the pipe around
-    /// it: past a stage that runs a pipe per item, such as `concatMap`, its
+    /// it: past an operator that runs a pipe per item, such as `concatMap`, its
     /// items may mix with others.
     pub(super) fn out_of_nested(mut self) -> Feed {
         if let Reaches::Values(_) = self.reaches {
@@ -80,10 +81,11 @@ impl Feed {
         self
     }
 
-    /// The feed past the last covering stage of a pipe that sees many
-    /// items: the stages before it ran once per item, so a stage after it
-    /// sees the calls of many items.
-    pub(super) fn past_last_cover(mut self, single: bool) -> Feed {
+    /// The feed past the last of `catchError`, `finalize`, `retry` and
+    /// `timeout` in a pipe that sees many items: the operators before it
+    /// ran once per item, so an operator after it sees the calls of many
+    /// items.
+    pub(super) fn past_last_applied(mut self, single: bool) -> Feed {
         if !single {
             self = self.out_of_nested();
         }
@@ -93,13 +95,14 @@ impl Feed {
 
 struct Site {
     path: String,
-    act: String,
+    operator: String,
     gives: Gives,
     saving: Arc<OnceLock<ItemSaving>>,
     why_not: Option<String>,
 }
 
-/// Every stream act call in one vine, how each will be saved, and why.
+/// Every stream operator call in one vine, how each will be saved, and
+/// why.
 #[derive(Default)]
 pub(super) struct CallSites {
     sites: Vec<Site>,
@@ -114,13 +117,13 @@ pub(super) struct CallSites {
 }
 
 impl CallSites {
-    /// A stream act call at `path`. `once` says it runs at most once for
+    /// A stream operator call at `path`. `once` says it runs at most once for
     /// each run of its pipe. Gives the feed of its items, when it gives
     /// them again.
     pub(super) fn call(
         &mut self,
         path: &str,
-        act: &str,
+        operator: &str,
         gives: Gives,
         once: bool,
         saving: Arc<OnceLock<ItemSaving>>,
@@ -128,7 +131,7 @@ impl CallSites {
         let index = self.sites.len();
         self.sites.push(Site {
             path: path.to_owned(),
-            act: act.to_owned(),
+            operator: operator.to_owned(),
             gives,
             saving,
             why_not: None,
@@ -201,7 +204,7 @@ impl CallSites {
         }
     }
 
-    /// A `retry` at `path` that covers what was met since `mark`.
+    /// A `retry` at `path` that applies to what was met since `mark`.
     pub(super) fn retry(&mut self, path: &str, mark: usize) {
         let refusals: Vec<(Owner, String)> = self.owners[mark..]
             .iter()
@@ -220,7 +223,7 @@ impl CallSites {
 
     fn name(&self, owner: &Owner) -> String {
         match owner {
-            Owner::Here(i) => format!("`{}` at {}", self.sites[*i].act, self.sites[*i].path),
+            Owner::Here(i) => format!("`{}` at {}", self.sites[*i].operator, self.sites[*i].path),
             Owner::Used { path, vine } => format!("vine `{vine}` at {path}"),
         }
     }
@@ -233,13 +236,13 @@ impl CallSites {
             }
             Owner::Used { path, vine } => {
                 self.unresumable.get_or_insert(format!(
-                    "{path} uses vine `{vine}`, which saves a stream act by position, and {why}"
+                    "{path} uses vine `{vine}`, which saves a stream operator by position, and {why}"
                 ));
             }
         }
     }
 
-    /// Decide how each call is saved, now that every stage is checked.
+    /// Decide how each call is saved, now that every operator is checked.
     pub(super) fn settle(self) -> Settled {
         let mut every = Vec::new();
         let mut by_position = false;
@@ -247,7 +250,7 @@ impl CallSites {
             let why = match (site.gives, site.why_not) {
                 (Gives::OnlyNew, _) => Some(format!(
                     "`{}` does not say it can give its items again",
-                    site.act
+                    site.operator
                 )),
                 (Gives::Again, why) => why,
             };
@@ -261,7 +264,7 @@ impl CallSites {
                 None => by_position = true,
                 Some(why) => every.push(SavesEveryItem {
                     path: site.path,
-                    act: site.act,
+                    operator: site.operator,
                     why,
                 }),
             }
@@ -276,7 +279,7 @@ impl CallSites {
     }
 }
 
-/// What the checker settled about a vine's stream act calls.
+/// What the checker settled about a vine's stream operator calls.
 pub(super) struct Settled {
     pub(super) saves_every_item: Vec<SavesEveryItem>,
     /// Some call, here or in a used vine, is saved by position.

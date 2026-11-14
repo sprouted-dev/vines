@@ -1,25 +1,25 @@
-//! A stream act that gives its items again is saved by position: what the
+//! A stream operator that gives its items again is saved by position: what the
 //! caller keeps for one item in flight stays small however many items the
-//! act gives, and a restart at any point gives what an uninterrupted run
+//! operator gives, and a restart at any point gives what an uninterrupted run
 //! gives. Rust alone: this file passes with YAML off.
 
-mod acts;
+mod fake;
 
 use std::sync::Arc;
 
-use acts::agent::{
+use fake::agent::{
     expected, job, job_run_pipe, job_run_registry, job_run_registry_again, Host, Script,
 };
-use acts::feed::{event_pages_pipe, feed_registry, feed_registry_again};
-use acts::restart::{
+use fake::feed::{event_pages_pipe, feed_registry, feed_registry_again};
+use fake::restart::{
     events_in, events_saved, run, run_saved, run_saved_with_kills, run_with_kills, Caller, End,
     Keeper,
 };
-use acts::{register_stream_act, Gives, World};
+use fake::{register_stream, Gives, World};
 use futures::{stream, StreamExt};
 use vine_lang::pipe::{
     buffer_count, call, catch_error, concat_map, emit, emit_with, filter, finalize, fork, last,
-    pipe, retry, take, tap, use_vine, PipeDef, Stage,
+    pipe, retry, take, tap, use_vine, Operator, PipeDef,
 };
 use vine_lang::{
     json, Bookmark, Ending, Entry, Event, Journal, Line, OpError, OperatorSpec, Part, Pipe,
@@ -40,15 +40,15 @@ fn job_run_every_item(world: &Arc<World>, host: &Arc<Host>) -> Pipe {
         .unwrap()
 }
 
-/// The acts in the world's log, without the agent attaching again after a
+/// The operators in the world's log, without the agent attaching again after a
 /// restart: what is left is what was done.
-fn acts_done(log: Vec<String>) -> Vec<String> {
+fn calls_done(log: Vec<String>) -> Vec<String> {
     log.into_iter()
         .filter(|l| !l.starts_with("agent.attach"))
         .collect()
 }
 
-/// An uninterrupted `run_saved` of one job: its outputs, its acts, and how
+/// An uninterrupted `run_saved` of one job: its outputs, its operators, and how
 /// many events it gave.
 async fn uninterrupted(
     build: Build,
@@ -76,8 +76,8 @@ async fn check_kills(build: Build, script: &Script, kills: &[usize]) -> Keeper {
     let repeats = run_saved_with_kills(|| build(&world, &host), &[job()], &mut keeper, kills).await;
     assert_eq!(keeper.outs, want, "kills {kills:?}");
     assert_eq!(
-        acts_done(world.log()),
-        acts_done(want_log),
+        calls_done(world.log()),
+        calls_done(want_log),
         "kills {kills:?}"
     );
     assert_eq!(world.count("agent.start"), 1, "kills {kills:?}");
@@ -124,7 +124,7 @@ fn job_run_with_an_agent_that_gives_its_lines_again_saves_no_call_item_by_item()
         panic!("{:?}", every.saves_every_item());
     };
     assert_eq!(
-        (only.path.as_str(), only.act.as_str()),
+        (only.path.as_str(), only.operator.as_str()),
         ("pipe[1]", "agent.run")
     );
     assert!(
@@ -187,7 +187,7 @@ async fn job_run_by_position_killed_anywhere_after_the_agent_host_is_lost_still_
 
 #[tokio::test(start_paused = true)]
 async fn job_run_by_position_killed_anywhere_with_a_commit_that_fails_removes_the_copy_once() {
-    // A failure of an act run for the end item, not of the agent.
+    // A failure of an operator run for the end item, not of the agent.
     async fn failing_commit(kills: &[usize]) -> (Arc<World>, Keeper) {
         let (world, host) = (World::new(), Host::new());
         host.script("job-1", Script::new(60, "finished"));
@@ -349,8 +349,8 @@ async fn job_run_by_position_over_a_stream_of_jobs_keeps_a_small_bookmark_at_eve
         .await;
         assert_eq!(caller.outs, want, "kill {k}");
         assert_eq!(
-            acts_done(world.log()),
-            acts_done(want_log.clone()),
+            calls_done(world.log()),
+            calls_done(want_log.clone()),
             "kill {k}"
         );
         assert_eq!(caller.position(), 2);
@@ -454,12 +454,12 @@ async fn event_pages_by_position_keeps_a_bookmark_that_does_not_grow_with_the_pa
 
 // ----------------------------------- a call that a catchError takes over
 
-/// Like `job_run`, with an act run for each line that refuses line 70: the
+/// Like `job_run`, with an operator run for each line that refuses line 70: the
 /// `catchError` takes over, and the agent's stream is abandoned partway.
 fn checked_run(world: &Arc<World>, host: &Arc<Host>) -> Pipe {
     let mut reg = job_run_registry_again(world, host);
     let w = world.clone();
-    reg.register_act(
+    reg.register(
         OperatorSpec::new("check.line")
             .settings(Shape::new().required("seq", Ty::Int))
             .touches(["check"]),
@@ -486,7 +486,7 @@ fn checked_run(world: &Arc<World>, host: &Arc<Host>) -> Pipe {
         .output("log_line", job().required("seq", Ty::Int))
         .output("done", job())
         .output("failed", job().required("reason", Ty::Text))
-        .stages([
+        .operators([
             call(
                 "agent.run",
                 json!({ "key": "$item.job", "dir": "/trees/x", "brief": "$item.brief" }),
@@ -519,10 +519,10 @@ async fn a_call_a_catch_error_took_over_is_not_read_past_where_the_first_run_sto
         let mut keeper = Keeper::new();
         run_saved_with_kills(|| checked_run(&world, &host), &[job()], &mut keeper, &[k]).await;
         assert_eq!(keeper.outs, want, "kill {k}");
-        // Each line was checked once, so every act ran once.
+        // Each line was checked once, so every operator ran once.
         assert_eq!(
-            acts_done(world.log()),
-            acts_done(want_log.clone()),
+            calls_done(world.log()),
+            calls_done(want_log.clone()),
             "kill {k}"
         );
         assert!(
@@ -551,10 +551,10 @@ async fn a_call_a_catch_error_took_over_is_not_read_past_where_the_first_run_sto
     assert_eq!(world.log(), log);
 }
 
-// ------------------------------------- an act that does not keep its word
+// ------------------------------------- an operator that does not keep its word
 
 #[tokio::test(start_paused = true)]
-async fn an_act_that_gives_fewer_items_again_than_it_gave_before_it_stopped_is_a_run_error() {
+async fn an_operator_that_gives_fewer_items_again_than_it_gave_before_it_stopped_is_a_run_error() {
     let script = Script {
         forgets_after: Some(110),
         ..Script::new(120, "finished")
@@ -591,14 +591,14 @@ async fn an_act_that_gives_fewer_items_again_than_it_gave_before_it_stopped_is_a
     assert_eq!(world.count("git.commit"), 0);
 }
 
-// ------------------------------------------------ two stream acts in a row
+// ------------------------------------------------ two stream operators in a row
 
 /// `feed.words { seq, page }` gives `{ word }` 1 to 3 for each page, from
 /// the word after `resume_from`, and can give them again.
 fn feed_with_words(world: &Arc<World>) -> Registry {
     let mut reg = feed_registry_again(world);
     let w = world.clone();
-    register_stream_act(
+    register_stream(
         &mut reg,
         Gives::Again,
         OperatorSpec::new("feed.words")
@@ -626,7 +626,7 @@ fn words(world: &Arc<World>) -> Pipe {
                 .required("pages", Ty::Int),
         )
         .output("word", Shape::open())
-        .stages([
+        .operators([
             call(
                 "feed.pages",
                 json!({ "seq": "$item.seq", "pages": "$item.pages" }),
@@ -646,7 +646,7 @@ fn words(world: &Arc<World>) -> Pipe {
 }
 
 #[tokio::test]
-async fn two_stream_acts_in_a_row_are_both_saved_by_position_and_survive_any_kill() {
+async fn two_stream_operators_in_a_row_are_both_saved_by_position_and_survive_any_kill() {
     let world = World::new();
     assert_eq!(words(&world).saves_every_item(), []);
     let input: Vec<Value> = (1..=3)
@@ -679,7 +679,7 @@ async fn two_stream_acts_in_a_row_are_both_saved_by_position_and_survive_any_kil
 
 // ------------------------------------------------------------ the checker
 
-fn events_vine(stages: impl IntoIterator<Item = Stage>) -> PipeDef {
+fn events_vine(operators: impl IntoIterator<Item = Operator>) -> PipeDef {
     pipe("v")
         .input(
             Shape::new()
@@ -687,10 +687,10 @@ fn events_vine(stages: impl IntoIterator<Item = Stage>) -> PipeDef {
                 .required("pages", Ty::Int),
         )
         .output("out", Shape::open())
-        .stages(stages)
+        .operators(operators)
 }
 
-fn fetch() -> Stage {
+fn fetch() -> Operator {
     call(
         "feed.pages",
         json!({ "seq": "$item.seq", "pages": "$item.pages" }),
@@ -709,7 +709,7 @@ fn saved_item_by_item(reg: &Registry, def: PipeDef) -> Vec<(String, String)> {
 }
 
 #[test]
-fn the_checker_saves_a_call_item_by_item_where_a_later_item_could_not_rebuild_the_stages() {
+fn the_checker_saves_a_call_item_by_item_where_a_later_item_could_not_rebuild_the_operators() {
     let reg = feed_registry_again(&World::new());
     let cases: Vec<(PipeDef, &str, &str)> = vec![
         (
@@ -760,7 +760,7 @@ fn the_checker_saves_a_call_item_by_item_where_a_later_item_could_not_rebuild_th
             "pipe[1] is a `retry`",
         ),
         (
-            // A batch after a `catchError` that runs the act holds many items' calls.
+            // A batch after a `catchError` that runs the operator holds many items' calls.
             events_vine([
                 call("archive.put", json!({ "seq": "$item.seq", "body": "x" })),
                 catch_error([fetch()]),
@@ -781,7 +781,7 @@ fn the_checker_saves_a_call_item_by_item_where_a_later_item_could_not_rebuild_th
 }
 
 #[test]
-fn the_checker_saves_a_call_by_position_where_every_stage_after_it_can_be_rebuilt() {
+fn the_checker_saves_a_call_by_position_where_every_operator_after_it_can_be_rebuilt() {
     let reg = feed_registry_again(&World::new());
     let cleanup = || finalize([tap("archive.put", json!({ "seq": 1, "body": "x" }))]);
     for def in [
@@ -800,7 +800,7 @@ fn the_checker_saves_a_call_by_position_where_every_stage_after_it_can_be_rebuil
         events_vine([concat_map([fetch(), buffer_count(2), emit("out")])]),
         // `catchError` and `finalize` over the call.
         events_vine([fetch(), emit("out"), catch_error([emit("out")]), cleanup()]),
-        // `retry` over stages after the call, not over the call.
+        // `retry` over operators after the call, not over the call.
         events_vine([
             fetch(),
             concat_map([
@@ -818,7 +818,7 @@ fn the_checker_saves_a_call_by_position_where_every_stage_after_it_can_be_rebuil
 }
 
 #[test]
-fn a_second_stream_act_in_a_row_feeds_a_batch_with_many_calls_and_only_it_saves_every_item() {
+fn a_second_stream_operator_in_a_row_feeds_a_batch_with_many_calls_and_only_it_saves_every_item() {
     let reg = feed_with_words(&World::new());
     let def = events_vine([
         fetch(),
@@ -849,15 +849,15 @@ async fn a_vine_that_uses_one_saved_by_position_and_counts_what_it_emits_cannot_
                         .required("pages", Ty::Int),
                 )
                 .output("out", Shape::open())
-                .stages([fetch(), emit_with("out", json!({ "page": "$item.page" }))]),
+                .operators([fetch(), emit_with("out", json!({ "page": "$item.page" }))]),
         )
         .unwrap();
     assert_eq!(inner.saves_every_item(), []);
     reg.add_vine(inner).unwrap();
-    let used = |more: Vec<Stage>| {
-        let mut stages = vec![use_vine("paged", None).on("out", [emit("out")])];
-        stages.extend(more);
-        reg.build_pipe(events_vine(stages)).unwrap()
+    let used = |more: Vec<Operator>| {
+        let mut operators = vec![use_vine("paged", None).on("out", [emit("out")])];
+        operators.extend(more);
+        reg.build_pipe(events_vine(operators)).unwrap()
     };
     assert!(used(vec![]).resumable());
     let counting = used(vec![take(2)]);
@@ -871,7 +871,7 @@ async fn a_vine_that_uses_one_saved_by_position_and_counts_what_it_emits_cannot_
         .await;
     assert!(
         matches!(&got[..], [Err(RunError::NotResumable { why, .. })]
-            if why.contains("pipe[0] uses vine `paged`, which saves a stream act by position, and pipe[1] is a `take`")),
+            if why.contains("pipe[0] uses vine `paged`, which saves a stream operator by position, and pipe[1] is a `take`")),
         "{got:?}"
     );
 }
@@ -888,7 +888,7 @@ fn a_used_vine_that_saves_a_call_item_by_item_is_named_from_the_vine_that_uses_i
                         .required("pages", Ty::Int),
                 )
                 .output("out", Shape::open())
-                .stages([fetch(), emit_with("out", json!({ "page": "$item.page" }))]),
+                .operators([fetch(), emit_with("out", json!({ "page": "$item.page" }))]),
         )
         .unwrap();
     reg.add_vine(inner).unwrap();
@@ -990,9 +990,9 @@ fn recording_a_through_replaces_the_last_one_and_drops_the_lines_of_the_items_it
         through("pipe[1]#0", 2),
         done("pipe[1]#0@2/pipe[3]#0"),
         done("pipe[1]#0@3/pipe[3]#0"),
-        // A second stream act inside item 3 of the first.
+        // A second stream operator inside item 3 of the first.
         done("pipe[1]#0@3/pipe[2]#0@1/pipe[3]#0"),
-        // The same stage path under another call is not passed.
+        // The same operator path under another call is not passed.
         done("pipe[1]#1@2/pipe[3]#0"),
         through("pipe[1]#0", 3),
     ] {
@@ -1076,7 +1076,7 @@ async fn a_journal_saved_by_position_that_does_not_fit_the_run_is_a_run_error() 
     };
     let p = misfit(&replay(&again, vec![started(), stop.clone(), stop]).await);
     assert!(p.contains("a stop for `pipe[0]#0`"), "{p}");
-    // A call saved by position, and an act that now saves every item.
+    // A call saved by position, and an operator that now saves every item.
     let p = misfit(
         &replay(
             &feed_registry(&world),
@@ -1088,8 +1088,8 @@ async fn a_journal_saved_by_position_that_does_not_fit_the_run_is_a_run_error() 
 }
 
 #[tokio::test]
-async fn a_journal_saved_item_by_item_replays_that_way_after_the_act_says_it_gives_again() {
-    // The first run saved every page; then the act was registered as one
+async fn a_journal_saved_item_by_item_replays_that_way_after_the_operator_says_it_gives_again() {
+    // The first run saved every page; then the operator was registered as one
     // that gives its pages again.
     let input = [json!({ "seq": 1, "pages": 3 })];
     let mut first = Journal::new();

@@ -1,20 +1,20 @@
-//! Stream acts, `fork`, `last`, `bufferCount`, and saved runs, in Rust alone.
+//! Stream operators, `fork`, `last`, `bufferCount`, and saved runs, in Rust alone.
 //! This file passes with the YAML feature off:
 //!
 //!     cargo test --no-default-features --test pipe_streams
 
-mod acts;
+mod fake;
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use acts::{registry, World};
+use fake::{registry, World};
 use futures::{stream, StreamExt};
 use tokio::time::{sleep, Instant};
 use vine_lang::pipe::{
     branch, buffer_count, call, catch_error, concat_map, emit, emit_with, exhaust_map, finalize,
-    fork, fork_join, last, op, pipe, split, switch_map, take, tap, timeout, use_vine, Pipe,
-    PipeDef, Stage,
+    fork, fork_join, last, op, pipe, split, switch_map, take, tap, timeout, use_vine, Operator,
+    Pipe, PipeDef,
 };
 use vine_lang::{
     json, Entry, Event, Journal, LoadError, OpError, OperatorSpec, Part, Registry, RegistryError,
@@ -46,7 +46,7 @@ fn values(outs: &Outs) -> Vec<Value> {
 /// The calls `count.up` got: its input and where it was told to resume.
 type Calls = Arc<Mutex<Vec<(Value, u64)>>>;
 
-/// A registry with two stream acts.
+/// A registry with two stream operators.
 ///
 /// `count.up { to, fail_at?, bad_at?, bad_end?, no_end? }` gives `{ n }`
 /// for n from 1 to `to`, starting after `resume_from`, then ends with
@@ -59,7 +59,7 @@ fn counting() -> (Calls, Registry) {
     let calls: Calls = Arc::default();
     let mut reg = Registry::new();
     let c = calls.clone();
-    reg.register_stream_act(
+    reg.register_stream(
         OperatorSpec::new("count.up")
             .settings(
                 Shape::new()
@@ -99,7 +99,7 @@ fn counting() -> (Calls, Registry) {
         },
     )
     .unwrap();
-    reg.register_stream_act(
+    reg.register_stream(
         OperatorSpec::new("count.bare")
             .settings(Shape::new().required("to", Ty::Int))
             .returns(Shape::new().required("n", Ty::Int))
@@ -111,7 +111,7 @@ fn counting() -> (Calls, Registry) {
     )
     .unwrap();
     // `store.put` fails for the item whose `n` is 2.
-    reg.register_act(
+    reg.register(
         OperatorSpec::new("store.put")
             .settings(Shape::new().required("n", Ty::Int))
             .touches(["store"]),
@@ -128,32 +128,32 @@ fn counting() -> (Calls, Registry) {
 }
 
 /// A vine over `{ n: int }` with open outputs `out`, `a`, `b` and `failed`.
-fn numbers(stages: impl IntoIterator<Item = Stage>) -> PipeDef {
+fn numbers(operators: impl IntoIterator<Item = Operator>) -> PipeDef {
     pipe("numbers")
         .input(Shape::new().required("n", Ty::Int))
         .output("out", Shape::open())
         .output("a", Shape::open())
         .output("b", Shape::open())
         .output("failed", Shape::open())
-        .stages(stages)
+        .operators(operators)
 }
 
-fn built(stages: impl IntoIterator<Item = Stage>) -> Pipe {
-    counting().1.build_pipe(numbers(stages)).unwrap()
+fn built(operators: impl IntoIterator<Item = Operator>) -> Pipe {
+    counting().1.build_pipe(numbers(operators)).unwrap()
 }
 
-fn refused(stages: impl IntoIterator<Item = Stage>) -> LoadError {
-    counting().1.build_pipe(numbers(stages)).unwrap_err()
+fn refused(operators: impl IntoIterator<Item = Operator>) -> LoadError {
+    counting().1.build_pipe(numbers(operators)).unwrap_err()
 }
 
-fn count_to(to: &str) -> Stage {
+fn count_to(to: &str) -> Operator {
     call("count.up", json!({ "to": to }))
 }
 
-// ------------------------------------------------------------ stream acts
+// ------------------------------------------------------------ stream operators
 
 #[tokio::test]
-async fn a_stream_act_turns_one_item_into_one_item_per_value_it_gives() {
+async fn a_stream_operator_turns_one_item_into_one_item_per_value_it_gives() {
     let vine = built([count_to("$item.n"), emit("out")]);
     let (outs, err) = all(&vine, nums(&[2, 3])).await;
     assert!(err.is_none());
@@ -161,7 +161,7 @@ async fn a_stream_act_turns_one_item_into_one_item_per_value_it_gives() {
 }
 
 #[tokio::test]
-async fn a_stream_act_with_into_keeps_the_item_and_adds_each_value() {
+async fn a_stream_operator_with_into_keeps_the_item_and_adds_each_value() {
     let vine = built([count_to("$item.n").into("count"), emit("out")]);
     let (outs, _) = all(&vine, nums(&[2])).await;
     assert_eq!(
@@ -174,7 +174,7 @@ async fn a_stream_act_with_into_keeps_the_item_and_adds_each_value() {
 }
 
 #[tokio::test]
-async fn a_stream_act_that_gives_nothing_lets_no_item_through_unless_its_end_is_named() {
+async fn a_stream_operator_that_gives_nothing_lets_no_item_through_unless_its_end_is_named() {
     let vine = built([count_to("$item.n"), emit("out")]);
     assert_eq!(all(&vine, nums(&[0])).await, (vec![], None));
 
@@ -196,7 +196,7 @@ async fn the_end_comes_last_with_the_end_value_and_without_the_into_field() {
         ]
     );
     // With no `into`, each value is the item, and the end item is the item
-    // as it reached the stage with the end added.
+    // as it reached the operator with the end added.
     let vine = built([count_to("$item.n").end("done"), emit("out")]);
     let (outs, _) = all(&vine, nums(&[1])).await;
     assert_eq!(
@@ -206,7 +206,7 @@ async fn the_end_comes_last_with_the_end_value_and_without_the_into_field() {
 }
 
 #[tokio::test]
-async fn a_stream_act_that_declares_no_end_may_just_stop_and_its_end_is_null() {
+async fn a_stream_operator_that_declares_no_end_may_just_stop_and_its_end_is_null() {
     let vine = built([
         call("count.bare", json!({ "to": "$item.n" }))
             .into("count")
@@ -225,7 +225,8 @@ async fn a_stream_act_that_declares_no_end_may_just_stop_and_its_end_is_null() {
 }
 
 #[tokio::test]
-async fn a_stream_act_that_fails_partway_has_given_the_items_before_and_catch_error_handles_it() {
+async fn a_stream_operator_that_fails_partway_has_given_the_items_before_and_catch_error_handles_it(
+) {
     let vine = built([
         call("count.up", json!({ "to": 5, "fail_at": 3 })).into("count"),
         emit_with("out", json!({ "n": "$item.count.n" })),
@@ -246,13 +247,13 @@ async fn a_stream_act_that_fails_partway_has_given_the_items_before_and_catch_er
             ),
         ]
     };
-    // The failure gets the item as it reached the stream act. The next
+    // The failure gets the item as it reached the stream operator. The next
     // item runs as usual.
     assert_eq!(outs, [expect(7), expect(8)].concat());
 }
 
 #[tokio::test]
-async fn a_stream_act_failure_nothing_catches_ends_the_stream_after_the_items_before_it() {
+async fn a_stream_operator_failure_nothing_catches_ends_the_stream_after_the_items_before_it() {
     let vine = built([
         call("count.up", json!({ "to": 5, "fail_at": 3 })),
         emit("out"),
@@ -267,7 +268,7 @@ async fn a_stream_act_failure_nothing_catches_ends_the_stream_after_the_items_be
 }
 
 #[test]
-fn input_that_does_not_fit_a_stream_act_is_refused_before_it_runs() {
+fn input_that_does_not_fit_a_stream_operator_is_refused_before_it_runs() {
     let err = refused([call("count.up", json!({ "to": "many" })), emit("out")]);
     assert!(
         matches!(err, LoadError::BadSettings { ref path, ref operator, .. }
@@ -279,14 +280,14 @@ fn input_that_does_not_fit_a_stream_act_is_refused_before_it_runs() {
 }
 
 #[tokio::test]
-async fn input_that_does_not_fit_a_stream_act_at_run_time_is_a_run_error() {
+async fn input_that_does_not_fit_a_stream_operator_at_run_time_is_a_run_error() {
     let vine = counting()
         .1
         .build_pipe(
             pipe("v")
                 .input(Shape::new().required("to", Ty::Any))
                 .output("out", Shape::open())
-                .stages([call("count.up", json!({ "to": "$item.to" })), emit("out")]),
+                .operators([call("count.up", json!({ "to": "$item.to" })), emit("out")]),
         )
         .unwrap();
     let err = vine.run_one(json!({ "to": "x" })).await.unwrap_err();
@@ -325,7 +326,7 @@ async fn an_end_that_breaks_its_declared_shape_or_never_comes_is_a_run_error() {
 }
 
 #[test]
-fn a_stream_act_cannot_be_tapped_or_run_in_fork_join_and_end_needs_a_stream_act() {
+fn a_stream_operator_cannot_be_tapped_or_run_in_fork_join_and_end_needs_a_stream_operator() {
     let err = refused([tap("count.up", json!({ "to": 1 })), emit("out")]);
     assert!(
         matches!(err, LoadError::Malformed { ref path, ref problem }
@@ -364,7 +365,7 @@ fn a_stream_act_cannot_be_tapped_or_run_in_fork_join_and_end_needs_a_stream_act(
 }
 
 #[test]
-fn the_checker_knows_the_fields_a_stream_act_adds() {
+fn the_checker_knows_the_fields_a_stream_operator_adds() {
     let err = refused([
         count_to("$item.n").into("count").end("done"),
         emit_with("out", json!({ "x": "$item.nope" })),
@@ -384,33 +385,33 @@ fn the_checker_knows_the_fields_a_stream_act_adds() {
                 .required("n", Ty::Int)
                 .required("count", Ty::Any),
         )
-        .stages([count_to("$item.n").into("count"), emit("out")]);
+        .operators([count_to("$item.n").into("count"), emit("out")]);
     reg.build_pipe(def).unwrap();
 }
 
 #[test]
-fn a_stream_act_is_registered_under_the_rules_for_acts() {
+fn a_stream_operator_is_registered_under_the_rules_for_operators_that_reach_outside() {
     let mut reg = counting().1;
     let spec = |name: &str| OperatorSpec::new(name).touches(["count"]);
     let empty = |_v: Value, _cx| stream::empty::<Result<Part, OpError>>();
     assert_eq!(
-        reg.register_stream_act(spec("Count"), empty),
-        Err(RegistryError::BadActName("Count".into()))
+        reg.register_stream(spec("Count"), empty),
+        Err(RegistryError::BadName("Count".into()))
     );
     assert_eq!(
-        reg.register_stream_act(OperatorSpec::new("count.down"), empty),
-        Err(RegistryError::ActTouchesNothing("count.down".into()))
+        reg.register_stream(OperatorSpec::new("count.down"), empty),
+        Err(RegistryError::TouchesNothing("count.down".into()))
     );
-    // Acts and stream acts share one namespace, both ways.
+    // Operators and stream operators share one namespace, both ways.
     assert_eq!(
-        reg.register_stream_act(spec("store.put"), empty),
+        reg.register_stream(spec("store.put"), empty),
         Err(RegistryError::Duplicate("store.put".into()))
     );
     assert_eq!(
-        reg.register_act(spec("count.up"), |_v, _cx| async { Ok(json!({})) }),
+        reg.register(spec("count.up"), |_v, _cx| async { Ok(json!({})) }),
         Err(RegistryError::Duplicate("count.up".into()))
     );
-    let names: Vec<String> = reg.stream_act_specs().into_iter().map(|s| s.name).collect();
+    let names: Vec<String> = reg.stream_specs().into_iter().map(|s| s.name).collect();
     assert_eq!(names, ["count.bare", "count.up"]);
 }
 
@@ -444,7 +445,7 @@ async fn fork_sends_every_item_down_every_side_pipe_and_on_down_the_main_pipe() 
 /// `work.slow { secs }` waits that long on tokio's clock.
 fn slow() -> Registry {
     let mut reg = counting().1;
-    reg.register_act(
+    reg.register(
         OperatorSpec::new("work.slow")
             .settings(Shape::new().required("secs", Ty::Int))
             .touches(["work"]),
@@ -570,8 +571,8 @@ async fn a_failure_in_a_side_pipe_that_nothing_catches_ends_the_stream() {
 }
 
 #[test]
-fn fork_needs_at_least_one_side_pipe_and_each_side_pipe_a_stage() {
-    let err = refused([fork(Vec::<Vec<Stage>>::new()), emit("out")]);
+fn fork_needs_at_least_one_side_pipe_and_each_side_pipe_a_operator() {
+    let err = refused([fork(Vec::<Vec<Operator>>::new()), emit("out")]);
     assert!(
         matches!(err, LoadError::Malformed { ref path, .. } if path == "pipe[0].fork"),
         "{err}"
@@ -597,7 +598,7 @@ fn an_emit_inside_a_side_pipe_is_checked_like_any_other() {
         .input(Shape::new().required("n", Ty::Int))
         .output("out", Shape::open())
         .output("job", Shape::new().required("job", Ty::Id))
-        .stages([
+        .operators([
             fork([vec![emit_with("job", json!({ "job": 7 }))]]),
             emit("out"),
         ]);
@@ -606,7 +607,7 @@ fn an_emit_inside_a_side_pipe_is_checked_like_any_other() {
         matches!(err, LoadError::OutputMisfit { ref path, .. } if path == "pipe[0].fork[0][0].emit.with"),
         "{err}"
     );
-    // A stage after an emit in a side pipe can never run.
+    // An operator after an emit in a side pipe can never run.
     let err = refused([fork([vec![emit("a"), op("set", json!({}))]]), emit("out")]);
     assert_eq!(
         err,
@@ -714,7 +715,7 @@ fn buffer_count_of_size_zero_and_a_bad_into_are_refused() {
 }
 
 #[tokio::test]
-async fn before_a_covering_stage_last_and_buffer_count_see_the_end_of_each_items_own_stream() {
+async fn before_catch_error_or_retry_last_and_buffer_count_see_the_end_of_each_items_own_stream() {
     let vine = built([
         count_to("$item.n").into("count"),
         last(),
@@ -735,7 +736,7 @@ async fn before_a_covering_stage_last_and_buffer_count_see_the_end_of_each_items
             pipe("v")
                 .input(Shape::new().required("n", Ty::Int).required("ns", Ty::List))
                 .output("out", Shape::open())
-                .stages([
+                .operators([
                     split("$item.ns"),
                     buffer_count(2),
                     emit_with("out", json!({ "count": "$item.count" })),
@@ -760,7 +761,7 @@ async fn before_a_covering_stage_last_and_buffer_count_see_the_end_of_each_items
 
 #[test]
 fn last_and_buffer_count_where_they_could_only_see_one_item_are_refused() {
-    let cases: Vec<(Vec<Stage>, &str)> = vec![
+    let cases: Vec<(Vec<Operator>, &str)> = vec![
         (
             vec![last(), emit("out"), catch_error([emit("failed")])],
             "pipe[0].last",
@@ -794,8 +795,8 @@ fn last_and_buffer_count_where_they_could_only_see_one_item_are_refused() {
             )],
             "pipe[0].branch.cases.1[0].last",
         ),
-        // A side pipe of a fork before a covering stage sees the item's
-        // own stream, so it needs the stream act too.
+        // A side pipe of a fork before a `catchError` sees the item's
+        // own stream, so it needs the stream operator too.
         (
             vec![
                 fork([vec![buffer_count(2), emit("a")]]),
@@ -805,15 +806,15 @@ fn last_and_buffer_count_where_they_could_only_see_one_item_are_refused() {
             "pipe[0].fork[0][0].bufferCount",
         ),
     ];
-    for (stages, path) in cases {
-        let err = refused(stages);
+    for (operators, path) in cases {
+        let err = refused(operators);
         assert!(
             matches!(err, LoadError::Malformed { path: ref p, ref problem }
                 if p == path && problem.contains("one item")),
             "{path}: {err}"
         );
     }
-    // After a stage that makes many items from one, they are fine.
+    // After an operator that makes many items from one, they are fine.
     counting()
         .1
         .build_pipe(numbers([
@@ -828,9 +829,9 @@ fn last_and_buffer_count_where_they_could_only_see_one_item_are_refused() {
 
 #[test]
 fn last_and_buffer_count_after_an_emit_can_never_run() {
-    for stage in [last(), buffer_count(2)] {
+    for operator in [last(), buffer_count(2)] {
         assert_eq!(
-            refused([emit("out"), stage]),
+            refused([emit("out"), operator]),
             LoadError::Unreachable {
                 path: "pipe[1]".into()
             }
@@ -847,7 +848,7 @@ fn no_operator_can_take_a_new_word_of_the_pipe() {
             .unwrap_err();
         assert_eq!(err, RegistryError::Reserved(word.into()));
     }
-    // `each` and `collect`, the old names of the mapping stages and of
+    // `each` and `collect`, the old names of the mapping operators and of
     // `bufferCount`, stay reserved.
     for word in ["each", "collect"] {
         let mut reg = Registry::new();
@@ -955,7 +956,7 @@ async fn run_saved_refuses_a_vine_that_cannot_replay_in_one_order() {
             pipe("inner")
                 .input(Shape::new().required("n", Ty::Int))
                 .output("out", Shape::open())
-                .stages([switch_map([emit("out")])]),
+                .operators([switch_map([emit("out")])]),
         )
         .unwrap();
     reg.add_vine(inner).unwrap();
@@ -987,14 +988,14 @@ async fn run_saved_refuses_a_vine_that_cannot_replay_in_one_order() {
 }
 
 #[tokio::test]
-async fn an_act_with_a_saved_result_is_not_run_again() {
+async fn a_call_with_a_saved_result_is_not_made_again() {
     let world = World::new();
     let vine = registry(&world)
         .build_pipe(
             pipe("v")
                 .input(Shape::new().required("branch", Ty::Text))
                 .output("out", Shape::open())
-                .stages([
+                .operators([
                     tap("git.refresh_branch", json!({ "branch": "$item.branch" })),
                     call(
                         "git.worktree_add",
@@ -1039,7 +1040,7 @@ async fn a_saved_failure_is_replayed_as_a_failure() {
                 .input(Shape::new().required("branch", Ty::Text))
                 .output("out", Shape::open())
                 .output("failed", Shape::open())
-                .stages([
+                .operators([
                     call(
                         "git.worktree_add",
                         json!({ "name": "$item.branch", "from": "main" }),
@@ -1053,7 +1054,7 @@ async fn a_saved_failure_is_replayed_as_a_failure() {
     let mut saved = Vec::new();
     let (first, _) = saved_run(&vine, items.clone(), &mut saved, Some(1)).await;
     assert_eq!(first, [("failed".to_owned(), json!({ "why": "exists" }))]);
-    // The act would work now. The replay still gives the saved failure, so
+    // The operator would work now. The replay still gives the saved failure, so
     // the run does not change its mind about what it already handed out.
     let mut replayed = saved.clone();
     replayed.retain(|e| !matches!(e, Entry::Emitted { .. }));
@@ -1064,7 +1065,7 @@ async fn a_saved_failure_is_replayed_as_a_failure() {
 }
 
 #[tokio::test]
-async fn a_stream_act_is_told_where_to_resume_and_its_saved_items_flow_again() {
+async fn a_stream_operator_is_told_where_to_resume_and_its_saved_items_flow_again() {
     let (calls, reg) = counting();
     let vine = reg
         .build_pipe(numbers([
@@ -1110,7 +1111,7 @@ async fn a_stream_act_is_told_where_to_resume_and_its_saved_items_flow_again() {
 }
 
 #[tokio::test]
-async fn a_finished_stream_act_is_not_called_again_on_replay() {
+async fn a_finished_stream_operator_is_not_called_again_on_replay() {
     let (calls, reg) = counting();
     let vine = reg
         .build_pipe(numbers([count_to("$item.n").end("done"), emit("out")]))
@@ -1125,7 +1126,7 @@ async fn a_finished_stream_act_is_not_called_again_on_replay() {
 }
 
 #[tokio::test]
-async fn a_used_vine_saves_its_acts_apart_from_the_outer_vines() {
+async fn a_used_vine_saves_its_calls_apart_from_the_outer_vines() {
     let world = World::new();
     let mut reg = registry(&world);
     let inner = reg
@@ -1133,7 +1134,7 @@ async fn a_used_vine_saves_its_acts_apart_from_the_outer_vines() {
             pipe("refresh")
                 .input(Shape::new().required("branch", Ty::Text))
                 .output("done", Shape::open())
-                .stages([
+                .operators([
                     tap("git.refresh_branch", json!({ "branch": "inner" })),
                     emit("done"),
                 ]),
@@ -1145,7 +1146,7 @@ async fn a_used_vine_saves_its_acts_apart_from_the_outer_vines() {
             pipe("v")
                 .input(Shape::new().required("branch", Ty::Text))
                 .output("out", Shape::open())
-                .stages([
+                .operators([
                     tap("git.refresh_branch", json!({ "branch": "outer" })),
                     use_vine("refresh", None).on("done", [emit("out")]),
                 ]),
@@ -1174,7 +1175,7 @@ async fn a_journal_that_does_not_fit_the_run_is_a_run_error() {
             pipe("v")
                 .input(Shape::new().required("branch", Ty::Text))
                 .output("out", Shape::open())
-                .stages([
+                .operators([
                     tap("git.refresh_branch", json!({ "branch": "$item.branch" })),
                     emit("out"),
                 ]),
@@ -1204,9 +1205,9 @@ async fn a_journal_that_does_not_fit_the_run_is_a_run_error() {
         a(),
     )
     .await;
-    // Saved as a stream where the vine has an act that gives one result.
+    // Saved as a stream where the vine has an operator that gives one result.
     misfit(
-        "saved as a stream act",
+        "saved as a stream operator",
         vec![Entry::Started {
             at: "pipe[0]#0".into(),
             input: json!({ "branch": "a" }),

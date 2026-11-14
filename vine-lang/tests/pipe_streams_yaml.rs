@@ -2,15 +2,15 @@
 //! and the YAML forms of `fork`, `last`, `bufferCount` and `end`.
 #![cfg(feature = "yaml")]
 
-mod acts;
+mod fake;
 
 use std::sync::Arc;
 
-use acts::agent::{job, job_run_pipe, job_run_registry, Host, Script};
-use acts::World;
+use fake::agent::{job, job_run_pipe, job_run_registry, Host, Script};
+use fake::World;
 use futures::{stream, StreamExt};
 use vine_lang::pipe::{
-    buffer_count, call, catch_error, emit, fork, last, pipe, tap, Pipe, PipeDef, Stage,
+    buffer_count, call, catch_error, emit, fork, last, pipe, tap, Operator, Pipe, PipeDef,
 };
 use vine_lang::{json, Entry, Event, Journal, LoadError, PipeOutput, RunError, Shape, Ty, Value};
 
@@ -168,22 +168,22 @@ fn head() -> &'static str {
     "vine: v\ninput: { n: int }\noutputs: { out: { n: int }, failed: {} }\npipe:\n"
 }
 
-fn def(stages: impl IntoIterator<Item = Stage>) -> PipeDef {
+fn def(operators: impl IntoIterator<Item = Operator>) -> PipeDef {
     pipe("v")
         .input(Shape::new().required("n", Ty::Int))
         .output("out", Shape::new().required("n", Ty::Int))
         .output("failed", Shape::new())
-        .stages(stages)
+        .operators(operators)
 }
 
 #[test]
-fn the_same_mistake_with_a_new_stage_is_refused_with_the_same_error() {
+fn the_same_mistake_with_a_new_operator_is_refused_with_the_same_error() {
     let (world, host) = (World::new(), Host::new());
     let reg = job_run_registry(&world, &host);
     let agent = || json!({ "key": "k", "dir": "/d", "brief": "b" });
-    let cases: Vec<(Vec<Stage>, String)> = vec![
+    let cases: Vec<(Vec<Operator>, String)> = vec![
         (
-            vec![fork(Vec::<Vec<Stage>>::new()), emit("out")],
+            vec![fork(Vec::<Vec<Operator>>::new()), emit("out")],
             "  - fork: []\n  - emit: out\n".into(),
         ),
         (
@@ -215,8 +215,8 @@ fn the_same_mistake_with_a_new_stage_is_refused_with_the_same_error() {
             "  - call: agent.run\n    with: { key: 1 }\n  - emit: out\n".into(),
         ),
     ];
-    for (stages, yaml) in cases {
-        let from_rust = reg.build_pipe(def(stages)).unwrap_err();
+    for (operators, yaml) in cases {
+        let from_rust = reg.build_pipe(def(operators)).unwrap_err();
         let from_yaml = reg.load_pipe(&format!("{}{yaml}", head())).unwrap_err();
         assert_eq!(from_rust, from_yaml, "{yaml}");
     }

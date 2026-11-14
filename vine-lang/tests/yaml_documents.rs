@@ -1,5 +1,5 @@
 //! What the YAML layer refuses about a document as a whole, before it
-//! reads any stage, and what it allows.
+//! reads any operator, and what it allows.
 #![cfg(feature = "yaml")]
 
 use vine_lang::{json, LoadError, Registry};
@@ -58,9 +58,9 @@ fn a_document_that_is_not_a_map_or_misses_a_part_is_refused_where_it_is_wrong() 
 fn a_duplicate_key_is_refused_instead_of_keeping_the_last() {
     let top = "vine: t\nvine: u\ninput: {}\noutputs: { done: {} }\npipe: [ { emit: done } ]\n";
     assert!(matches!(refused(top), LoadError::Yaml(ref m) if m.contains("duplicate")));
-    let stage =
+    let operator =
         "vine: t\ninput: {}\noutputs: { done: {} }\npipe:\n  - emit: done\n    emit: done\n";
-    assert!(matches!(refused(stage), LoadError::Yaml(ref m) if m.contains("duplicate")));
+    assert!(matches!(refused(operator), LoadError::Yaml(ref m) if m.contains("duplicate")));
 }
 
 #[tokio::test]

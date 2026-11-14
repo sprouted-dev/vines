@@ -1,12 +1,12 @@
 //! What a saved run remembers from what its caller kept, and the context
-//! every stage of one run shares.
+//! every operator of one run shares.
 //!
 //! One book serves both ways to survive a restart. A journal is a book
 //! whose lines all belong to item 0, the whole run. A bookmark's lines
 //! belong to the input item they came from, and a run from a position
 //! reads only the lines past it.
 //!
-//! For a stream act that gives its items again, the book keeps how far
+//! For a stream operator that gives its items again, the book keeps how far
 //! each call got and how many outputs made from the items after that were
 //! handed out. A replay hands those out again silently, in order, and then
 //! hands out the rest.
@@ -18,7 +18,7 @@
 //!
 //! The book also counts the outputs made at each place of each input item,
 //! which is what an output's id is made from. The counts are kept and
-//! forgotten with the counts of stage runs, so they stay as small as the
+//! forgotten with the counts of operator runs, so they stay as small as the
 //! work in flight.
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
@@ -33,7 +33,7 @@ use super::tag::{Moves, Tag};
 use crate::journal::{item_of_stream, Bookmark, Ending, Entry, Journal, Line, Timing};
 use crate::registry::OpError;
 
-/// Where one call of an act is saved: the input item it belongs to, and
+/// Where one call of a registered operator is saved: the input item it belongs to, and
 /// its key within that item's work, such as `pipe[1]#0`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(super) struct Key {
@@ -57,14 +57,14 @@ impl fmt::Display for Key {
 pub(super) struct Book {
     /// Saved results. Taken out as the replay uses them.
     saved: HashMap<Key, Saved>,
-    /// How many times each stage has run so far, per input item.
+    /// How many times each operator has run so far, per input item.
     counts: HashMap<(u64, String), u64>,
     /// New lines for the caller to keep.
     pub(super) fresh: VecDeque<Line>,
     /// The outputs the caller was already handed, oldest first, per input
     /// item and per group of work: the scope the output was made in.
     handed: HashMap<(u64, String), VecDeque<Handed>>,
-    /// For each stream act call that gives its items again: how far it got.
+    /// For each stream operator call that gives its items again: how far it got.
     calls: HashMap<Key, CallState>,
     /// How many outputs were made so far in each group of work of each
     /// input item, handed out or made again, counting outputs handed out
@@ -78,7 +78,7 @@ pub(super) struct Book {
 /// One output the caller was handed before a restart.
 struct Handed {
     output: String,
-    /// The item of a stream act call it was made from, when `last` lifted
+    /// The item of a stream operator call it was made from, when `last` lifted
     /// it out of its groups.
     from: Option<String>,
     /// The call's position passed that item, so the output is never made
@@ -86,7 +86,7 @@ struct Handed {
     gone: bool,
 }
 
-/// How far one call of a stream act that gives its items again got.
+/// How far one call of a stream operator that gives its items again got.
 #[derive(Default)]
 struct CallState {
     /// Every item through this number is fully done.
@@ -122,7 +122,7 @@ pub(super) enum Saved {
         items: VecDeque<Value>,
         end: Option<Result<Value, OpError>>,
     },
-    /// A stream act that gives its items again: how far it got, and how
+    /// A stream operator that gives its items again: how far it got, and how
     /// many outputs made from the items after that were handed out.
     Position {
         input: Value,
@@ -283,7 +283,7 @@ impl Book {
                 }
                 _ => {
                     return Err(format!(
-                        "a position for `{}`, which is not a stream act that gives its items again and was started",
+                        "a position for `{}`, which is not a stream operator that gives its items again and was started",
                         key(at)
                     ))
                 }
@@ -295,7 +295,7 @@ impl Book {
                 }) => *stopped = Some((*items, how.clone())),
                 _ => {
                     return Err(format!(
-                        "a stop for `{}`, which is not a stream act that gives its items again and is still going",
+                        "a stop for `{}`, which is not a stream operator that gives its items again and is still going",
                         key(at)
                     ))
                 }
@@ -311,12 +311,12 @@ impl Book {
         Ok(())
     }
 
-    /// The keys of every saved act and decision not used yet.
+    /// The keys of every saved call and decision not used yet.
     pub(super) fn keys(&self) -> impl Iterator<Item = &Key> {
         self.saved.keys().chain(self.timings.keys())
     }
 
-    /// The saved position of a stream act call. A call saved as started
+    /// The saved position of a stream operator call. A call saved as started
     /// with nothing after it yet becomes one.
     fn position_of(&mut self, key: Key) -> Option<&mut Saved> {
         let saved = self.saved.get_mut(&key)?;
@@ -338,7 +338,7 @@ impl Book {
         matches!(saved, Saved::Position { .. }).then_some(saved)
     }
 
-    /// A call of a stream act that gives its items again starts or carries
+    /// A call of a stream operator that gives its items again starts or carries
     /// on: every item through `through` is done, and `skip` outputs made
     /// from the items after them were handed out before.
     pub(super) fn open_call(&mut self, call: &Key, through: u64, skip: u64) {
@@ -352,7 +352,7 @@ impl Book {
         );
     }
 
-    /// Every item through `through` of the stream act call `call` is fully
+    /// Every item through `through` of the stream operator call `call` is fully
     /// done. Keep that, forget what the run counted for them, and give the
     /// caller a line to save.
     pub(super) fn moved(&mut self, call: &Key, through: u64) {
@@ -451,19 +451,19 @@ impl Book {
     }
 }
 
-/// What every stage of one run shares: the book, when the run is saved,
+/// What every operator of one run shares: the book, when the run is saved,
 /// and the scope its keys live in.
 #[derive(Clone, Default)]
 pub(super) struct Cx {
     pub(super) book: Option<Arc<Mutex<Book>>>,
     pub(super) scope: Arc<str>,
-    /// Where the ledgers of stream act calls that give their items again
+    /// Where the ledgers of stream operator calls that give their items again
     /// say they moved.
     pub(super) moves: Moves,
 }
 
 impl Cx {
-    /// The key for this run of the stage at `path` for a value with `tag`,
+    /// The key for this run of the operator at `path` for a value with `tag`,
     /// when the run is saved.
     pub(super) fn key(&self, path: &str, tag: &Tag) -> Option<Key> {
         let book = self.book.as_ref()?;
@@ -498,13 +498,13 @@ impl Cx {
         group
     }
 
-    /// One run of the stages a `timeout` at `path` covers, for the value
-    /// with `tag`: the tag the covered stages run under, and where the
+    /// One run of the operators a `timeout` at `path` applies to, for the
+    /// value with `tag`: the tag those operators run under, and where the
     /// decision is saved, when the run is saved. Each run is a scope of its
     /// own, numbered in the order values reach the `timeout`, as a group
-    /// of a `mergeMap` is. So a replay that skips the covered
-    /// stages of a run that timed out leaves the keys of every other run
-    /// where they were. Unsaved, the value keeps its tag.
+    /// of a `mergeMap` is. So a replay that skips the operators of a run
+    /// that timed out leaves the keys of every other run where they were.
+    /// Unsaved, the value keeps its tag.
     pub(super) fn timed_run(&self, path: &str, tag: &Tag) -> (Tag, Option<Key>) {
         let scoped = self.group(&format!("{path}.timeout"), tag);
         let key = self.book.as_ref().map(|_| Key {
@@ -540,9 +540,9 @@ impl Cx {
     }
 
     /// Wait until the caller has been handed every line made so far. A
-    /// saved run calls an act only then, so the result of the act before
-    /// it is in the caller's hands, and can be saved, before this act
-    /// starts. Without the wait, acts that finish at once would all run
+    /// saved run makes a call only then, so the result of the call before
+    /// it is in the caller's hands, and can be saved, before this call
+    /// starts. Without the wait, calls that finish at once would all run
     /// before the caller saw the first result, and a crash between would
     /// run them all again.
     pub(super) async fn handed_out(&self) {

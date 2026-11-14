@@ -1,14 +1,14 @@
-//! One call of a stream act, as it goes: first what was saved, then live.
+//! One call of a stream operator, as it goes: first what was saved, then live.
 //!
 //! A call is saved in one of two ways.
 //!
-//! - Every item: each item the act gives is saved, and a replay gives the
-//!   saved items again itself before it asks the act for the rest.
-//! - By position, for an act that gives its items again: the items are
+//! - Every item: each item the operator gives is saved, and a replay gives
+//!   the saved items again itself before it asks the operator for the rest.
+//! - By position, for an operator that gives its items again: the items are
 //!   numbered and tagged, and the run saves only how far the call got (an
 //!   [`Entry::Through`]) and how it stopped (an [`Entry::Stopped`]). A
-//!   replay asks the act for the items after the position, so the stages
-//!   after it rebuild what they held the way they do for input items.
+//!   replay asks the operator for the items after the position, so the
+//!   operators after it rebuild what they held the way they do for input items.
 //!
 //! A call that stops early because a `catchError` or `finalize` took over the
 //! rest of the item's work saves that it was abandoned, so a replay does
@@ -28,22 +28,22 @@ use super::unit::{add_field, Runner, Unit};
 use super::Keep;
 use crate::error::RunError;
 use crate::journal::{Ending, Entry};
-use crate::registry::{ActStream, OpContext, OpError, Part, StreamHandler};
+use crate::registry::{OpContext, OpError, OperatorStream, Part, StreamHandler};
 
-/// How the checker says a stream act call is saved.
+/// How the checker says a stream operator call is saved.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum ItemSaving {
-    /// Every item the act gives.
+    /// Every item the operator gives.
     Every,
-    /// How far the call got. The act gives its items again.
+    /// How far the call got. The operator gives its items again.
     Position,
 }
 
 impl Unit {
-    /// Run a stream act for one item: one item out per value it gives.
+    /// Run a stream operator for one item: one item out per value it gives.
     pub(super) fn stream(&self, item: Value, tag: Tag, cx: Cx) -> Items {
         let Runner::Stream(handler) = &self.runner else {
-            unreachable!("only a stream act runs as a stream")
+            unreachable!("only a stream operator runs as a stream")
         };
         let input = match self.resolve(&item) {
             Ok(v) => v,
@@ -78,7 +78,7 @@ impl Unit {
                     return run.misfit_input(&key, &input);
                 }
                 // A call saved item by item replays that way, whatever
-                // the act says now.
+                // the operator says now.
                 if !items.is_empty() || end.is_some() {
                     saving = ItemSaving::Every;
                 }
@@ -107,7 +107,7 @@ impl Unit {
             }
             Some(Saved::Once { .. }) => {
                 return one(Err(misfit(format!(
-                    "`{key}` was saved as an act that gives one result, and `{}` is a stream act",
+                    "`{key}` was saved as an operator that gives one result, and `{}` is a stream operator",
                     self.spec.name
                 ))
                 .of(&tag)))
@@ -149,11 +149,11 @@ struct ByPosition {
     stop_saved: bool,
 }
 
-/// One call of a stream act, as it goes: first what was saved, then live.
+/// One call of a stream operator, as it goes: first what was saved, then live.
 pub(super) struct StreamRun {
     unit: Unit,
     handler: StreamHandler,
-    /// The item as it reached the stage.
+    /// The item as it reached the `call`.
     item: Value,
     tag: Tag,
     input: Value,
@@ -162,7 +162,7 @@ pub(super) struct StreamRun {
     replay: VecDeque<Value>,
     replay_end: Option<Result<Value, OpError>>,
     started: bool,
-    live: Option<ActStream>,
+    live: Option<OperatorStream>,
     /// How many items this call has given, saved ones included. For a call
     /// saved by position it starts at the position.
     given: u64,
@@ -309,7 +309,7 @@ impl StreamRun {
 
     /// Give what a saved stop says comes after the items: nothing when the
     /// call was abandoned or its end is already done, else its end again.
-    /// The act is not read past this point.
+    /// The operator is not read past this point.
     fn give_saved_stop(mut self) -> Option<(Flow, StreamRun)> {
         self.live = None;
         let position = self.position.as_mut()?;
@@ -331,14 +331,14 @@ impl StreamRun {
     }
 
     /// For a replay of a call saved by position that stopped: the run
-    /// error to give when the act stopped before it gave again every item
+    /// error to give when the operator stopped before it gave again every item
     /// it gave the first time.
     fn gave_fewer_again(&self, how: &str) -> Option<RunError> {
         let (items, _) = self.position.as_ref()?.stopped.as_ref()?;
         let key = self.key.as_ref()?;
         (self.given < *items).then(|| RunError::ReplayMisfit {
             problem: format!(
-                "`{key}` gave {items} items before it stopped, and asked again it {how} after {}; an act that gives its items again must give the same ones",
+                "`{key}` gave {items} items before it stopped, and asked again it {how} after {}; an operator that gives its items again must give the same ones",
                 self.given
             ),
         })
@@ -427,7 +427,7 @@ impl StreamRun {
         Some((Err(fault), self))
     }
 
-    /// The item for the value the act gave last, numbered `given`.
+    /// The item for the value the operator gave last, numbered `given`.
     pub(super) fn item_with(&self, value: Value) -> Flow {
         let tag = match &self.position {
             Some(p) => Tag::given(self.given, &p.ledger, &p.call, &self.tag),

@@ -1,11 +1,11 @@
-//! Installing a trellis: one registry for it, a `move.<name>` stream act
+//! Installing a trellis: one registry for it, a `move.<name>` stream operator
 //! for each of its moves, its vines built in order, and every check that
 //! can be made before anyone presses anything.
 //!
 //! Which vine a move starts is Terra's knowledge, so the rule "a vine a
-//! move starts is never a stage of another vine" is checked here. The
+//! move starts is never run by `use` in another vine" is checked here. The
 //! library gives what the check needs: [`Pipe::uses`] lists the vines a
-//! vine runs with `use`, and [`Pipe::acts`] the acts it calls, which shows
+//! vine runs with `use`, and [`Pipe::calls`] the operators it calls, which shows
 //! the moves it presses.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -22,8 +22,8 @@ use super::{
     Trigger, VineSource, ABANDONED,
 };
 
-/// The act a vine calls to press `move_name`.
-pub(super) fn press_act(move_name: &str) -> String {
+/// The operator a vine calls to press `move_name`.
+pub(super) fn press_operator(move_name: &str) -> String {
     format!("move.{move_name}")
 }
 
@@ -79,7 +79,7 @@ fn check_names(inner: &Inner, moves: &[Move]) -> Result<(), InstallError> {
     Ok(())
 }
 
-/// Register the stream act a vine calls to press `decl`. Its settings are
+/// Register the stream operator a vine calls to press `decl`. Its settings are
 /// the move's payload plus `request`, the press the calling vine runs
 /// under. The press it makes has an id built from that request, the move
 /// and the payload, so the same call after a restart attaches to it.
@@ -88,7 +88,7 @@ fn register_press(reg: &mut Registry, inner: &Arc<Inner>, decl: &Move) {
     for (field, ty) in &decl.payload {
         settings = settings.required(field, *ty);
     }
-    let spec = OperatorSpec::new(&press_act(decl.name))
+    let spec = OperatorSpec::new(&press_operator(decl.name))
         .settings(settings)
         .returns(
             Shape::new()
@@ -106,7 +106,7 @@ fn register_press(reg: &mut Registry, inner: &Arc<Inner>, decl: &Move) {
         .touches(["terra"]);
     let weak = Arc::downgrade(inner);
     let name = decl.name.to_owned();
-    reg.register_replayable_stream_act(spec, move |mut v, cx| {
+    reg.register_replayable_stream(spec, move |mut v, cx| {
         let inner = weak
             .upgrade()
             .expect("Terra outlives the runs of its vines");
@@ -125,7 +125,7 @@ fn register_press(reg: &mut Registry, inner: &Arc<Inner>, decl: &Move) {
         let from = usize::try_from(cx.resume_from()).expect("a count of items fits in usize");
         press::parts(inner, id, name.clone(), v).skip(from).boxed()
     })
-    .expect("move names are checked before their acts are registered");
+    .expect("move names are checked before their operators are registered");
 }
 
 fn build_vines(reg: &mut Registry, vines: Vec<VineSource>) -> Result<Vec<Pipe>, InstallError> {

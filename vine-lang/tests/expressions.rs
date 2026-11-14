@@ -5,11 +5,11 @@
 //!
 //!     cargo test --no-default-features --test expressions
 
-use vine_lang::pipe::{branch, emit, emit_with, filter, op, pipe, PipeDef, Stage};
+use vine_lang::pipe::{branch, emit, emit_with, filter, op, pipe, Operator, PipeDef};
 use vine_lang::{json, LoadError, Registry, Shape, Ty, Value};
 
 /// A vine over items with optional fields, with one open output, `out`.
-fn over(stages: impl IntoIterator<Item = Stage>) -> PipeDef {
+fn over(operators: impl IntoIterator<Item = Operator>) -> PipeDef {
     pipe("v")
         .input(
             Shape::new()
@@ -20,7 +20,7 @@ fn over(stages: impl IntoIterator<Item = Stage>) -> PipeDef {
                 .optional("nested", Ty::Object),
         )
         .output("out", Shape::open())
-        .stages(stages)
+        .operators(operators)
 }
 
 /// What the vine emits for one item, as values.

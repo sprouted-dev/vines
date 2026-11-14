@@ -1,14 +1,14 @@
 # Fetch every page of each event of an endless stream. `feed.pages` is a
-# stream act: one event starts it, and it gives one item per page and
+# stream operator: one event starts it, and it gives one item per page and
 # then its end.
 #
 # Run it with `run_from` and keep a bookmark. The position passes an
 # event only when its stream has ended and its `fetched` output was
 # handed out. After a restart mid stream, the saved pages flow again
-# without being handed out twice, and the act is asked to go on from the
+# without being handed out twice, and the operator is asked to go on from the
 # page after them.
 #
-# When `feed.pages` is registered as a stream act that gives its items
+# When `feed.pages` is registered as a stream operator that gives its items
 # again, the bookmark keeps how far each event's pages got, not the pages,
 # and a restart fetches the pages after that point again.
 vine: event_pages

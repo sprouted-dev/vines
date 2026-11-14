@@ -12,10 +12,10 @@
 //! is not done until its outputs have been handed out.
 //!
 //! The same idea works one level down. In a saved run, each item a stream
-//! act that gives its items again gives gets a tag of its own, numbered
+//! operator that gives its items again gives gets a tag of its own, numbered
 //! from 1 within that call and counted by a ledger of the call's own. It
-//! holds the tag of the value the act was given, so that value is not done
-//! while any item the act gave is in flight. When the call's ledger moves,
+//! holds the tag of the value the operator was given, so that value is not done
+//! while any item the operator gave is in flight. When the call's ledger moves,
 //! it says so on [`Moves`], and the run saves how far the call got.
 //!
 //! # Groups
@@ -23,16 +23,16 @@
 //! In a saved run, each value that enters a `mergeMap` starts a
 //! group: the work of that one value, numbered in the order the values
 //! enter. Its tag holds the tag of the value as it entered, and names the
-//! group in its scope, such as `pipe[1].mergeMap@3/`. The keys of acts run for
+//! group in its scope, such as `pipe[1].mergeMap@3/`. The keys of calls made for
 //! the group, and the outputs made from it, start with that scope, so they
 //! line up after a restart in whatever order the groups finish. Values that
-//! leave the `mergeMap` keep the group's tag, so the stages after it key their
-//! acts by group too, until `last` picks one value out of many groups and
+//! leave the `mergeMap` keep the group's tag, so the operators after it key their
+//! calls by group too, until `last` picks one value out of many groups and
 //! [lifts](Tag::lifted) it back out.
 //!
-//! Each run of the stages a `timeout` covers is a group too, such as
+//! Each run of the operators a `timeout` applies to is a group too, such as
 //! `pipe[3].timeout@0/`, numbered in the order values reach the `timeout`.
-//! A replay of a run that timed out skips its stages, and the keys of every
+//! A replay of a run that timed out skips its operators, and the keys of every
 //! other run stay where they were.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
@@ -51,22 +51,22 @@ struct Hold {
     count: Option<Count>,
     /// For a batch: the tags of the values in it. Empty for one item.
     parts: Vec<Tag>,
-    /// For an item a stream act call gave, or a batch of them: the call.
+    /// For an item a stream operator call gave, or a batch of them: the call.
     call: Option<Arc<Key>>,
     /// For the work of one value inside a `mergeMap`: where that
     /// `mergeMap` stands, with the scope of the vine it is in, such as
     /// `pipe[1].mergeMap`.
     group: Option<Arc<str>>,
-    /// Where the keys of acts run for this value start.
+    /// Where the keys of calls made for this value start.
     scope: Arc<str>,
     /// For a value `last` lifted out of its groups: the scope of the item
-    /// of a stream act call it was made from, such as `pipe[1]#0@7/`, if
+    /// of a stream operator call it was made from, such as `pipe[1]#0@7/`, if
     /// any. When the call's position passes that item, the value is never
     /// made again.
     from: Option<Arc<str>>,
     /// The input item a line for this value belongs to.
     item: u64,
-    /// The tag this one was made from: the value a stream act was given,
+    /// The tag this one was made from: the value a stream operator was given,
     /// the value that started a group, or the value `last` lifted out of
     /// its groups. It is held so that value is not done while this one is
     /// in flight, and read only to find a group.
@@ -75,7 +75,7 @@ struct Hold {
 
 struct Count {
     /// The first and last item this value came from, as `ledger` counts
-    /// them: input items, or the items one stream act call gave.
+    /// them: input items, or the items one stream operator call gave.
     first: u64,
     last: u64,
     ledger: Arc<Mutex<Ledger>>,
@@ -108,7 +108,7 @@ impl Tag {
         })))
     }
 
-    /// The tag of item `n` that the stream act call `call` gave, counted by
+    /// The tag of item `n` that the stream operator call `call` gave, counted by
     /// the call's `ledger`. `up` is the tag of the value the call was
     /// given.
     pub(super) fn given(n: u64, ledger: &Arc<Mutex<Ledger>>, call: &Arc<Key>, up: &Tag) -> Tag {
@@ -146,7 +146,7 @@ impl Tag {
     /// The tag of a batch made of values with these tags. The items in it
     /// are done together: the position never stops between them. The
     /// batch is counted by the ledger of its last value. The checker keeps
-    /// the items of two stream act calls, and of two groups, out of one
+    /// the items of two stream operator calls, and of two groups, out of one
     /// batch.
     pub(super) fn batch(parts: Vec<Tag>) -> Tag {
         let Some(newest) = parts.iter().rev().find_map(|t| t.0.as_ref()) else {
@@ -234,7 +234,7 @@ impl Tag {
     }
 
     /// For a value `last` lifted out of its groups: the scope of the item
-    /// of a stream act call it was made from.
+    /// of a stream operator call it was made from.
     pub(super) fn stream_item(&self) -> Option<&str> {
         self.0.as_ref()?.from.as_deref()
     }
@@ -252,8 +252,8 @@ impl Tag {
         self.0.as_ref().map_or(0, |h| h.item)
     }
 
-    /// Where the keys of acts run for this value start. Empty unless the
-    /// value came from an item a stream act gives again, or from a group.
+    /// Where the keys of calls made for this value start. Empty unless the
+    /// value came from an item a stream operator gives again, or from a group.
     /// For item 7 of a call it is that call's key and the number, such as
     /// `pipe[1]#0@7/`. For group 3 of a `mergeMap` it is where the
     /// `mergeMap` stands and the number, such as `pipe[1].mergeMap@3/`. Scopes nest, so
@@ -263,7 +263,7 @@ impl Tag {
         self.0.as_ref().map_or("", |h| &h.scope)
     }
 
-    /// The stream act call this value came from, and the number of its
+    /// The stream operator call this value came from, and the number of its
     /// item, when the call gives its items again and no group stands
     /// between the call's item and this value.
     pub(super) fn stream(&self) -> Option<(Arc<Key>, u64)> {
@@ -286,11 +286,11 @@ impl Hold {
     }
 }
 
-/// Where a stream act call's ledger says it moved: the call, and the
+/// Where a stream operator call's ledger says it moved: the call, and the
 /// number of its items now fully done.
 pub(super) type Moves = Arc<Mutex<VecDeque<(Arc<Key>, u64)>>>;
 
-/// Who to tell when a stream act call's ledger moves.
+/// Who to tell when a stream operator call's ledger moves.
 #[derive(Debug)]
 struct Notify {
     call: Arc<Key>,
@@ -308,7 +308,7 @@ pub(super) struct Ledger {
     /// Runs of items that are done together, first to last. They never
     /// overlap and all lie past the position.
     joins: BTreeMap<u64, u64>,
-    /// For the ledger of a stream act call: where to say it moved.
+    /// For the ledger of a stream operator call: where to say it moved.
     notify: Option<Notify>,
     /// For the ledger of input items: items done past the position that
     /// the run has not told its caller about yet. An item in a run of
@@ -329,7 +329,7 @@ impl Ledger {
         ledger
     }
 
-    /// A ledger for the items the stream act call `call` gives, when the
+    /// A ledger for the items the stream operator call `call` gives, when the
     /// items through `position` are done. It says on `moves` each time it
     /// moves.
     pub(super) fn of_call(position: u64, call: Arc<Key>, moves: Moves) -> Ledger {

@@ -2,7 +2,7 @@
 //!
 //! One loop serves all three ways to run. It hands out, in this order:
 //! the lines to save as soon as they are known, then the lines that say a
-//! stream act call moved, then the next output, and, when it holds
+//! stream operator call moved, then the next output, and, when it holds
 //! nothing, the position if it moved, and then each item done past the
 //! position. So an output comes before the line that records it, and that
 //! line comes before the position, or the `Done`, that passes its item.

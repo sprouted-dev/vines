@@ -4,7 +4,7 @@
 # job's facts, and lands each output of `job_launch` as an event before
 # this vine hears of it. So the vine passes only the job's id.
 #
-# `move.launch` is a stream act that Terra registers. It gives one item
+# `move.launch` is a stream operator that Terra registers. It gives one item
 # per output of the inner vine, `{ output, event, landed, payload }`, and
 # ends with `{ status }`: `done`, `failed` with a `reason`, or `refused`
 # with the `gate` that refused it. A refused job is data here, not a

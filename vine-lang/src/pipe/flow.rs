@@ -1,4 +1,4 @@
-//! What flows between stages, and the stream shapes the stages are built
+//! What flows between operators, and the stream shapes the operators are built
 //! from.
 
 use std::collections::VecDeque;
@@ -18,8 +18,8 @@ use crate::error::RunError;
 use crate::expr::Env;
 use crate::registry::OpError;
 
-/// What flows between stages: a value still being worked on, or a value
-/// already sent to an output. Later stages leave an output alone. Each
+/// What flows between operators: a value still being worked on, or a value
+/// already sent to an output. Later operators leave an output alone. Each
 /// carries the [`Tag`] of the input items it came from.
 #[derive(Clone)]
 pub(super) enum Flowing {
@@ -31,7 +31,7 @@ pub(super) enum Flowing {
 /// the tag of the item that failed, so that item is not done while the
 /// failure is in flight.
 pub(super) enum Fault {
-    /// An operator or act failed.
+    /// A registered operator failed.
     Op(Box<OpFault>),
     Fatal(Box<RunError>, Tag),
 }
@@ -40,7 +40,7 @@ pub(super) struct OpFault {
     pub(super) path: String,
     pub(super) from: String,
     pub(super) error: OpError,
-    /// The item as it was when the stage failed.
+    /// The item as it was when the operator failed.
     pub(super) item: Value,
     pub(super) tag: Tag,
 }
@@ -513,7 +513,7 @@ pub(super) fn rescued(body: Items, handler: Transform, cx: Cx) -> Items {
 
 /// Run `f` for each value still being worked on, and send on everything
 /// it gives back. Outputs and failures from upstream pass through.
-pub(super) fn covering<F>(f: F) -> Transform
+pub(super) fn per_item_held<F>(f: F) -> Transform
 where
     F: Fn(Value, Tag, Cx) -> BoxFuture<'static, Vec<Flow>> + Send + Sync + 'static,
 {

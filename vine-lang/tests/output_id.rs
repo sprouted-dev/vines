@@ -5,19 +5,19 @@
 //! even with the same name and payload.
 //!
 //! The vines are built in Rust, so this file passes with the YAML feature
-//! off. The acts take time on tokio's paused clock, so which item finishes
+//! off. The operators take time on tokio's paused clock, so which item finishes
 //! when is exact and the same every run.
 
-mod acts;
+mod fake;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
-use acts::desk::{desk_registry, job, job_event, jobs, step, Desk};
+use fake::desk::{desk_registry, job, job_event, jobs, step, Desk};
 use futures::{stream, StreamExt};
 use vine_lang::pipe::{
-    call, concat_map, emit_with, filter, fork, last, merge_map, pipe, split, use_vine, Pipe,
-    PipeDef, Stage,
+    call, concat_map, emit_with, filter, fork, last, merge_map, pipe, split, use_vine, Operator,
+    Pipe, PipeDef,
 };
 use vine_lang::{
     json, Bookmark, Event, Journal, OutputId, PipeOutput, Progress, Registry, Shape, Ty, Value,
@@ -32,7 +32,7 @@ fn id_shape() -> Shape {
 /// One job's work: its first step, a note, its second step, the same
 /// note again. So each job gives `noted { id }` twice, with the same
 /// payload.
-fn twice_work() -> Vec<Stage> {
+fn twice_work() -> Vec<Operator> {
     let noted = || emit_with("noted", json!({ "id": "$item.job.id" }));
     vec![
         step("one", json!("$item.job.secs")),
@@ -42,7 +42,7 @@ fn twice_work() -> Vec<Stage> {
     ]
 }
 
-fn merging(work: Vec<Stage>) -> Stage {
+fn merging(work: Vec<Operator>) -> Operator {
     merge_map(work).concurrent(2)
 }
 
@@ -51,7 +51,7 @@ fn twice_over_jobs() -> PipeDef {
     pipe("twice")
         .input(Shape::new().required("jobs", Ty::List))
         .output("noted", id_shape())
-        .stages([split("$item.jobs").into("job"), merging(twice_work())])
+        .operators([split("$item.jobs").into("job"), merging(twice_work())])
 }
 
 /// A stream of jobs, one per input item; the items run side by side.
@@ -59,7 +59,7 @@ fn twice_over_a_stream() -> PipeDef {
     pipe("twice_stream")
         .input(Shape::new().required("job", Ty::Object))
         .output("noted", id_shape())
-        .stages([merging(twice_work())])
+        .operators([merging(twice_work())])
 }
 
 /// `twice_over_jobs` run by `use`, its notes passed on.
@@ -67,12 +67,12 @@ fn using_twice() -> PipeDef {
     pipe("outer")
         .input(Shape::new().required("jobs", Ty::List))
         .output("passed", id_shape())
-        .stages([
+        .operators([
             use_vine("twice", None).on("noted", [emit_with("passed", json!({ "id": "$item.id" }))])
         ])
 }
 
-/// Each job gives as many lines as its `secs` from a stream act saved by
+/// Each job gives as many lines as its `secs` from a stream operator saved by
 /// position, and each line is noted twice.
 fn lines_twice() -> PipeDef {
     let line = || {
@@ -84,7 +84,7 @@ fn lines_twice() -> PipeDef {
     pipe("lines")
         .input(Shape::new().required("jobs", Ty::List))
         .output("line", id_shape().required("line", Ty::Int))
-        .stages([
+        .operators([
             split("$item.jobs").into("job"),
             merging(vec![
                 call(
@@ -99,7 +99,7 @@ fn lines_twice() -> PipeDef {
 }
 
 /// For each group of jobs in turn: the jobs side by side, each a stream
-/// act saved by position, then `last` and one summary of the group. The
+/// operator saved by position, then `last` and one summary of the group. The
 /// summary is made from the end item of the call `last` picked; once that
 /// call's position passes it, the line that recorded the summary is
 /// dropped. The next group's summary must keep its id all the same.
@@ -107,7 +107,7 @@ fn summaries() -> PipeDef {
     pipe("summaries")
         .input(Shape::new().required("groups", Ty::List))
         .output("all", Shape::new().required("group", Ty::List))
-        .stages([
+        .operators([
             split("$item.groups").into("group"),
             concat_map([
                 split("$item.group").into("job"),
@@ -131,7 +131,7 @@ fn last_job() -> PipeDef {
     pipe("last_job")
         .input(Shape::new().required("jobs", Ty::List))
         .output("finished", id_shape())
-        .stages([
+        .operators([
             split("$item.jobs").into("job"),
             merging(vec![step("one", json!("$item.job.secs"))]),
             last(),

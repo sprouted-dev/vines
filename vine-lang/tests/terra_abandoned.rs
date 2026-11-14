@@ -4,12 +4,12 @@
 //! copy the abandoned launch made.
 #![cfg(feature = "yaml")]
 
-mod acts;
+mod fake;
 mod terra;
 
 use std::sync::Arc;
 
-use acts::{registry, World};
+use fake::{registry, World};
 use terra::moves::jobs_trellis;
 use terra::{Answer, Event, Refusal, Terra, ABANDONED};
 use vine_lang::{json, Value};
@@ -30,10 +30,10 @@ fn setup(world: &Arc<World>, jobs: &[&str]) -> Arc<Terra> {
     Arc::new(terra)
 }
 
-/// Pause the plan the first time `act` runs.
-fn pause_during(world: &World, terra: &Arc<Terra>, act: &str) {
+/// Pause the plan the first time `operator` runs.
+fn pause_during(world: &World, terra: &Arc<Terra>, operator: &str) {
     let t = terra.clone();
-    world.when(act, move || t.set("p-1", "state", json!("paused")));
+    world.when(operator, move || t.set("p-1", "state", json!("paused")));
 }
 
 fn kinds(events: &[Event]) -> Vec<(&str, &str)> {
@@ -168,7 +168,7 @@ async fn a_cleanup_pressed_twice_under_two_ids_changes_nothing_the_second_time()
         "output": "started",
         "work": abandoned.payload["payload"],
     });
-    // Both acts are safe to run twice: the second run stops an agent that
+    // Both operators are safe to run twice: the second run stops an agent that
     // is not running and removes a working copy that is not there.
     let second = terra.press("undo_launch", undo).await;
     assert_eq!(second.landed()[0].kind, "core.job.launch_undone");
@@ -188,11 +188,11 @@ async fn an_abandoned_output_whose_work_never_started_has_nothing_to_undo() {
     world.fail("git.worktree_add", "disk", "disk full");
     let answer = terra.press("launch", launch("j-1")).await;
     assert_eq!(answer.abandoned()[0].payload["output"], "failed");
-    let acts = world.log().len();
+    let operators = world.log().len();
 
     let answers = terra.react().await;
     assert_eq!(answers[0].landed()[0].kind, "core.job.nothing_to_undo");
-    assert_eq!(world.log().len(), acts, "the cleanup ran an act");
+    assert_eq!(world.log().len(), operators, "the cleanup ran an operator");
 }
 
 #[tokio::test]

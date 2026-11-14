@@ -3,12 +3,12 @@
 //! with the same ids, clean and after a kill at every event.
 #![cfg(feature = "yaml")]
 
-mod acts;
+mod fake;
 
 use std::sync::Arc;
 use std::time::Duration;
 
-use acts::desk::{desk_registry, merge_jobs, step, Desk};
+use fake::desk::{desk_registry, merge_jobs, step, Desk};
 use futures::{stream, StreamExt};
 use vine_lang::pipe::{catch_error, emit_with, fork, pipe, split, timeout, Pipe, PipeDef};
 use vine_lang::{json, Event, Journal, Shape, Ty, Value};
@@ -47,7 +47,7 @@ fn rust() -> PipeDef {
         .output("stepped", id().required("step", Ty::Text))
         .output("done", id())
         .output("failed", id().required("code", Ty::Text))
-        .stages([
+        .operators([
             split("$item.jobs").into("job"),
             merge_jobs(
                 Some(2),

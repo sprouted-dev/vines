@@ -1,4 +1,4 @@
-//! Fake acts for vines over an endless stream of events, and those vines
+//! Fake operators for vines over an endless stream of events, and those vines
 //! built in Rust.
 //!
 //! - `archive.put { seq, body }` archives one event. It refuses an event
@@ -6,10 +6,10 @@
 //! - `backup.store { items }` stores a batch of events under a name made
 //!   from the first and last `seq`, so storing the same batch again
 //!   replaces it.
-//! - `feed.pages { seq, pages }` is a stream act: it gives `{ page }` for
+//! - `feed.pages { seq, pages }` is a stream operator: it gives `{ page }` for
 //!   each page of one event, from the page after `resume_from`, and ends
 //!   with `{ pages }`. Every page can be fetched again, so it can be
-//!   registered as a stream act that gives its items again.
+//!   registered as a stream operator that gives its items again.
 //!
 //! Every call is a line in the world's log, such as `archive.put 3`,
 //! `backup.store 1-5`, `feed.pages 3 from 0` or, after a restart,
@@ -19,23 +19,23 @@ use std::sync::Arc;
 
 use futures::stream;
 use vine_lang::pipe::{
-    buffer_count, call, catch_error, emit_with, filter, fork, pipe, PipeDef, Stage,
+    buffer_count, call, catch_error, emit_with, filter, fork, pipe, Operator, PipeDef,
 };
 use vine_lang::{json, OpError, OperatorSpec, Part, Registry, Shape, Ty, Value};
 
-use super::{register_stream_act, Gives, World};
+use super::{register_stream, Gives, World};
 
 fn seq(v: &Value) -> u64 {
     v["seq"].as_u64().unwrap_or_default()
 }
 
-/// A registry with the three feed acts on `world`. `feed.pages` gives
+/// A registry with the three feed operators on `world`. `feed.pages` gives
 /// only the pages after those it gave, so a saved run saves every page.
 pub fn feed_registry(world: &Arc<World>) -> Registry {
     feed_registry_giving(world, Gives::OnlyNew)
 }
 
-/// The feed acts, with `feed.pages` registered as a stream act that gives
+/// The feed operators, with `feed.pages` registered as a stream operator that gives
 /// its pages again from any point, so a saved run saves how far it got.
 pub fn feed_registry_again(world: &Arc<World>) -> Registry {
     feed_registry_giving(world, Gives::Again)
@@ -45,7 +45,7 @@ pub fn feed_registry_giving(world: &Arc<World>, gives: Gives) -> Registry {
     let mut reg = Registry::new();
 
     let w = world.clone();
-    reg.register_act(
+    reg.register(
         OperatorSpec::new("archive.put")
             .settings(
                 Shape::new()
@@ -70,7 +70,7 @@ pub fn feed_registry_giving(world: &Arc<World>, gives: Gives) -> Registry {
     .unwrap();
 
     let w = world.clone();
-    reg.register_act(
+    reg.register(
         OperatorSpec::new("backup.store")
             .settings(Shape::new().required("items", Ty::List))
             .returns(
@@ -98,7 +98,7 @@ pub fn feed_registry_giving(world: &Arc<World>, gives: Gives) -> Registry {
     .unwrap();
 
     let w = world.clone();
-    register_stream_act(
+    register_stream(
         &mut reg,
         gives,
         OperatorSpec::new("feed.pages")
@@ -143,7 +143,7 @@ fn archived() -> Shape {
         .required("receipt", Ty::Text)
 }
 
-fn relay_stages() -> Vec<Stage> {
+fn relay_operators() -> Vec<Operator> {
     vec![
         call(
             "archive.put",
@@ -162,15 +162,15 @@ pub fn event_relay_pipe() -> PipeDef {
     pipe("event_relay")
         .input(event())
         .output("archived", archived())
-        .stages(relay_stages())
+        .operators(relay_operators())
 }
 
 /// `event_relay` with a `catchError`: an event the archive refuses becomes one
-/// `refused` output, and the stream goes on. The act keeps its path,
+/// `refused` output, and the stream goes on. The operator keeps its path,
 /// `pipe[0]`, so a bookmark saved by `event_relay` fits it.
 pub fn event_relay_caught_pipe() -> PipeDef {
-    let mut stages = relay_stages();
-    stages.push(catch_error([emit_with(
+    let mut operators = relay_operators();
+    operators.push(catch_error([emit_with(
         "refused",
         json!({ "seq": "$item.seq", "reason": "$item.error.message" }),
     )]));
@@ -183,7 +183,7 @@ pub fn event_relay_caught_pipe() -> PipeDef {
                 .required("seq", Ty::Int)
                 .required("reason", Ty::Text),
         )
-        .stages(stages)
+        .operators(operators)
 }
 
 /// `vines/pipe/event_backup.yaml`, built in Rust.
@@ -198,7 +198,7 @@ pub fn event_backup_pipe() -> PipeDef {
                 .required("last", Ty::Int)
                 .required("count", Ty::Int),
         )
-        .stages([
+        .operators([
             buffer_count(5),
             call("backup.store", json!({ "items": "$item.items" })).into("stored"),
             emit_with(
@@ -233,7 +233,7 @@ pub fn event_pages_pipe() -> PipeDef {
                 .required("seq", Ty::Int)
                 .required("pages", Ty::Int),
         )
-        .stages([
+        .operators([
             call(
                 "feed.pages",
                 json!({ "seq": "$item.seq", "pages": "$item.pages" }),

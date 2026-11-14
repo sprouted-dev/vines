@@ -1,18 +1,18 @@
 //! `job_run` and `event_pages` written in YAML are saved by position the
-//! same way as their Rust twins, when their stream act gives its items
+//! same way as their Rust twins, when their stream operator gives its items
 //! again.
 #![cfg(feature = "yaml")]
 
-mod acts;
+mod fake;
 
 use std::sync::Arc;
 
-use acts::agent::{expected, job, job_run_registry_again, Host};
-use acts::feed::{event_pages_pipe, feed_registry_again};
-use acts::restart::{
+use fake::agent::{expected, job, job_run_registry_again, Host};
+use fake::feed::{event_pages_pipe, feed_registry_again};
+use fake::restart::{
     events_saved, run, run_saved, run_saved_with_kills, run_with_kills, Caller, End, Keeper,
 };
-use acts::World;
+use fake::World;
 use vine_lang::{json, Pipe, Value};
 
 fn text(name: &str) -> String {
@@ -33,7 +33,7 @@ fn pages(world: &Arc<World>) -> Pipe {
 }
 
 #[test]
-fn the_yaml_vines_save_their_stream_act_by_position() {
+fn the_yaml_vines_save_their_stream_operator_by_position() {
     let (world, host) = (World::new(), Host::new());
     assert_eq!(job_run(&world, &host).saves_every_item(), []);
     assert_eq!(pages(&world).saves_every_item(), []);

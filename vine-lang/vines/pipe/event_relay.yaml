@@ -1,4 +1,4 @@
-# Archive every event of an endless stream, one act and one output each.
+# Archive every event of an endless stream, one operator and one output each.
 #
 # Run it with `run_from` and keep a bookmark. The position passes an
 # event once it is archived and its output was handed out. After a

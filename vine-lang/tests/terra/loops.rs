@@ -17,7 +17,7 @@
 //! declared effects, to a value the gate refuses. That can be trusted
 //! only when every step keeps to one artifact: each reaction on the loop
 //! presses its move on the artifact the event landed on. A nested press,
-//! or a reaction that takes its target from the event's payload, may act
+//! or a reaction that takes its target from the event's payload, may work
 //! on another artifact, so no gate is credited on such a loop.
 //!
 //! What this does not see is listed on [`LoopWhy`] and in `GUIDE.md`.
@@ -27,7 +27,7 @@ use std::collections::BTreeMap;
 use vine_lang::pipe::Pipe;
 use vine_lang::Value;
 
-use super::install::press_act;
+use super::install::press_operator;
 use super::{InstallError, Move, Pick, Reaction, Trigger};
 
 /// Why a loop was refused.
@@ -38,7 +38,7 @@ pub enum LoopWhy {
     /// The loop has gates, and going round it never sets a fact a gate
     /// reads to a value that gate refuses.
     GatesHold,
-    /// A step of the loop may act on another artifact, so no gate on it
+    /// A step of the loop may work on another artifact, so no gate on it
     /// can be trusted to stop it.
     ArtifactMayChange,
 }
@@ -111,7 +111,7 @@ fn arrows<'a>(
             continue;
         };
         for (to, other) in moves.iter().enumerate() {
-            if vine.acts().contains(&press_act(other.name)) {
+            if vine.calls().contains(&press_operator(other.name)) {
                 out.push(Arrow {
                     from,
                     to,

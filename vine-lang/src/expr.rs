@@ -3,7 +3,7 @@
 //! **References.** A string that starts with `$` is a reference:
 //! `$item`, `$item.tree.path`, `$item.error.from`. The first segment names
 //! a value, and in a pipe the only one is `item`, the item reaching the
-//! stage. Later segments walk into maps. A missing field reads as null. A
+//! operator. Later segments walk into maps. A missing field reads as null. A
 //! string that starts with `$$` is the literal text with one `$` removed.
 //!
 //! **Templates.** Any settings or `with:` value is a template: maps and

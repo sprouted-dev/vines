@@ -5,7 +5,7 @@ use thiserror::Error;
 /// Registering an operator failed.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum RegistryError {
-    #[error("operator name `{0}` must be lower snake_case (a-z, 0-9, _)")]
+    #[error("operator name `{0}` must be lower snake_case (a-z, 0-9, _); an operator that touches something outside may join such words with dots, such as `git.worktree_add`")]
     BadName(String),
     #[error("operator name `{0}` is reserved by the vine language")]
     Reserved(String),
@@ -13,12 +13,8 @@ pub enum RegistryError {
     Duplicate(String),
     #[error("operator `{operator}` declares it touches `{touch}`: touches are dot-separated lower snake_case words such as `facts.read`")]
     BadTouch { operator: String, touch: String },
-    #[error(
-        "act name `{0}` must be dot-separated lower snake_case words such as `git.worktree_add`"
-    )]
-    BadActName(String),
-    #[error("act `{0}` declares it touches nothing; an act reaches outside and must say what it touches")]
-    ActTouchesNothing(String),
+    #[error("operator `{0}` declares it touches nothing; a stream operator, or one with a dotted name such as `git.worktree_add`, reaches outside and must say what it touches")]
+    TouchesNothing(String),
 }
 
 /// A vine document was refused before it ran.
@@ -39,8 +35,6 @@ pub enum LoadError {
     },
     #[error("{path}: unknown operator `{name}` (not registered)")]
     UnknownOperator { path: String, name: String },
-    #[error("{path}: unknown act `{name}` (not registered)")]
-    UnknownAct { path: String, name: String },
     #[error("{path}: unknown vine `{name}` (not added to the registry)")]
     UnknownVine { path: String, name: String },
     #[error("{path}: settings do not fit operator `{operator}`: {problem}")]

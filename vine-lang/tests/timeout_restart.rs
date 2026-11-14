@@ -1,32 +1,32 @@
 //! A `timeout` survives a restart, in `run_saved` and in `run_from`. What
-//! the clock decided for each run of the covered stages is saved, so a
+//! the clock decided for each run of the operators a timeout applies to is saved, so a
 //! replay never asks the clock about a decision already made:
 //!
-//! - a timeout that fired fires again at once, and the work it covered is
+//! - a timeout that fired fires again at once, and the work it applied to is
 //!   not run again;
 //! - a timeout whose work was done in time is replayed as done, however
 //!   slow the replay;
 //! - with no decision saved, the wait starts again from nothing, and work
 //!   whose results were saved does not count against it.
 //!
-//! The acts take time on tokio's paused clock, so which step finishes
+//! The operators take time on tokio's paused clock, so which step finishes
 //! when, and when a timeout fires, is exact and the same every run.
 //! Nothing here uses YAML, and this file passes with the feature off:
 //!
 //!     cargo test --no-default-features --test timeout_restart
 
-mod acts;
+mod fake;
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use acts::desk::{desk_registry, jobs_vine, merge_jobs, step, Desk};
+use fake::desk::{desk_registry, jobs_vine, merge_jobs, step, Desk};
 use futures::{stream, StreamExt};
 use tokio::time::Instant;
 use vine_lang::pipe::{
-    branch, call, catch_error, emit_with, fork, pipe, retry, timeout, use_vine, Pipe, PipeDef,
-    Stage,
+    branch, call, catch_error, emit_with, fork, pipe, retry, timeout, use_vine, Operator, Pipe,
+    PipeDef,
 };
 use vine_lang::{
     json, Bookmark, Entry, Event, Journal, OutputId, PipeOutput, Progress, Registry, RunError,
@@ -56,11 +56,11 @@ fn job_events(list: &[Value]) -> Vec<Value> {
     list.iter().map(|j| json!({ "job": j })).collect()
 }
 
-fn done() -> Stage {
+fn done() -> Operator {
     emit_with("done", json!({ "id": "$item.job.id" }))
 }
 
-fn failed() -> Stage {
+fn failed() -> Operator {
     emit_with(
         "failed",
         json!({ "id": "$item.job.id", "code": "$item.error.code" }),
@@ -71,7 +71,7 @@ fn failed() -> Stage {
 /// three second timeout, then `done`. A `catchError` turns a timeout into
 /// `failed`. The note is made inside the timeout, so it is held until the
 /// work is done, and dropped if the timeout fires.
-fn timed_work() -> Vec<Stage> {
+fn timed_work() -> Vec<Operator> {
     vec![
         step("one", json!("$item.job.secs")),
         fork([[emit_with(
@@ -97,7 +97,7 @@ fn timed_stream() -> PipeDef {
 
 /// A vine over a stream of jobs, one per input item `{ job }`, with the
 /// outputs `jobs_vine` has.
-fn over_a_stream(stages: Vec<Stage>) -> PipeDef {
+fn over_a_stream(operators: Vec<Operator>) -> PipeDef {
     let id = || Shape::new().required("id", Ty::Text);
     pipe("timed_stream")
         .input(Shape::new().required("job", Ty::Object))
@@ -105,14 +105,14 @@ fn over_a_stream(stages: Vec<Stage>) -> PipeDef {
         .output("done", id())
         .output("failed", id().required("code", Ty::Text))
         .output("line", id().required("line", Ty::Int))
-        .stages(stages)
+        .operators(operators)
 }
 
 fn built(desk: &Arc<Desk>, def: PipeDef) -> Pipe {
     registry(desk).build_pipe(def).unwrap()
 }
 
-/// The desk's acts, and `timed_job`: one job's timed work as a vine of
+/// The desk's operators, and `timed_job`: one job's timed work as a vine of
 /// its own, for `use`.
 fn registry(desk: &Arc<Desk>) -> Registry {
     let mut reg = desk_registry(desk);
@@ -122,7 +122,7 @@ fn registry(desk: &Arc<Desk>) -> Registry {
         .output("stepped", id().required("step", Ty::Text))
         .output("done", id())
         .output("failed", id().required("code", Ty::Text))
-        .stages(timed_work());
+        .operators(timed_work());
     let inner = reg.build_pipe(inner).unwrap();
     reg.add_vine(inner).unwrap();
     reg
@@ -396,7 +396,7 @@ async fn a_clean_run_saves_each_decision_before_what_depends_on_it() {
     let done_b = place(&|s| matches!(s, Seen::Output(o) if o.name == "done"));
     let stepped_b = place(&|s| matches!(s, Seen::Output(o) if o.name == "stepped"));
     assert!(decided_b < stepped_b && stepped_b < done_b, "{seen:?}");
-    // The acts a timeout covers are keyed by its run.
+    // The operators a timeout applies to are keyed by its run.
     assert!(seen
         .iter()
         .any(|s| matches!(s, Seen::Entry(Entry::Done { at, .. })
@@ -481,7 +481,7 @@ async fn a_restart_before_the_timeout_decided_starts_the_wait_again() {
     ));
     assert_eq!(restart.elapsed(), LIMIT);
     // `one` was saved and not run again. `two` had not started at the
-    // kill: an act starts only once the caller holds the line before it.
+    // kill: an operator starts only once the caller holds the line before it.
     assert_eq!(desk.calls(), ["x.one", "x.two"]);
     assert_eq!(caller.handed[0].name, "failed");
 }
@@ -508,9 +508,9 @@ async fn work_saved_before_a_restart_does_not_count_against_the_wait() {
 
 // -------------------------------------- done in time, replayed slower
 
-/// Each job's lines from a stream act saved by position, under the
+/// Each job's lines from a stream operator saved by position, under the
 /// timeout, two jobs at once. A job that times out is `failed`.
-fn timed_lines_stages() -> Vec<Stage> {
+fn timed_lines_operators() -> Vec<Operator> {
     vec![merge_jobs(
         Some(2),
         vec![
@@ -530,7 +530,7 @@ fn timed_lines_stages() -> Vec<Stage> {
 }
 
 fn timed_lines() -> PipeDef {
-    jobs_vine(timed_lines_stages())
+    jobs_vine(timed_lines_operators())
 }
 
 /// Kill a run of two lines right before or right after its decision was
@@ -594,7 +594,7 @@ async fn work_done_in_time_is_replayed_as_done_even_when_the_replay_is_slower() 
 }
 
 #[tokio::test(start_paused = true)]
-async fn a_timeout_is_saved_before_the_stream_act_it_drops_says_it_was_abandoned() {
+async fn a_timeout_is_saved_before_the_stream_operator_it_drops_says_it_was_abandoned() {
     let input = jobs_input(&[job("x", 10, 0)]);
     let mut caller = Caller::new(Mode::Journal);
     let seen = caller
@@ -658,7 +658,7 @@ async fn an_endless_stream_survives_a_kill_at_every_event_and_every_pair() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn a_stream_act_under_a_timeout_survives_a_kill_at_every_event() {
+async fn a_stream_operator_under_a_timeout_survives_a_kill_at_every_event() {
     // `x` gives two lines in time; `y` gives ten, and times out after
     // three while its call is still going.
     let input = jobs_input(&[job("x", 2, 0), job("y", 10, 0)]);
@@ -680,13 +680,13 @@ async fn a_stream_act_under_a_timeout_survives_a_kill_at_every_event() {
 }
 
 fn timed_lines_stream() -> PipeDef {
-    over_a_stream(timed_lines_stages())
+    over_a_stream(timed_lines_operators())
 }
 
 // ------------------------------------------- with `use`, `catchError`, `retry`
 
 /// `timed_job` run by `use` for each job, two at once.
-fn used_stages() -> Vec<Stage> {
+fn used_operators() -> Vec<Operator> {
     let id = json!({ "id": "$item.id" });
     vec![merge_jobs(
         Some(2),
@@ -713,8 +713,8 @@ fn used_stages() -> Vec<Stage> {
 async fn a_timeout_inside_a_used_vine_survives_a_kill_at_every_event() {
     let jobs = jobs_input(&three());
     let events = job_events(&three());
-    let over_jobs = || jobs_vine(used_stages());
-    let over_events = || over_a_stream(used_stages());
+    let over_jobs = || jobs_vine(used_operators());
+    let over_events = || over_a_stream(used_operators());
     for (def, input, mode) in [
         (&over_jobs as &dyn Fn() -> PipeDef, &jobs, Mode::Journal),
         (&over_events, &events, Mode::Position),
@@ -770,7 +770,7 @@ async fn a_caught_timeout_replays_down_the_same_branch_at_every_kill() {
     sweep.run(true).await;
 }
 
-/// `retry` covers the timeout: each try gets its own three seconds.
+/// `retry` applies to the timeout: each try gets its own three seconds.
 fn retried_timeout() -> PipeDef {
     jobs_vine([merge_jobs(
         Some(2),
@@ -799,7 +799,7 @@ async fn a_retry_over_a_timeout_survives_a_kill_at_every_event() {
     sweep.run(true).await;
 }
 
-/// The timeout covers a `retry` of a step that always fails, and a
+/// The timeout applies to a `retry` of a step that always fails, and a
 /// `catchError` that mends a failed step slowly.
 fn timeout_over_retry_and_catch_error() -> PipeDef {
     jobs_vine([merge_jobs(
@@ -854,9 +854,9 @@ async fn a_bookmark_keeps_one_line_more_per_item_in_flight_and_drops_it_as_the_p
         .collect();
     let events = job_events(&list);
     let untimed = || {
-        let work: Vec<Stage> = timed_work()
+        let work: Vec<Operator> = timed_work()
             .into_iter()
-            .filter(|s| !matches!(s, Stage::Timeout(_) | Stage::CatchError(_)))
+            .filter(|s| !matches!(s, Operator::Timeout(_) | Operator::CatchError(_)))
             .collect();
         over_a_stream(vec![merge_jobs(Some(2), work)])
     };
@@ -883,13 +883,13 @@ async fn a_bookmark_keeps_one_line_more_per_item_in_flight_and_drops_it_as_the_p
 
 #[tokio::test(start_paused = true)]
 async fn a_journal_saved_before_timeouts_were_saved_resumes_as_it_did() {
-    // A vine with no timeout keys its acts as it always did. This journal
+    // A vine with no timeout keys its operators as it always did. This journal
     // is in the form saved before decisions were: `b`'s first step and
     // its note.
     let untimed = || {
-        let work: Vec<Stage> = timed_work()
+        let work: Vec<Operator> = timed_work()
             .into_iter()
-            .filter(|s| !matches!(s, Stage::Timeout(_) | Stage::CatchError(_)))
+            .filter(|s| !matches!(s, Operator::Timeout(_) | Operator::CatchError(_)))
             .collect();
         jobs_vine([merge_jobs(Some(2), work)])
     };
@@ -917,11 +917,11 @@ async fn a_journal_saved_before_timeouts_were_saved_resumes_as_it_did() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn a_journal_or_bookmark_saved_before_a_timeout_was_added_is_refused_before_any_act() {
-    let untimed_work = || -> Vec<Stage> {
+async fn a_journal_or_bookmark_saved_before_a_timeout_was_added_is_refused_before_any_operator() {
+    let untimed_work = || -> Vec<Operator> {
         timed_work()
             .into_iter()
-            .filter(|s| !matches!(s, Stage::Timeout(_) | Stage::CatchError(_)))
+            .filter(|s| !matches!(s, Operator::Timeout(_) | Operator::CatchError(_)))
             .collect()
     };
     // Saved partway through by the vine without its timeout.

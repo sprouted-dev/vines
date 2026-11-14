@@ -1,22 +1,24 @@
 //! `timeout`, with what the clock decided saved, so a replay never asks
 //! the clock about a decision already made.
 //!
-//! Each run of the covered stages for one value is a scope of its own (see
-//! [`Cx::timed_run`]), so the keys of the acts it covers name the run.
+//! Each run of the operators a timeout applies to, for one value, is a
+//! scope of its own (see [`Cx::timed_run`]), so the keys of the saved
+//! calls made in it name the run.
 //!
-//! - When the covered stages are done before the limit, the run saves
+//! - When those operators are done before the limit, the run saves
 //!   [`Timing::InTime`] and only then lets what they gave go on. Every line
-//!   the covered stages made comes before it.
+//!   they made comes before it.
 //! - When the limit comes first, the run saves [`Timing::TimedOut`] and
-//!   only then drops the covered stages. A stream act saved by position
-//!   that is dropped saves that it was abandoned, and that line comes after
-//!   the decision, never without it.
+//!   only then drops them. A stream operator saved by position that is
+//!   dropped saves that it was abandoned, and that line comes after the
+//!   decision, never without it.
 //!
-//! On replay a saved `TimedOut` fails the item at once and the covered
-//! stages are not run, so nothing they did is done again and nothing they
-//! were doing is started again. A saved `InTime` runs them with no limit:
-//! their acts replay from their saved results, and a stream act asked to
-//! go on from its position is given all the time it takes.
+//! On replay a saved `TimedOut` fails the item at once and the operators
+//! the timeout applies to are not run, so nothing they did is done again
+//! and nothing they were doing is started again. A saved `InTime` runs
+//! them with no limit: their calls replay from their saved results, and a
+//! stream operator asked to go on from its position is given all the time
+//! it takes.
 //!
 //! With no decision saved, the wait starts again from nothing. The library
 //! has no clock that runs across a restart: tokio's clock starts again in
@@ -30,7 +32,7 @@ use futures::{FutureExt, StreamExt};
 use serde_json::Value;
 
 use super::book::{Cx, Key};
-use super::flow::{covering, one, Fault, Flow, Flowing, OpFault, Transform};
+use super::flow::{one, per_item_held, Fault, Flow, Flowing, OpFault, Transform};
 use super::tag::Tag;
 use crate::journal::{Entry, Timing};
 use crate::registry::OpError;
@@ -38,7 +40,7 @@ use crate::registry::OpError;
 /// The `timeout` at `path`: fail an item whose run of `body` takes longer
 /// than `limit`, and hold what `body` gives until it is done.
 pub(super) fn timed(body: Transform, path: String, limit: Duration) -> Transform {
-    covering(move |item, tag, cx| {
+    per_item_held(move |item, tag, cx| {
         let (body, path) = (body.clone(), path.clone());
         async move {
             let (scoped, key) = cx.timed_run(&path, &tag);
@@ -74,67 +76,69 @@ pub(super) fn timed(body: Transform, path: String, limit: Duration) -> Transform
     })
 }
 
-/// Which acts each `timeout` of a vine covers, here and in the vines it
-/// runs by `use`, so a replay can refuse a journal or bookmark saved
-/// before a `timeout` was added. The key of an act a `timeout` covers
-/// holds the scope of a run of that `timeout`, such as
-/// `pipe[3].timeout@0/pipe[1]#0`. A saved key of such an act without one
+/// Which saved calls each `timeout` of a vine applies to, here and in the
+/// vines it runs by `use`, so a replay can refuse a journal or bookmark
+/// saved before a `timeout` was added. The key of a call a `timeout`
+/// applies to holds the scope of a run of that `timeout`, such as
+/// `pipe[3].timeout@0/pipe[1]#0`. A saved key of such a call without one
 /// was made by the vine as it was before, and this run would never ask
-/// for it: the act would run again and its outputs come with other ids.
+/// for it: the call would be made again and its outputs come with other
+/// ids.
 #[derive(Debug, Clone, Default)]
-pub(super) struct Covered {
-    /// The path of every act, such as `pipe[1]` or `pipe[2]>job_run:pipe[0]`.
-    acts: Vec<String>,
-    /// An act's path, and the path of a `timeout` that covers it.
+pub(super) struct Timeouts {
+    /// The path of every `call` and `tap`, such as `pipe[1]` or
+    /// `pipe[2]>job_run:pipe[0]`.
+    calls: Vec<String>,
+    /// A call's path, and the path of a `timeout` that applies to it.
     timed: Vec<(String, String)>,
 }
 
-impl Covered {
-    /// How many acts are known so far. The acts after this mark are the
+impl Timeouts {
+    /// How many calls are known so far. The calls after this mark are the
     /// ones checked since.
     pub(super) fn mark(&self) -> usize {
-        self.acts.len()
+        self.calls.len()
     }
 
-    /// The act at `path` was checked.
-    pub(super) fn act(&mut self, path: &str) {
-        self.acts.push(path.to_owned());
+    /// The `call` or `tap` at `path` was checked.
+    pub(super) fn call(&mut self, path: &str) {
+        self.calls.push(path.to_owned());
     }
 
-    /// The `timeout` at `path` covers every act checked since `mark`.
+    /// The `timeout` at `path` applies to every call checked since `mark`.
     pub(super) fn timeout(&mut self, mark: usize, path: &str) {
-        let covered = self.acts[mark..]
+        let timed = self.calls[mark..]
             .iter()
-            .map(|a| (a.clone(), path.to_owned()));
-        self.timed.extend(covered.collect::<Vec<_>>());
+            .map(|c| (c.clone(), path.to_owned()));
+        self.timed.extend(timed.collect::<Vec<_>>());
     }
 
-    /// The `use` at `path` runs `vine`, whose acts and timeouts are these.
-    pub(super) fn used(&mut self, path: &str, vine: &str, other: &Covered) {
+    /// The `use` at `path` runs `vine`, whose calls and timeouts are these.
+    pub(super) fn used(&mut self, path: &str, vine: &str, other: &Timeouts) {
         let within = |p: &String| format!("{path}>{vine}:{p}");
-        self.acts.extend(other.acts.iter().map(within));
+        self.calls.extend(other.calls.iter().map(within));
         self.timed
-            .extend(other.timed.iter().map(|(a, t)| (within(a), within(t))));
+            .extend(other.timed.iter().map(|(c, t)| (within(c), within(t))));
     }
 
-    /// Refuse a saved key of an act a `timeout` covers that holds no run of
-    /// that `timeout`.
+    /// Refuse a saved key of a call a `timeout` applies to that holds no
+    /// run of that `timeout`.
     pub(super) fn check<'a>(&self, keys: impl Iterator<Item = &'a Key>) -> Result<(), String> {
         if self.timed.is_empty() {
             return Ok(());
         }
         for key in keys {
             let (scopes, last) = key.at.rsplit_once('/').unwrap_or(("", &key.at));
-            let Some((act, _)) = last.rsplit_once('#') else {
+            let Some((call, _)) = last.rsplit_once('#') else {
                 continue;
             };
             let unscoped = self
                 .timed
                 .iter()
-                .find(|(a, t)| a == act && !scopes.split('/').any(|s| runs(s, t)));
+                .find(|(c, t)| c == call && !scopes.split('/').any(|s| runs(s, t)));
             if let Some((_, timeout)) = unscoped {
                 return Err(format!(
-                    "`{key}` is an act the `timeout` at {timeout} covers, saved with no run of that `timeout` in its key: it was saved before the `timeout` was added"
+                    "`{key}` is a call the `timeout` at {timeout} applies to, saved with no run of that `timeout` in its key: it was saved before the `timeout` was added"
                 ));
             }
         }
@@ -159,7 +163,7 @@ fn decide(cx: &Cx, key: Option<&Key>, timing: Timing) {
 }
 
 /// The failure a `timeout` gives, held for the item as it reached the
-/// covered stages.
+/// operators the timeout applies to.
 fn timed_out(path: &str, limit: Duration, item: Value, tag: Tag) -> Fault {
     Fault::Op(Box::new(OpFault {
         path: path.to_owned(),

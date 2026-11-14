@@ -2,13 +2,13 @@
 //! twins, and run from a saved position the same way.
 #![cfg(feature = "yaml")]
 
-mod acts;
+mod fake;
 
 use std::sync::Arc;
 
-use acts::feed::{event_backup_pipe, event_pages_pipe, event_relay_pipe, events, feed_registry};
-use acts::restart::{assert_forward, events_in, run, run_with_kills, started, Caller, End};
-use acts::World;
+use fake::feed::{event_backup_pipe, event_pages_pipe, event_relay_pipe, events, feed_registry};
+use fake::restart::{assert_forward, events_in, run, run_with_kills, started, Caller, End};
+use fake::World;
 use futures::{stream, StreamExt};
 use vine_lang::pipe::{Pipe, PipeDef};
 use vine_lang::{json, Bookmark, RunError, Value};

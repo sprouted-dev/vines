@@ -15,14 +15,14 @@
 //! restart it can differ from the first run.
 #![cfg(feature = "yaml")]
 
-mod acts;
+mod fake;
 mod terra;
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use acts::{registry, World};
+use fake::{registry, World};
 use terra::moves::{
     activate_move, launch_all_move, launch_move, undo_abandoned_launch, undo_launch_move, yaml,
 };
@@ -154,7 +154,7 @@ fn answered(answer: &Answer) -> (Vec<String>, String) {
 }
 
 /// The run after crashes ends as `clean` did, in the sense the module docs
-/// give, and ran again at most `again` acts.
+/// give, and ran again at most `again` operators.
 fn assert_same(
     clean: &Clean,
     answer: &Answer,
@@ -175,10 +175,10 @@ fn assert_same(
     assert_eq!(terra.requests_of("launch"), clean.launches, "{at}");
     assert_eq!(world.trees(), clean.trees, "{at}");
     assert_eq!(world.agents(), clean.agents, "{at}");
-    // Acts whose results were lost run again; each is safe to run twice.
+    // Operators whose results were lost run again; each is safe to run twice.
     let log = world.log();
     let extra = log.len() - clean.log.len();
-    assert!(extra <= again, "{at}: {extra} acts again: {log:?}");
+    assert!(extra <= again, "{at}: {extra} calls again: {log:?}");
     let mut left = log.clone();
     for line in &clean.log {
         let i = left.iter().position(|l| l == line);
@@ -272,7 +272,7 @@ async fn a_crash_at_any_point_then_a_restart_ends_as_an_uninterrupted_run() {
             most = most.max(world.log().len() - clean.log.len());
         }
         // Two launches side by side, even with j-2 refused, since its slot
-        // frees at once: a crash can cost an act of each, and does.
+        // frees at once: a crash can cost an operator of each, and does.
         assert_eq!(most, 2);
     }
 }

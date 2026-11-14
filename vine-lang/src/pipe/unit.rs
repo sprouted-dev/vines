@@ -1,4 +1,4 @@
-//! An operator or act, ready to run for one item.
+//! A registered operator, ready to run for one item.
 
 use std::sync::{Arc, OnceLock};
 
@@ -19,15 +19,15 @@ use crate::registry::{Handler, OpContext, OpError, OperatorSpec, StreamHandler};
 /// How a unit runs.
 #[derive(Clone)]
 pub(super) enum Runner {
-    /// An operator. It reaches nothing outside, so it is not saved.
-    Op(Handler),
-    /// An act. Its result is saved.
-    Act(Handler),
-    /// A stream act. Its items and its end are saved.
+    /// A pure operator. It reaches nothing outside, so it is not saved.
+    Pure(Handler),
+    /// An operator that touches something outside. Its result is saved.
+    Outside(Handler),
+    /// A stream operator. Its items and its end are saved.
     Stream(StreamHandler),
 }
 
-/// An operator or act, ready to run for one item.
+/// A registered operator, ready to run for one item.
 #[derive(Clone)]
 pub(super) struct Unit {
     pub(super) path: String,
@@ -36,8 +36,8 @@ pub(super) struct Unit {
     pub(super) with: Template,
     pub(super) keep: Keep,
     pub(super) end: Option<String>,
-    /// For a stream act: how a call is saved. The checker sets it once it
-    /// has seen the stages after the act.
+    /// For a stream operator: how a call is saved. The checker sets it
+    /// once it has seen the operators after it.
     pub(super) saving: Arc<OnceLock<ItemSaving>>,
 }
 
@@ -75,9 +75,9 @@ impl Unit {
         async move {
             let resolved = unit.resolve(&item)?;
             let (handler, saved) = match &unit.runner {
-                Runner::Op(h) => (h.clone(), false),
-                Runner::Act(h) => (h.clone(), true),
-                Runner::Stream(_) => unreachable!("a stream act runs through `stream`"),
+                Runner::Pure(h) => (h.clone(), false),
+                Runner::Outside(h) => (h.clone(), true),
+                Runner::Stream(_) => unreachable!("a stream operator runs through `stream`"),
             };
             let key = if saved { cx.key(&unit.path, &tag) } else { None };
             if let Some(key) = &key {
@@ -93,7 +93,7 @@ impl Unit {
                     }
                     Some(Saved::Stream { .. } | Saved::Position { .. }) => {
                         return Err(misfit(format!(
-                            "`{key}` was saved as a stream act, and `{}` is not one",
+                            "`{key}` was saved as a stream operator, and `{}` is not one",
                             unit.spec.name
                         )))
                     }

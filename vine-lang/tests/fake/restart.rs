@@ -173,7 +173,7 @@ pub async fn events_in(vine: &Pipe, input: &[Value]) -> usize {
     run.count().await
 }
 
-/// The world's log without the lines of a stream act called again after
+/// The world's log without the lines of a stream operator called again after
 /// a restart, such as `feed.pages 3 again from 2`: what is left is what
 /// started.
 pub fn started(log: Vec<String>) -> Vec<String> {
@@ -194,7 +194,7 @@ pub struct Keeper {
     /// The journal, as a store would hold it.
     pub saved: Value,
     pub outs: Vec<(String, Value)>,
-    /// How many act results and failures the runs handed out and the
+    /// How many operator results and failures the runs handed out and the
     /// keeper saved, counted before the journal drops any.
     pub results: usize,
     /// The most entries the journal held at once.

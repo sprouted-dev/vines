@@ -7,13 +7,13 @@
 //! hung one holds its slot only until its timeout.
 #![cfg(feature = "yaml")]
 
-mod acts;
+mod fake;
 mod terra;
 
 use std::sync::Arc;
 use std::time::Duration;
 
-use acts::{registry, World};
+use fake::{registry, World};
 use terra::moves::jobs_trellis;
 use terra::{Answer, Event, Terra};
 use tokio::time::Instant;
@@ -103,7 +103,7 @@ async fn clean(hung: &[&str], name: &str, payload: &Value) -> Clean {
 }
 
 /// Crash at every point of a press of `name`, restart, and check it ends
-/// as the uninterrupted press did, with at most `again` acts run again.
+/// as the uninterrupted press did, with at most `again` operators run again.
 async fn crash_everywhere(hung: &[&str], name: &str, payload: Value, again: usize) -> (u64, u64) {
     let clean = clean(hung, name, &payload).await;
     let (mut late, mut at_once) = (0, 0);
@@ -138,7 +138,7 @@ async fn crash_everywhere(hung: &[&str], name: &str, payload: Value, again: usiz
         assert_eq!(world.agents(), clean.agents, "{at}");
         let log = world.log();
         let extra = log.len() - clean.log.len();
-        assert!(extra <= again, "{at}: {extra} acts again: {log:?}");
+        assert!(extra <= again, "{at}: {extra} calls again: {log:?}");
         for line in &clean.log {
             assert!(log.contains(line), "{at}: `{line}` never ran");
         }

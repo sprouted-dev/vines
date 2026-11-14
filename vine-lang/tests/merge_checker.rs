@@ -4,15 +4,15 @@
 //!
 //!     cargo test --no-default-features --test merge_checker
 
-mod acts;
+mod fake;
 
 use std::time::Duration;
 
-use acts::desk::{desk_registry, jobs, jobs_vine, merge_jobs, step, Desk};
+use fake::desk::{desk_registry, jobs, jobs_vine, merge_jobs, step, Desk};
 use futures::{stream, StreamExt};
 use vine_lang::pipe::{
     buffer_count, call, catch_error, concat_map, emit_with, exhaust_map, filter, finalize, fork,
-    fork_join, last, pipe, retry, switch_map, take, timeout, use_vine, Pipe, PipeDef, Stage,
+    fork_join, last, pipe, retry, switch_map, take, timeout, use_vine, Operator, Pipe, PipeDef,
 };
 use vine_lang::{json, Bookmark, Journal, Registry, RunError, Shape, Ty};
 
@@ -22,7 +22,7 @@ fn registry() -> Registry {
     let fan = pipe("fan")
         .input(Shape::new().required("jobs", Ty::List))
         .output("done", Shape::new().required("id", Ty::Text))
-        .stages([
+        .operators([
             vine_lang::pipe::split("$item.jobs").into("job"),
             merge_jobs(
                 Some(2),
@@ -37,7 +37,7 @@ fn registry() -> Registry {
     let steps = pipe("steps")
         .input(Shape::new().required("job", Ty::Any))
         .output("done", Shape::new().required("id", Ty::Text))
-        .stages([
+        .operators([
             step("one", json!("$item.job.secs")),
             step("two", json!(1)),
             emit_with("done", json!({ "id": "$item.job.id" })),
@@ -51,15 +51,15 @@ fn build(def: PipeDef) -> Pipe {
     registry().build_pipe(def).unwrap()
 }
 
-fn merge(work: Vec<Stage>) -> Stage {
+fn merge(work: Vec<Operator>) -> Operator {
     merge_jobs(Some(2), work)
 }
 
-fn one() -> Stage {
+fn one() -> Operator {
     step("one", json!("$item.job.secs"))
 }
 
-fn done() -> Stage {
+fn done() -> Operator {
     emit_with("done", json!({ "id": "$item.job.id" }))
 }
 
@@ -133,7 +133,7 @@ async fn side_by_side_work_inside_a_branch_or_a_used_vine_counts_as_a_merge() {
         pipe("outer")
             .input(Shape::new().required("jobs", Ty::List))
             .output("done", Shape::open())
-            .stages([
+            .operators([
                 use_vine("fan", None).on("done", [filter("$item.id")]),
                 take(1),
                 emit_with("done", json!({})),
@@ -146,13 +146,13 @@ async fn side_by_side_work_inside_a_branch_or_a_used_vine_counts_as_a_merge() {
 #[tokio::test]
 async fn a_catch_error_or_finalize_over_a_merge_map_is_refused_for_it_drops_the_items_still_running(
 ) {
-    let outer = |cover: Stage| {
+    let outer = |applied: Operator| {
         pipe("outer")
             .input(Shape::new().required("jobs", Ty::List))
             .output("done", Shape::open())
-            .stages([
+            .operators([
                 use_vine("fan", None).on("done", [emit_with("done", json!({}))]),
-                cover,
+                applied,
             ])
     };
     refused(
@@ -168,7 +168,7 @@ async fn a_catch_error_or_finalize_over_a_merge_map_is_refused_for_it_drops_the_
 }
 
 #[tokio::test]
-async fn an_act_on_the_value_last_picked_after_a_merge_is_refused() {
+async fn an_operator_on_the_value_last_picked_after_a_merge_is_refused() {
     refused(
         jobs_vine([merge(vec![one()]), last(), step("two", json!(1)), done()]),
         "pipe[3] runs `work.step` on the value the `last` at pipe[2] picked",
@@ -184,7 +184,7 @@ async fn an_act_on_the_value_last_picked_after_a_merge_is_refused() {
         "pipe[3] runs `work.step` on the value the `last` at pipe[2] picked",
     )
     .await;
-    // Inside a later stage too.
+    // Inside a later operator too.
     refused(
         jobs_vine([
             merge(vec![one()]),
@@ -198,7 +198,7 @@ async fn an_act_on_the_value_last_picked_after_a_merge_is_refused() {
 
 #[tokio::test]
 async fn switch_map_and_exhaust_map_still_cannot_be_resumed() {
-    type MapStage = fn(Vec<Stage>) -> Stage;
+    type MapStage = fn(Vec<Operator>) -> Operator;
     let maps: [(MapStage, &str); 2] = [(switch_map, "switchMap"), (exhaust_map, "exhaustMap")];
     for (map, word) in maps {
         refused(
@@ -218,7 +218,7 @@ fn what_works_one_value_at_a_time_after_or_inside_a_merge_can_be_resumed() {
             jobs_vine([merge(vec![one()]), last(), emit_with("all", json!({}))]),
         ),
         (
-            "acts after the merge, one value at a time",
+            "operators after the merge, one value at a time",
             jobs_vine([merge(vec![one()]), step("two", json!(1)), done()]),
         ),
         (

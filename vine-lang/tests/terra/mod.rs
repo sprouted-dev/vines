@@ -20,7 +20,7 @@
 //!
 //! # Pressing a move from a vine
 //!
-//! For each move, Terra registers a stream act named `move.<name>`. Its
+//! For each move, Terra registers a stream operator named `move.<name>`. Its
 //! settings are the move's payload plus `request`, the id of the press the
 //! calling vine runs under. It presses the move exactly as an outside press
 //! does, and gives one item per output of the inner vine, after that output
@@ -132,7 +132,7 @@ impl Lands {
 }
 
 /// A move as declared. `target` is the payload field that names the
-/// artifact the move acts on.
+/// artifact the move works on.
 pub struct Move {
     pub name: &'static str,
     pub target: &'static str,
@@ -403,7 +403,7 @@ pub struct Terra {
 }
 
 impl Terra {
-    /// A Terra whose vines can run the acts and operators of `base`.
+    /// A Terra whose vines can run the registered operators of `base`.
     pub fn new(base: Registry) -> Terra {
         Terra {
             inner: Arc::new(Inner {

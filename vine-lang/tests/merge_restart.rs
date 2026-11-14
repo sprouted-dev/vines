@@ -1,23 +1,23 @@
 //! A `mergeMap` survives a restart, in `run_saved` and in
 //! `run_from`. Each value that enters it starts a group of work keyed by
-//! the order values enter, so a replay matches each group's acts and
+//! the order values enter, so a replay matches each group's operators and
 //! outputs in that group's own order, whatever order the groups finish in.
-//! The acts take time on tokio's paused clock, so which item finishes when
+//! The operators take time on tokio's paused clock, so which item finishes when
 //! is exact and the same every run. Nothing here uses YAML, and this file
 //! passes with the feature off:
 //!
 //!     cargo test --no-default-features --test merge_restart
 
-mod acts;
+mod fake;
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use acts::desk::{
+use fake::desk::{
     desk_registry, job_event, job_stream_vine, job_work, job_work_caught, jobs, jobs_vine,
     merge_jobs, step, Desk,
 };
-use acts::restart::{
+use fake::restart::{
     events_in, events_saved, run_saved_with_kills_where, run_with_kills_where, Caller, Keeper,
     Repeat,
 };
@@ -122,7 +122,7 @@ async fn the_cap_holds_the_third_job_back_until_a_slot_is_free() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn each_groups_acts_and_outputs_are_keyed_by_the_order_jobs_go_in() {
+async fn each_groups_calls_and_outputs_are_keyed_by_the_order_jobs_go_in() {
     let desk = Desk::new();
     let vine = built(&desk, merging(None));
     let mut journal = Journal::new();
@@ -173,7 +173,7 @@ async fn each_groups_acts_and_outputs_are_keyed_by_the_order_jobs_go_in() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn with_items_side_by_side_no_act_starts_before_every_result_so_far_was_handed_out() {
+async fn with_items_side_by_side_no_call_starts_before_every_result_so_far_was_handed_out() {
     // Steps finish at the same moments, so results pile up unless the run
     // waits: a step may start only once the caller holds every result made
     // before it. Steps already running finish in any order.
@@ -225,7 +225,7 @@ struct Sweep {
 async fn unsaved_at(def: &impl Fn() -> PipeDef, input: &[Value], k: usize) -> usize {
     let desk = Desk::new();
     let mut keeper = Keeper::new();
-    acts::restart::run_saved(&built(&desk, def()), input, &mut keeper, Some(k)).await;
+    fake::restart::run_saved(&built(&desk, def()), input, &mut keeper, Some(k)).await;
     desk.calls().len() - keeper.results
 }
 
@@ -342,8 +342,8 @@ async fn a_failure_nothing_catches_ends_the_run_and_a_restart_stops_at_it_again(
     desk.fail("b", "two");
     let vine = built(&desk, merging(Some(2)));
     let mut keeper = Keeper::new();
-    let end = acts::restart::run_saved(&vine, &three(), &mut keeper, None).await;
-    let acts::restart::End::Failed(first) = end else {
+    let end = fake::restart::run_saved(&vine, &three(), &mut keeper, None).await;
+    let fake::restart::End::Failed(first) = end else {
         panic!("{end:?}")
     };
     assert!(
@@ -355,8 +355,8 @@ async fn a_failure_nothing_catches_ends_the_run_and_a_restart_stops_at_it_again(
     let calls = desk.calls();
     assert_eq!(calls, ["a.one", "b.one", "b.two"]);
 
-    let end = acts::restart::run_saved(&vine, &three(), &mut keeper, None).await;
-    let acts::restart::End::Failed(again) = end else {
+    let end = fake::restart::run_saved(&vine, &three(), &mut keeper, None).await;
+    let fake::restart::End::Failed(again) = end else {
         panic!("{end:?}")
     };
     assert_eq!(again.to_string(), first.to_string());
@@ -401,7 +401,7 @@ async fn a_catch_error_inside_the_merge_map_keeps_the_others_going_through_every
     }
 }
 
-// --------------------------------------------- stream acts inside a merge
+// --------------------------------------------- stream operators inside a merge
 
 fn lines_inside(concurrent: usize) -> PipeDef {
     jobs_vine([merge_jobs(
@@ -421,7 +421,7 @@ fn lines_inside(concurrent: usize) -> PipeDef {
 }
 
 #[tokio::test(start_paused = true)]
-async fn a_stream_act_inside_a_merge_is_saved_by_position_and_stays_small() {
+async fn a_stream_operator_inside_a_merge_is_saved_by_position_and_stays_small() {
     let desk = Desk::new();
     let vine = built(&desk, lines_inside(2));
     assert!(
@@ -431,7 +431,7 @@ async fn a_stream_act_inside_a_merge_is_saved_by_position_and_stays_small() {
     );
     let input = vec![jobs(&[("a", 40), ("b", 30), ("c", 20)])];
     let mut keeper = Keeper::new();
-    acts::restart::run_saved(&vine, &input, &mut keeper, None).await;
+    fake::restart::run_saved(&vine, &input, &mut keeper, None).await;
     assert_eq!(keeper.outs.len(), 90);
     let journal = keeper.journal();
     assert!(
@@ -448,7 +448,7 @@ async fn a_stream_act_inside_a_merge_is_saved_by_position_and_stays_small() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn a_stream_act_inside_a_merge_resumes_from_its_position_at_every_kill() {
+async fn a_stream_operator_inside_a_merge_resumes_from_its_position_at_every_kill() {
     let input = vec![jobs(&[("a", 4), ("b", 2), ("c", 3)])];
     let desk = Desk::new();
     let clean = outputs_saved(&built(&desk, lines_inside(2)), &input).await;
@@ -477,7 +477,7 @@ async fn a_stream_act_inside_a_merge_resumes_from_its_position_at_every_kill() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn a_merge_after_a_stream_act_saved_by_position_stays_small_and_resumes() {
+async fn a_merge_after_a_stream_operator_saved_by_position_stays_small_and_resumes() {
     // The lines of one call go side by side into the `mergeMap`. Each output
     // names its group, and the position drops the outputs of lines it
     // passed.
@@ -502,7 +502,7 @@ async fn a_merge_after_a_stream_act_saved_by_position_stays_small_and_resumes() 
     let vine = built(&desk, def());
     assert!(vine.saves_every_item().is_empty());
     let mut keeper = Keeper::new();
-    acts::restart::run_saved(&vine, &input, &mut keeper, None).await;
+    fake::restart::run_saved(&vine, &input, &mut keeper, None).await;
     assert_eq!(keeper.outs.len(), 50);
     assert!(keeper.most <= 8, "{} entries", keeper.most);
 
@@ -566,7 +566,8 @@ async fn last_after_a_merge_gives_one_summary_after_every_job_at_every_kill() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn last_after_a_merge_of_stream_acts_saved_by_position_gives_one_summary_at_every_kill() {
+async fn last_after_a_merge_of_stream_operators_saved_by_position_gives_one_summary_at_every_kill()
+{
     // `last` picks an end item of a call saved by position. Once the
     // call's position passes it, that item is never given again, so the
     // record of the summary made from it must go with it.
@@ -670,7 +671,7 @@ async fn a_bookmark_stays_bounded_by_the_cap_while_an_early_item_is_slow() {
     let desk = Desk::new();
     let vine = built(&desk, stream_vine(2));
     let mut caller = Caller::new();
-    acts::restart::run(&vine, &events(100, 40), &mut caller, None).await;
+    fake::restart::run(&vine, &events(100, 40), &mut caller, None).await;
     assert_eq!(caller.position(), 41);
     assert_eq!(caller.dones.len(), 40);
     // At most two items are in flight, each with a few lines; the forty
@@ -690,7 +691,7 @@ async fn a_run_from_a_bookmark_skips_items_done_past_its_position() {
     let mut kill = None;
     for k in 1..=points {
         let mut probe = Caller::new();
-        acts::restart::run(
+        fake::restart::run(
             &built(&Desk::new(), stream_vine(2)),
             &input,
             &mut probe,
@@ -702,13 +703,13 @@ async fn a_run_from_a_bookmark_skips_items_done_past_its_position() {
             break;
         }
     }
-    acts::restart::run(&vine, &input, &mut caller, kill).await;
+    fake::restart::run(&vine, &input, &mut caller, kill).await;
     let bookmark = caller.bookmark();
     assert_eq!(bookmark.position(), 0);
     assert_eq!(bookmark.done().collect::<Vec<_>>(), [2, 3, 4]);
     assert!(bookmark.lines().iter().all(|l| l.item == 1));
     let before = desk.calls();
-    acts::restart::run(&vine, &input, &mut caller, None).await;
+    fake::restart::run(&vine, &input, &mut caller, None).await;
     // Only e1 runs again, from its own lines.
     let after: Vec<String> = desk.calls()[before.len()..].to_vec();
     assert!(after.iter().all(|c| c.starts_with("e1.")), "{after:?}");
@@ -720,7 +721,7 @@ async fn a_kill_at_every_point_of_a_run_from_a_position_ends_as_an_uninterrupted
     let input = events(6, 3);
     let desk = Desk::new();
     let mut clean = Caller::new();
-    acts::restart::run(&built(&desk, stream_vine(2)), &input, &mut clean, None).await;
+    fake::restart::run(&built(&desk, stream_vine(2)), &input, &mut clean, None).await;
     let clean_calls = desk.calls();
     let points = events_in(&built(&desk, stream_vine(2)), &input).await;
     for k in 1..=points {
@@ -740,7 +741,7 @@ async fn a_kill_at_every_point_of_a_run_from_a_position_ends_as_an_uninterrupted
             assert_eq!(sorted(&caller.outs), sorted(&clean.outs), "{at}");
             assert_eq!(per_job(&caller.outs), per_job(&clean.outs), "{at}");
             assert_eq!(caller.position(), 4, "{at}");
-            acts::restart::assert_forward(&caller.throughs);
+            fake::restart::assert_forward(&caller.throughs);
             let again = calls_again(&desk, &clean_calls);
             assert!(
                 again <= 2 * kills.len(),

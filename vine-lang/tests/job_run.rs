@@ -3,13 +3,13 @@
 //! dropped partway, as a daemon restart would drop it, and started again
 //! from what the caller saved. Rust alone: this file passes with YAML off.
 
-mod acts;
+mod fake;
 
 use std::sync::Arc;
 use std::time::Duration;
 
-use acts::agent::{expected, job, job_run_pipe, job_run_registry, Host, Script};
-use acts::World;
+use fake::agent::{expected, job, job_run_pipe, job_run_registry, Host, Script};
+use fake::World;
 use futures::{stream, StreamExt};
 use vine_lang::{json, Entry, Event, Journal, Pipe, PipeOutput, RunError, Value};
 
@@ -397,7 +397,7 @@ async fn a_restart_with_nothing_saved_starts_again_and_attaches_to_the_running_a
         .await
         .unwrap();
     // A fresh start: the line handed out before comes again, and the
-    // working copy act runs again. It is safe to run twice, so there is
+    // working copy operator runs again. It is safe to run twice, so there is
     // still one working copy. The agent is started once: the second run
     // attaches from the first line.
     assert_eq!(outs[0], outs[1]);
@@ -443,7 +443,7 @@ async fn a_run_dropped_and_never_restarted_leaves_its_working_copy_and_its_agent
 }
 
 #[tokio::test(start_paused = true)]
-async fn the_journal_of_a_finished_run_replays_to_no_new_outputs_and_no_acts() {
+async fn the_journal_of_a_finished_run_replays_to_no_new_outputs_and_no_calls() {
     let (world, host) = (World::new(), Host::new());
     let (mut saved, mut outs) = (Vec::new(), Vec::new());
     run(&vine(&world, &host), &mut saved, &mut outs, Drop::Never)

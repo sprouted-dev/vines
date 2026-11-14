@@ -5,23 +5,23 @@
 //!
 //! The vines are built in Rust, so this file passes with the YAML feature
 //! off; the same vine as YAML is checked against it when the feature is on.
-//! The acts take time on tokio's paused clock, so every run interleaves
+//! The operators take time on tokio's paused clock, so every run interleaves
 //! the same way.
 
-mod acts;
+mod fake;
 mod terra;
 
-use acts::desk::{desk_registry, step, Desk};
+use fake::desk::{desk_registry, step, Desk};
 use terra::{Answer, Event, Lands, Move, Terra, Trellis, VineSource};
 use vine_lang::pipe::{
-    concat_map, emit_with, fork, last, merge_map, pipe, split, Flatten, PipeDef, Stage,
+    concat_map, emit_with, fork, last, merge_map, pipe, split, Flatten, Operator, PipeDef,
 };
 use vine_lang::{json, Shape, Ty, Value};
 
 /// Note the same thing twice for each job: after its first step, and
 /// again after its second. Every output is `noted { note }`, the same name
 /// and payload.
-fn twice_work() -> Vec<Stage> {
+fn twice_work() -> Vec<Operator> {
     let noted = || emit_with("noted", json!({ "note": "$item.note" }));
     vec![
         step("one", json!("$item.job.secs")),
@@ -45,7 +45,7 @@ fn twice_vine(flatten: Flatten) -> PipeDef {
                 .required("jobs", Ty::List),
         )
         .output("noted", Shape::new().required("note", Ty::Id))
-        .stages([split("$item.jobs").into("job"), work])
+        .operators([split("$item.jobs").into("job"), work])
 }
 
 /// The jobs side by side, and when all are done, `finished` with the id of
@@ -58,7 +58,7 @@ fn last_vine() -> PipeDef {
                 .required("jobs", Ty::List),
         )
         .output("finished", Shape::new().required("job", Ty::Text))
-        .stages([
+        .operators([
             split("$item.jobs").into("job"),
             merge_map([step("one", json!("$item.job.secs"))]).concurrent(2),
             last(),

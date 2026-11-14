@@ -3,18 +3,18 @@
 //!
 //!     cargo test --no-default-features --test pipe
 
-mod acts;
+mod fake;
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use acts::{job_launch_pipe, ready_job, registry, World};
+use fake::{job_launch_pipe, ready_job, registry, World};
 use futures::{stream, StreamExt};
 use tokio::time::{sleep, Instant};
 use vine_lang::pipe::{
     branch, call, catch_error, concat_map, emit, emit_with, exhaust_map, filter, finalize,
-    fork_join, merge_map, op, pipe, retry, split, switch_map, take, tap, timeout, use_vine, Pipe,
-    PipeDef, Stage,
+    fork_join, merge_map, op, pipe, retry, split, switch_map, take, tap, timeout, use_vine,
+    Operator, Pipe, PipeDef,
 };
 use vine_lang::{json, LoadError, OpError, OperatorSpec, Registry, RunError, Shape, Ty, Value};
 
@@ -37,11 +37,11 @@ fn n(shape: Shape) -> Shape {
 }
 
 /// A vine over items `{ n: int }` with one open output, `out`.
-fn numbers(stages: impl IntoIterator<Item = Stage>) -> PipeDef {
+fn numbers(operators: impl IntoIterator<Item = Operator>) -> PipeDef {
     pipe("numbers")
         .input(n(Shape::new()))
         .output("out", Shape::open())
-        .stages(stages)
+        .operators(operators)
 }
 
 fn nums(ns: &[i64]) -> Vec<Value> {
@@ -108,7 +108,7 @@ fn with_double() -> Registry {
 }
 
 #[tokio::test]
-async fn a_result_replaces_the_item_unless_the_stage_says_into() {
+async fn a_result_replaces_the_item_unless_the_operator_says_into() {
     let reg = with_double();
     let replace = reg
         .build_pipe(numbers([
@@ -130,12 +130,12 @@ async fn a_result_replaces_the_item_unless_the_stage_says_into() {
 }
 
 #[tokio::test]
-async fn tap_runs_an_act_and_leaves_the_item_alone() {
+async fn tap_runs_an_operator_and_leaves_the_item_alone() {
     let world = World::new();
     let def = pipe("v")
         .input(Shape::new().required("branch", Ty::Text))
         .output("out", Shape::open())
-        .stages([
+        .operators([
             tap("git.refresh_branch", json!({ "branch": "$item.branch" })),
             emit("out"),
         ]);
@@ -151,7 +151,7 @@ async fn into_on_an_item_that_is_not_a_map_is_a_run_error() {
     let def = pipe("v")
         .input(Shape::new().required("ns", Ty::List))
         .output("out", Shape::open())
-        .stages([
+        .operators([
             split("$item.ns"),
             op("double", json!({ "n": 1 })).into("doubled"),
             emit("out"),
@@ -167,7 +167,7 @@ async fn into_on_an_item_that_is_not_a_map_is_a_run_error() {
 
 // ------------------------------------------------------- split, filter, take
 
-fn listed(stages: impl IntoIterator<Item = Stage>) -> Pipe {
+fn listed(operators: impl IntoIterator<Item = Operator>) -> Pipe {
     build(
         pipe("v")
             .input(
@@ -176,7 +176,7 @@ fn listed(stages: impl IntoIterator<Item = Stage>) -> Pipe {
                     .required("jobs", Ty::Any),
             )
             .output("out", Shape::open())
-            .stages(stages),
+            .operators(operators),
     )
 }
 
@@ -257,7 +257,7 @@ async fn take_stops_the_work_for_the_items_it_does_not_let_through() {
     let def = pipe("v")
         .input(Shape::new().required("branch", Ty::Text))
         .output("out", Shape::open())
-        .stages([
+        .operators([
             tap("git.refresh_branch", json!({ "branch": "$item.branch" })),
             take(1),
             emit("out"),
@@ -270,7 +270,7 @@ async fn take_stops_the_work_for_the_items_it_does_not_let_through() {
 
 // ------------------------------------------------------------------ timing
 
-/// Acts that take time, on tokio's paused clock. `work.slow` waits the
+/// Operators that take time, on tokio's paused clock. `work.slow` waits the
 /// seconds it is told and records when it started and finished.
 #[derive(Default)]
 struct Clock {
@@ -287,7 +287,7 @@ fn timed(start: Instant) -> (Arc<Clock>, Registry) {
     let clock = Arc::new(Clock::default());
     let mut reg = Registry::new();
     let c = clock.clone();
-    reg.register_act(
+    reg.register(
         OperatorSpec::new("work.slow")
             .settings(
                 Shape::new()
@@ -422,21 +422,21 @@ fn arriving() -> impl futures::Stream<Item = Value> + Send {
     })
 }
 
-/// Each item takes five seconds of work, inside the given mapping stage.
+/// Each item takes five seconds of work, inside the given mapping operator.
 async fn slow_items_in(
-    map: fn(Vec<Stage>) -> Stage,
+    map: fn(Vec<Operator>) -> Operator,
     concurrent: Option<usize>,
 ) -> (Vec<Value>, Vec<String>, u64) {
     let start = Instant::now();
     let (clock, reg) = timed(start);
-    let mut stage = map(vec![
+    let mut operator = map(vec![
         call("work.slow", json!({ "id": "$item.n", "secs": 5 })),
         emit("out"),
     ]);
     if let Some(limit) = concurrent {
-        stage = stage.concurrent(limit);
+        operator = operator.concurrent(limit);
     }
-    let vine = reg.build_pipe(numbers([stage])).unwrap();
+    let vine = reg.build_pipe(numbers([operator])).unwrap();
     let outs: Vec<Value> = vine
         .run(arriving())
         .map(|r| r.unwrap().payload["id"].clone())
@@ -510,7 +510,7 @@ async fn exhaust_map_ignores_new_items_while_a_run_is_going() {
 #[test]
 fn concurrent_goes_with_merge_map_only_and_is_at_least_one() {
     let inner = || vec![emit("out")];
-    type MapStage = fn(Vec<Stage>) -> Stage;
+    type MapStage = fn(Vec<Operator>) -> Operator;
     let others: [(MapStage, &str); 3] = [
         (concat_map, "concatMap"),
         (switch_map, "switchMap"),
@@ -531,7 +531,7 @@ fn concurrent_goes_with_merge_map_only_and_is_at_least_one() {
 
 fn failing(code: &'static str) -> Registry {
     let mut reg = Registry::new();
-    reg.register_act(
+    reg.register(
         OperatorSpec::new("store.put").touches(["store"]),
         move |_v, _cx| async move {
             Err::<Value, _>(if code == "cancelled" {
@@ -568,7 +568,7 @@ async fn catch_error_gets_the_failure_as_part_of_the_item() {
 }
 
 #[tokio::test]
-async fn catch_error_sees_the_item_as_it_was_when_the_stage_failed() {
+async fn catch_error_sees_the_item_as_it_was_when_the_operator_failed() {
     let reg = {
         let mut reg = failing("full");
         reg.register(
@@ -596,7 +596,7 @@ async fn catch_error_sees_the_item_as_it_was_when_the_stage_failed() {
 /// `store.put` fails for the item whose `n` is 2.
 fn fails_on_two() -> Registry {
     let mut reg = Registry::new();
-    reg.register_act(
+    reg.register(
         OperatorSpec::new("store.put")
             .settings(n(Shape::new()))
             .touches(["store"]),
@@ -680,8 +680,8 @@ async fn a_failure_inside_catch_error_is_a_run_error() {
 }
 
 #[tokio::test]
-async fn catch_error_covers_only_the_stages_before_it() {
-    // The failing act stands after the `catchError`, so nothing catches it.
+async fn catch_error_applies_only_to_the_operators_before_it() {
+    // The failing operator stands after the `catchError`, so nothing catches it.
     let def = numbers([
         op("set", json!({ "n": "$item.n" })),
         catch_error([emit("out")]),
@@ -698,25 +698,25 @@ async fn catch_error_covers_only_the_stages_before_it() {
 }
 
 #[test]
-fn a_covering_stage_needs_stages_before_it_and_none_that_span_the_stream() {
-    for stage in [
+fn an_operator_that_applies_to_the_ones_before_it_needs_some_and_none_that_span_the_stream() {
+    for operator in [
         catch_error([emit("out")]),
         finalize([op("set", json!({}))]),
         retry(1, Duration::ZERO),
         timeout(Duration::from_secs(1)),
     ] {
-        let first = refused(numbers([stage.clone(), emit("out")]));
+        let first = refused(numbers([operator.clone(), emit("out")]));
         assert!(
             matches!(first, LoadError::Malformed { ref path, .. } if path == "pipe[0]"),
             "{first}"
         );
-        let after_take = refused(numbers([emit("out"), take(1), stage.clone()]));
+        let after_take = refused(numbers([emit("out"), take(1), operator.clone()]));
         assert!(
             matches!(after_take, LoadError::Malformed { ref path, ref problem }
                 if path == "pipe[2]" && problem.contains("`take`")),
             "{after_take}"
         );
-        let after_merge = refused(numbers([merge_map([emit("out")]), stage]));
+        let after_merge = refused(numbers([merge_map([emit("out")]), operator]));
         assert!(
             matches!(after_merge, LoadError::Malformed { ref problem, .. } if problem.contains("`mergeMap`")),
             "{after_merge}"
@@ -728,7 +728,7 @@ fn a_covering_stage_needs_stages_before_it_and_none_that_span_the_stream() {
 
 fn tidy(world: &Arc<World>, fail: &'static str) -> Pipe {
     let mut reg = registry(world);
-    reg.register_act(
+    reg.register(
         OperatorSpec::new("store.put").touches(["store"]),
         move |_v, _cx| async move {
             match fail {
@@ -741,7 +741,7 @@ fn tidy(world: &Arc<World>, fail: &'static str) -> Pipe {
     let def = pipe("v")
         .input(Shape::new().required("tree", Ty::Text))
         .output("out", Shape::open())
-        .stages([
+        .operators([
             tap("store.put", json!({})),
             emit("out"),
             finalize([tap("git.worktree_remove", json!({ "path": "$item.tree" }))]),
@@ -807,7 +807,7 @@ fn flaky(failures: u32, start: Instant) -> (Arc<Mutex<Vec<u64>>>, Registry) {
     let tries = Arc::new(Mutex::new(Vec::new()));
     let mut reg = Registry::new();
     let t = tries.clone();
-    reg.register_act(
+    reg.register(
         OperatorSpec::new("store.put").touches(["store"]),
         move |_v, _cx| {
             let t = t.clone();
@@ -918,7 +918,7 @@ fn with_vine() -> Registry {
         .input(n(Shape::new()))
         .output("doubled", Shape::new().required("twice", Ty::Int))
         .output("too_big", n(Shape::new()))
-        .stages([branch(
+        .operators([branch(
             "$item.n",
             [("9", [emit("too_big")])],
             Some(vec![
@@ -968,7 +968,7 @@ async fn with_builds_the_other_vines_input_and_no_into_replaces_the_item() {
     let def = pipe("v")
         .input(Shape::new().required("count", Ty::Int))
         .output("out", Shape::open())
-        .stages([use_vine("double_it", Some(json!({ "n": "$item.count" })))
+        .operators([use_vine("double_it", Some(json!({ "n": "$item.count" })))
             .on("doubled", [emit("out")])
             .on("too_big", [emit("out")])]);
     let out = with_vine()
@@ -1049,7 +1049,7 @@ async fn the_outer_vines_reach_includes_the_reach_of_the_vine_it_uses() {
                 .required("brief", Ty::Text),
         )
         .output("out", Shape::open())
-        .stages([use_vine("job_launch", None)
+        .operators([use_vine("job_launch", None)
             .on("started", [emit("out")])
             .on("failed", [emit("out")])]);
     let vine = reg.build_pipe(def).unwrap();
@@ -1067,7 +1067,7 @@ async fn a_failure_the_other_vine_does_not_catch_can_be_caught_by_the_outer_one(
     let inner = pipe("store_it")
         .input(n(Shape::new()))
         .output("stored", Shape::open())
-        .stages([call("store.put", json!({})), emit("stored")]);
+        .operators([call("store.put", json!({})), emit("stored")]);
     let inner = reg.build_pipe(inner).unwrap();
     reg.add_vine(inner).unwrap();
     let def = numbers([
@@ -1085,13 +1085,13 @@ async fn a_failure_the_other_vine_does_not_catch_can_be_caught_by_the_outer_one(
 
 // ------------------------------------------------------------------ branch
 
-fn kinds(otherwise: Option<Vec<Stage>>) -> Pipe {
+fn kinds(otherwise: Option<Vec<Operator>>) -> Pipe {
     build(
         pipe("v")
             .input(Shape::new().required("kind", Ty::Text))
             .output("kept", Shape::open())
             .output("other", Shape::open())
-            .stages([
+            .operators([
                 branch("$item.kind", [("keep", [emit("kept")])], otherwise),
                 emit("other"),
             ]),
@@ -1111,12 +1111,12 @@ async fn branch_runs_the_case_that_matches_and_passes_the_rest_through() {
 }
 
 #[test]
-fn a_stage_after_a_branch_that_always_emits_can_never_run() {
+fn a_operator_after_a_branch_that_always_emits_can_never_run() {
     let def = pipe("v")
         .input(Shape::new().required("kind", Ty::Text))
         .output("kept", Shape::open())
         .output("other", Shape::open())
-        .stages([
+        .operators([
             branch(
                 "$item.kind",
                 [("keep", [emit("kept")])],
@@ -1178,13 +1178,13 @@ fn a_payload_that_cannot_fit_its_output_is_refused_before_it_runs() {
     let def = pipe("v")
         .input(n(Shape::new()))
         .output("out", Shape::new().required("job", Ty::Id))
-        .stages([emit_with("out", json!({ "job": 7 }))]);
+        .operators([emit_with("out", json!({ "job": 7 }))]);
     assert!(matches!(refused(def), LoadError::OutputMisfit { .. }));
     // Emitting the item as it is: the item's shape must fit the output.
     let def = pipe("v")
         .input(n(Shape::new()))
         .output("out", Shape::new().required("job", Ty::Id))
-        .stages([emit("out")]);
+        .operators([emit("out")]);
     assert!(matches!(refused(def), LoadError::OutputMisfit { .. }));
 }
 
@@ -1193,7 +1193,7 @@ async fn a_payload_that_does_not_fit_its_output_at_run_time_is_a_run_error() {
     let def = pipe("v")
         .input(Shape::new().required("job", Ty::Any))
         .output("out", Shape::new().required("job", Ty::Id))
-        .stages([emit_with("out", json!({ "job": "$item.job" }))]);
+        .operators([emit_with("out", json!({ "job": "$item.job" }))]);
     let err = build(def).run_one(json!({ "job": 7 })).await.unwrap_err();
     assert!(matches!(err, RunError::OutputMisfit { .. }), "{err}");
 }
@@ -1213,7 +1213,7 @@ fn item_is_the_only_name_and_a_field_it_never_has_is_refused() {
 }
 
 #[test]
-fn an_unregistered_operator_or_act_is_refused_by_name() {
+fn an_unregistered_operator_is_refused_by_name() {
     let err = refused(numbers([op("launch_job", json!({})), emit("out")]));
     assert_eq!(
         err,
@@ -1225,7 +1225,7 @@ fn an_unregistered_operator_or_act_is_refused_by_name() {
     let err = refused(numbers([call("git.push", json!({})), emit("out")]));
     assert_eq!(
         err,
-        LoadError::UnknownAct {
+        LoadError::UnknownOperator {
             path: "pipe[0]".into(),
             name: "git.push".into()
         }
@@ -1233,7 +1233,7 @@ fn an_unregistered_operator_or_act_is_refused_by_name() {
 }
 
 #[test]
-fn an_act_handed_input_that_does_not_fit_is_refused_before_it_runs() {
+fn an_operator_handed_input_that_does_not_fit_is_refused_before_it_runs() {
     let world = World::new();
     let def = numbers([
         call("git.worktree_remove", json!({ "dir": "/x" })),

@@ -6,10 +6,10 @@
 //!
 //!     cargo test --no-default-features --test terra_loops
 
-mod acts;
+mod fake;
 mod terra;
 
-use acts::{job_launch_pipe, registry, World};
+use fake::{job_launch_pipe, registry, World};
 use terra::moves::launch_move;
 use terra::{
     Answer, Gate, InstallError, Lands, LoopWhy, Move, Pick, Reaction, Refusal, Terra, Trellis,
@@ -24,7 +24,7 @@ fn echo() -> PipeDef {
     pipe("echo")
         .input(thing())
         .output("done", thing())
-        .stages([emit_with("done", json!({ "thing": "$item.thing" }))])
+        .operators([emit_with("done", json!({ "thing": "$item.thing" }))])
 }
 
 /// A move on a thing that starts `echo` and lands `kind`, setting `sets`.
@@ -190,7 +190,7 @@ fn a_vine_that_presses_its_own_move_is_refused_even_with_a_gate() {
     let again = pipe("again")
         .input(thing().required("request", Ty::Text))
         .output("done", thing())
-        .stages([
+        .operators([
             call(
                 "move.again",
                 json!({ "request": "$item.request", "thing": "$item.thing" }),

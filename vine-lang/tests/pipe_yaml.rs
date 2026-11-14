@@ -2,11 +2,11 @@
 //! pipe built in Rust and the same pipe loaded from YAML are one vine.
 #![cfg(feature = "yaml")]
 
-mod acts;
+mod fake;
 
 use std::sync::Arc;
 
-use acts::{job_launch_pipe, ready_job, registry, World};
+use fake::{job_launch_pipe, ready_job, registry, World};
 use futures::{stream, StreamExt};
 use vine_lang::pipe::{call, emit, emit_with, pipe, split, Pipe};
 use vine_lang::{json, LoadError, RunError, Shape, Ty, Value};
@@ -245,13 +245,13 @@ async fn plan_activate_cuts_the_branch_and_makes_the_working_copy() {
 }
 
 #[tokio::test]
-async fn plan_activate_emits_failed_when_either_git_act_fails() {
-    for act in ["git.branch_cut", "git.worktree_add"] {
+async fn plan_activate_emits_failed_when_either_git_operator_fails() {
+    for operator in ["git.branch_cut", "git.worktree_add"] {
         let world = World::new();
-        world.fail(act, "broken", "it broke");
+        world.fail(operator, "broken", "it broke");
         let input = json!({ "plan": "p-1", "base": "origin/main" });
         let (name, payload) = one(&load(&world, "plan_activate"), input).await;
-        assert_eq!(name, "failed", "{act}");
+        assert_eq!(name, "failed", "{operator}");
         assert_eq!(payload, json!({ "plan": "p-1", "reason": "it broke" }));
     }
 }
@@ -344,8 +344,8 @@ async fn job_launch_is_the_same_vine_in_rust_and_in_yaml() {
             assert_eq!(from_rust.outputs(), from_yaml.outputs());
             assert_eq!(from_rust.reach(), from_yaml.reach());
             for world in [&rust_world, &yaml_world] {
-                if let Some(act) = failing {
-                    world.fail(act, "broken", "it broke");
+                if let Some(operator) = failing {
+                    world.fail(operator, "broken", "it broke");
                 }
             }
             let a = from_rust.run_one(input.clone()).await;
@@ -368,21 +368,21 @@ fn the_same_mistake_is_refused_with_the_same_error() {
             .output("out", Shape::new().required("job", Ty::Any))
     };
 
-    let rust = def().stages([emit("done")]);
+    let rust = def().operators([emit("done")]);
     let yaml = format!("{head}  - emit: done\n");
     assert_eq!(
         reg.build_pipe(rust).unwrap_err(),
         reg.load_pipe(&yaml).unwrap_err()
     );
 
-    let rust = def().stages([call("git.push", json!({})), emit("out")]);
+    let rust = def().operators([call("git.push", json!({})), emit("out")]);
     let yaml = format!("{head}  - call: git.push\n  - emit: out\n");
     assert_eq!(
         reg.build_pipe(rust).unwrap_err(),
         reg.load_pipe(&yaml).unwrap_err()
     );
 
-    let rust = def().stages([
+    let rust = def().operators([
         split("$item.nope"),
         emit_with("out", json!({ "job": "$item" })),
     ]);
@@ -393,7 +393,7 @@ fn the_same_mistake_is_refused_with_the_same_error() {
         reg.load_pipe(&yaml).unwrap_err()
     );
 
-    let rust = def().stages([split("$item.jobs").into("job")]);
+    let rust = def().operators([split("$item.jobs").into("job")]);
     let yaml = format!("{head}  - split: $item.jobs\n    into: job\n");
     assert_eq!(
         reg.build_pipe(rust).unwrap_err(),
@@ -411,7 +411,7 @@ fn bad(pipe: &str) -> LoadError {
 }
 
 #[test]
-fn a_stage_does_one_thing() {
+fn a_operator_does_one_thing() {
     let err = bad("  - split: $item.n\n    filter: $item.n == 1\n  - emit: out\n");
     assert!(
         matches!(err, LoadError::Malformed { ref path, .. } if path == "pipe[0]"),
@@ -523,7 +523,7 @@ fn renamed(path: &str, old: &str, new: &str) -> LoadError {
 const MAP_KEYS: &str = "`concatMap`, `mergeMap`, `switchMap` or `exhaustMap`";
 
 #[test]
-fn each_is_refused_and_the_error_names_the_four_map_stages() {
+fn each_is_refused_and_the_error_names_the_four_map_operators() {
     let err = bad("  - each: { overlap: merge, do: [ { emit: out } ] }\n");
     assert_eq!(err, renamed("pipe[0]", "each", MAP_KEYS));
 }
@@ -565,7 +565,7 @@ fn catch_is_refused_and_the_error_names_catch_error() {
 }
 
 #[test]
-fn overlap_is_refused_on_every_map_stage_and_the_error_names_the_stage_keys() {
+fn overlap_is_refused_on_every_map_operator_and_the_error_names_the_operator_keys() {
     for key in ["concatMap", "mergeMap", "switchMap", "exhaustMap"] {
         let err = bad(&format!(
             "  - {key}: {{ overlap: merge, do: [ {{ emit: out }} ] }}\n"
@@ -575,7 +575,7 @@ fn overlap_is_refused_on_every_map_stage_and_the_error_names_the_stage_keys() {
             renamed(
                 &format!("pipe[0].{key}"),
                 "overlap",
-                &format!("{MAP_KEYS} as the stage key")
+                &format!("{MAP_KEYS} as the operator key")
             )
         );
     }
@@ -588,7 +588,7 @@ fn at_once_is_refused_and_the_error_names_concurrent() {
 }
 
 #[test]
-fn an_old_key_is_refused_where_it_stands_inside_another_stage() {
+fn an_old_key_is_refused_where_it_stands_inside_another_operator() {
     let err =
         bad("  - fork:\n      - - collect: { size: 2 }\n        - emit: out\n  - emit: out\n");
     assert_eq!(

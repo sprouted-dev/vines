@@ -2,7 +2,7 @@
 # agent in it, pass on each line the agent writes, commit if the agent
 # finished, and always remove the working copy.
 #
-# `agent.run` is a stream act. It gives one item per line and then its
+# `agent.run` is a stream operator. It gives one item per line and then its
 # end, `{ status, lines }`. `end: ended` makes that end one last item,
 # with `ended` and no `line`. So a run with no lines still ends.
 #
@@ -11,7 +11,7 @@
 # not make a second working copy, it attaches to the same agent session,
 # and it hands out no line twice.
 #
-# When `agent.run` is registered as a stream act that gives its items
+# When `agent.run` is registered as a stream operator that gives its items
 # again, the run saves how far the agent got, not its lines. The 50 line
 # batch holds the agent's position back, so a restart attaches from the
 # last whole batch and the summary is rebuilt from the lines given again.

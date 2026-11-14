@@ -4,12 +4,12 @@
 //! press read has changed.
 #![cfg(feature = "yaml")]
 
-mod acts;
+mod fake;
 mod terra;
 
 use std::sync::Arc;
 
-use acts::{registry, World};
+use fake::{registry, World};
 use terra::moves::{items_trellis, jobs_trellis, launch_move, yaml};
 use terra::{
     Answer, End, Event, InstallError, Lands, Move, Need, Refusal, Terra, Trellis, VineSource,

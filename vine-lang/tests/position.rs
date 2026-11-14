@@ -3,22 +3,22 @@
 //! saved, the failures, and the vines the checker refuses. Rust alone:
 //! this file passes with YAML off.
 
-mod acts;
+mod fake;
 
 use std::sync::Arc;
 use std::time::Duration;
 
-use acts::agent::{job_run_pipe, job_run_registry, Host};
-use acts::feed::{
+use fake::agent::{job_run_pipe, job_run_registry, Host};
+use fake::feed::{
     event_backup_pipe, event_pages_pipe, event_relay_caught_pipe, event_relay_pipe, events,
     feed_registry,
 };
-use acts::restart::{assert_forward, events_in, run, run_with_kills, started, Caller, End};
-use acts::World;
+use fake::restart::{assert_forward, events_in, run, run_with_kills, started, Caller, End};
+use fake::World;
 use futures::{stream, StreamExt};
 use vine_lang::pipe::{
     buffer_count, call, concat_map, emit, emit_with, exhaust_map, finalize, fork, last, pipe,
-    split, switch_map, take, tap, timeout, use_vine, Pipe, PipeDef, Stage,
+    split, switch_map, take, tap, timeout, use_vine, Operator, Pipe, PipeDef,
 };
 use vine_lang::{
     json, Bookmark, Entry, Event, Journal, Line, OperatorSpec, Progress, RunError, Shape, Ty, Value,
@@ -57,7 +57,7 @@ fn archive_and_batch(world: &Arc<World>) -> Pipe {
         )
         .output("archived", Shape::open())
         .output("stored", Shape::open())
-        .stages([
+        .operators([
             fork([vec![
                 buffer_count(3),
                 call("backup.store", json!({ "items": "$item.items" })).into("stored"),
@@ -89,7 +89,7 @@ fn item_of(name: &str, payload: &Value) -> u64 {
     payload[field].as_u64().unwrap()
 }
 
-/// What an uninterrupted run gives: its outputs, the acts it called, the
+/// What an uninterrupted run gives: its outputs, the operators it called, the
 /// positions it reported, and how many events it gave.
 async fn uninterrupted(build: Build, input: &[Value]) -> (Caller, Vec<String>, usize) {
     let world = World::new();
@@ -103,7 +103,7 @@ async fn uninterrupted(build: Build, input: &[Value]) -> (Caller, Vec<String>, u
 }
 
 /// Kill `build`'s vine after each count in `kills`, then run it to the
-/// end, and check it did what an uninterrupted run does: each act once,
+/// end, and check it did what an uninterrupted run does: each operator once,
 /// each output once and in order, the position only forward, and the
 /// bookmark no bigger than `bound` lines.
 async fn check_kills(build: Build, input: &[Value], kills: &[usize], bound: usize) {
@@ -210,7 +210,7 @@ async fn a_batch_in_a_side_pipe_ties_its_events_together_so_the_position_moves_b
 }
 
 #[tokio::test]
-async fn the_position_waits_for_a_stream_act_to_end_and_never_passes_an_item_still_giving() {
+async fn the_position_waits_for_a_stream_operator_to_end_and_never_passes_an_item_still_giving() {
     let world = World::new();
     let mut position = 0;
     let mut run = pages(&world).run_from(stream::iter(paged(1, 8)), Bookmark::new());
@@ -263,20 +263,20 @@ async fn a_batching_vine_killed_anywhere_once_or_twice_stores_each_batch_once() 
 }
 
 #[tokio::test]
-async fn a_vine_with_a_side_batch_killed_anywhere_once_or_twice_acts_once() {
+async fn a_vine_with_a_side_batch_killed_anywhere_once_or_twice_calls_once() {
     // A batch of 3 has 3 archives and one store in flight at most.
     check_every_kill(archive_and_batch, &events(1, 7), 8).await;
 }
 
 #[tokio::test]
-async fn a_stream_act_vine_killed_anywhere_once_or_twice_gives_each_page_once() {
+async fn a_stream_operator_vine_killed_anywhere_once_or_twice_gives_each_page_once() {
     // The most pages one event has is 4: its start, 4 pages, its end, 5
     // handed outputs, and the start of the next event.
     check_every_kill(pages, &paged(1, 5), 12).await;
 }
 
 #[tokio::test]
-async fn a_restart_mid_stream_asks_the_act_to_go_on_after_the_pages_it_saved() {
+async fn a_restart_mid_stream_asks_the_operator_to_go_on_after_the_pages_it_saved() {
     // One event with 4 pages, after a position of 2.
     let input = [events(1, 2), vec![json!({ "seq": 3, "pages": 4 })]].concat();
     // Kill right after the line that records the second page as handed.
@@ -388,7 +388,7 @@ async fn a_restart_after_an_uncaught_failure_replays_it_and_stops_at_the_same_pl
     let end = run(&relay(&world), &input, &mut caller, None).await;
     assert!(matches!(end, End::Failed(RunError::Unhandled { .. })));
     assert_eq!(caller.position(), 3);
-    // The saved failure is replayed: the act is not asked again.
+    // The saved failure is replayed: the operator is not asked again.
     assert_eq!(world.count("archive.put 4"), 1);
 }
 
@@ -398,8 +398,8 @@ async fn a_restart_with_a_vine_that_catches_the_failure_carries_on_past_it() {
     let input = with_bad(4);
     let mut caller = Caller::new();
     run(&relay(&world), &input, &mut caller, None).await;
-    // The vine gains a `catchError`. Its act keeps its path, so the saved
-    // failure fits it and is handled without asking the act again.
+    // The vine gains a `catchError`. Its operator keeps its path, so the saved
+    // failure fits it and is handled without asking the operator again.
     let end = run(&relay_caught(&world), &input, &mut caller, None).await;
     assert!(matches!(end, End::Ended), "{end:?}");
     assert_eq!(caller.position(), 8);
@@ -435,7 +435,7 @@ async fn a_caught_failure_survives_a_kill_at_every_point() {
 async fn a_failure_waiting_for_its_cleanup_keeps_the_position_before_its_item() {
     let world = World::new();
     let mut reg = feed_registry(&world);
-    reg.register_act(
+    reg.register(
         OperatorSpec::new("slow.cleanup")
             .settings(Shape::open())
             .touches(["cleanup"]),
@@ -452,7 +452,7 @@ async fn a_failure_waiting_for_its_cleanup_keeps_the_position_before_its_item() 
             pipe("v")
                 .input(Shape::new().required("parts", Ty::Any))
                 .output("out", Shape::open())
-                .stages([
+                .operators([
                     split("$item.parts"),
                     emit("out"),
                     finalize([tap("slow.cleanup", json!({}))]),
@@ -581,13 +581,13 @@ async fn a_bookmark_that_does_not_fit_the_vine_or_its_input_is_a_run_error() {
         p.contains("pipe[0]#0 of item 1` was saved for input"),
         "{p}"
     );
-    // A stream was saved where the vine has an act that gives one result.
+    // A stream was saved where the vine has an operator that gives one result.
     let started = Entry::Started {
         at: "pipe[0]#0".into(),
         input: json!({}),
     };
     let p = misfit(kept(0, vec![(1, started)]), events(1, 1)).await;
-    assert!(p.contains("saved as a stream act"), "{p}");
+    assert!(p.contains("saved as a stream operator"), "{p}");
     // Another output was handed out for this item.
     let other = Entry::Emitted {
         output: "other".into(),
@@ -716,7 +716,7 @@ async fn input_that_does_not_fit_the_shape_stops_the_run_before_that_item() {
 
 // ------------------------------------------------------------------ checker
 
-fn events_vine(stages: impl IntoIterator<Item = Stage>) -> PipeDef {
+fn events_vine(operators: impl IntoIterator<Item = Operator>) -> PipeDef {
     pipe("v")
         .input(
             Shape::new()
@@ -724,10 +724,10 @@ fn events_vine(stages: impl IntoIterator<Item = Stage>) -> PipeDef {
                 .required("body", Ty::Text),
         )
         .output("out", Shape::open())
-        .stages(stages)
+        .operators(operators)
 }
 
-fn archive() -> Stage {
+fn archive() -> Operator {
     call(
         "archive.put",
         json!({ "seq": "$item.seq", "body": "$item.body" }),
@@ -743,7 +743,7 @@ async fn the_checker_refuses_a_vine_a_restart_from_a_position_cannot_rebuild() {
             pipe("switching")
                 .input(Shape::open())
                 .output("out", Shape::open())
-                .stages([switch_map([emit("out")])]),
+                .operators([switch_map([emit("out")])]),
         )
         .unwrap();
     reg.add_vine(switching).unwrap();
@@ -800,7 +800,7 @@ async fn the_checker_refuses_a_vine_a_restart_from_a_position_cannot_rebuild() {
 }
 
 #[test]
-fn stages_that_start_again_for_each_item_can_run_from_a_position() {
+fn operators_that_start_again_for_each_item_can_run_from_a_position() {
     let world = World::new();
     let reg = feed_registry(&world);
     for def in [
@@ -815,7 +815,7 @@ fn stages_that_start_again_for_each_item_can_run_from_a_position() {
         // `bufferCount` over whole items, in the main pipe or a side pipe.
         events_vine([buffer_count(2), emit("out")]),
         events_vine([fork([vec![buffer_count(2), emit("out")]]), emit("out")]),
-        // `bufferCount` after a stream act, inside one item's work.
+        // `bufferCount` after a stream operator, inside one item's work.
         events_vine([concat_map([
             call("feed.pages", json!({ "seq": "$item.seq", "pages": 3 })),
             buffer_count(2),

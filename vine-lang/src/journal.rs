@@ -23,19 +23,19 @@
 //!
 //! # What an entry means
 //!
-//! Each act a run calls has a key: the path of its stage and a count of how
-//! many times that stage ran before, such as `pipe[1]#0`. In a journal the
+//! Each call a run makes has a key: the path of its operator and a count of how
+//! many times that operator ran before, such as `pipe[1]#0`. In a journal the
 //! count runs over the whole run. In a bookmark it runs over the work of
 //! one input item, so the keys of item 7 are the same whether the run
-//! started at item 1 or at item 5. A replay calls the stages in the same
+//! started at item 1 or at item 5. A replay runs the operators in the same
 //! order, so the keys line up.
 //!
-//! - [`Entry::Done`] and [`Entry::Failed`]: an act gave this result or
-//!   failed this way. On replay the act is not called. Its saved result is
+//! - [`Entry::Done`] and [`Entry::Failed`]: a call gave this result or
+//!   failed this way. On replay the call is not made again. Its saved result is
 //!   used.
-//! - [`Entry::Started`], [`Entry::Item`] and [`Entry::Ended`]: a stream act
+//! - [`Entry::Started`], [`Entry::Item`] and [`Entry::Ended`]: a stream operator
 //!   was called, gave one more item, and ended. On replay the saved items
-//!   flow again. If it had not ended, the act is called again with
+//!   flow again. If it had not ended, the operator is called again with
 //!   [`OpContext::resume_from`](crate::OpContext::resume_from) set to the
 //!   number of items saved, and the run carries on from there.
 //! - [`Entry::Emitted`]: the caller was handed this output. On replay the
@@ -43,20 +43,20 @@
 //!   out twice. The outputs of one group of work are matched in order, so
 //!   an output made in a group of a `mergeMap` names its group,
 //!   and the groups need not finish in the same order again.
-//! - [`Entry::Through`] and [`Entry::Stopped`]: for a stream act that gives
+//! - [`Entry::Through`] and [`Entry::Stopped`]: for a stream operator that gives
 //!   its items again, how far a call got, how many outputs made from the
 //!   items after that were handed out, and how it stopped. They take the
 //!   place of `Item`, `Ended` and the `Emitted` lines of those outputs. On
-//!   replay the act is called with `resume_from` set to the position, and
+//!   replay the operator is called with `resume_from` set to the position, and
 //!   the run hands out again, silently, as many outputs as were handed.
-//!   If the call had stopped, the run reads the act only up to the items it
+//!   If the call had stopped, the run reads the operator only up to the items it
 //!   gave before and then gives the saved end.
-//! - [`Entry::Timed`]: what a `timeout` decided for one run of the stages
-//!   it covers. Each run gets a scope of its own, numbered in the order
+//! - [`Entry::Timed`]: what a `timeout` decided for one run of the
+//!   operators it applies to. Each run gets a scope of its own, numbered in the order
 //!   values reach the `timeout`, such as `pipe[2].timeout@0`, and the keys
-//!   of the acts it covers start with it, such as
+//!   of the calls it applies to start with it, such as
 //!   `pipe[2].timeout@0/pipe[0]#0`. On replay, [`Timing::TimedOut`] fails
-//!   the item at once without running the covered stages, and
+//!   the item at once without running the operators it applies to, and
 //!   [`Timing::InTime`] runs them with no limit. With no decision saved,
 //!   the wait starts again from nothing.
 //!
@@ -88,20 +88,20 @@
 //!
 //! # Groups of work
 //!
-//! A `mergeMap` runs its values side by side, so their acts and
+//! A `mergeMap` runs its values side by side, so their calls and
 //! outputs can interleave in another order after a restart. In a saved
 //! run each value that enters it starts a group, numbered in the order the
-//! values enter, and the keys of the acts run for it start with the
+//! values enter, and the keys of the calls made for it start with the
 //! group's scope, such as `pipe[1].mergeMap@3/pipe[1].mergeMap.do[0]#0`. Its
 //! outputs are saved with `within` set to the scope, such as
-//! `pipe[1].mergeMap@3/`. A replay matches each group's own acts and outputs in
+//! `pipe[1].mergeMap@3/`. A replay matches each group's own calls and outputs in
 //! that group's own order. A vine with no `mergeMap` saves exactly the
 //! lines it did before groups existed.
 //!
 //! # Which input item a line belongs to
 //!
 //! Input items are numbered from 1, counted from the first item ever. A
-//! line belongs to the input item the act's value came from. A value made
+//! line belongs to the input item the call's value came from. A value made
 //! from several items, such as a batch from `bufferCount`, belongs to the last
 //! of them. A batch ties its items together: the position never stops
 //! between them, so a restart feeds the whole batch again.
@@ -109,8 +109,8 @@
 //! # The cut line
 //!
 //! [`Progress::Through`] with `n` means nothing in the run still holds
-//! anything derived from items 1 to `n`: every act they caused has
-//! finished, every output they caused was handed out, and no stage holds
+//! anything derived from items 1 to `n`: every call they caused has
+//! finished, every output they caused was handed out, and no operator holds
 //! them. Their lines will never be read again. [`Bookmark::record`] drops
 //! them. A bookmark that still has some, because the caller saved the
 //! position and crashed before it dropped them, is fine: a run ignores
@@ -142,13 +142,13 @@ pub enum Event {
 /// One line of a run's journal.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Entry {
-    /// The act at `at` was given `input` and gave `result`.
+    /// The call at `at` was given `input` and gave `result`.
     Done {
         at: String,
         input: Value,
         result: Value,
     },
-    /// The act at `at` was given `input` and failed. For a stream act this
+    /// The call at `at` was given `input` and failed. For a stream operator this
     /// ends its stream.
     Failed {
         at: String,
@@ -156,11 +156,11 @@ pub enum Entry {
         code: String,
         message: String,
     },
-    /// The stream act at `at` was called with `input`.
+    /// The stream operator at `at` was called with `input`.
     Started { at: String, input: Value },
-    /// The stream act at `at` gave one more item.
+    /// The stream operator at `at` gave one more item.
     Item { at: String, value: Value },
-    /// The stream act at `at` ended with `value`.
+    /// The stream operator at `at` ended with `value`.
     Ended { at: String, value: Value },
     /// The caller was handed one output with this name. Its id is not
     /// saved: a replay makes it again from where the output stands.
@@ -168,7 +168,7 @@ pub enum Entry {
     /// `pipe[1].mergeMap@3/`, when it was made in a group of a
     /// `mergeMap`. A replay matches the outputs of one group in order,
     /// whatever order the groups finish in. `from` names the item of a
-    /// stream act call the output was made from, such as `pipe[1]#0@7/`,
+    /// stream operator call the output was made from, such as `pipe[1]#0@7/`,
     /// when `last` picked that item out of groups: once the call's
     /// position passes it, the output is never made again. The line stays
     /// all the same, so the outputs after it in its group keep their ids.
@@ -177,27 +177,27 @@ pub enum Entry {
         within: Option<String>,
         from: Option<String>,
     },
-    /// For a stream act that gives its items again: every item it gave
+    /// For a stream operator that gives its items again: every item it gave
     /// through number `items` is fully done, and `handed` outputs made
     /// from the items after them were handed out. A later `Through` for
     /// the same `at` replaces this one.
     Through { at: String, items: u64, handed: u64 },
-    /// A stream act that gives its items again stopped after giving
+    /// A stream operator that gives its items again stopped after giving
     /// `items` items, in the way `how` says.
     Stopped { at: String, items: u64, how: Ending },
-    /// The `timeout` at `at` decided this for one run of the stages it
-    /// covers, such as `pipe[2].timeout@0`. A replay takes the decision
+    /// The `timeout` at `at` decided this for one run of the operators it
+    /// applies to, such as `pipe[2].timeout@0`. A replay takes the decision
     /// from here and does not ask the clock again.
     Timed { at: String, timing: Timing },
 }
 
-/// What a `timeout` decided for one run of the stages it covers.
+/// What a `timeout` decided for one run of the operators it applies to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Timing {
-    /// The stages were done before the limit. A replay runs them again
+    /// The operators were done before the limit. A replay runs them again
     /// with no limit, so they end as they did even if they are slower.
     InTime,
-    /// The limit came first, and the stages were dropped. A replay fails
+    /// The limit came first, and the operators were dropped. A replay fails
     /// the item at once and does not run them.
     TimedOut,
 }
@@ -219,7 +219,7 @@ impl Timing {
     }
 }
 
-/// How a stream act that gives its items again stopped.
+/// How a stream operator that gives its items again stopped.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Ending {
     /// It ended with this value.
@@ -288,8 +288,8 @@ impl Entry {
         }
     }
 
-    /// Where the act this entry is about stands, such as `pipe[1]#0`. An
-    /// [`Entry::Emitted`] names no act.
+    /// Where the call this entry is about stands, such as `pipe[1]#0`. An
+    /// [`Entry::Emitted`] names no call.
     pub fn at(&self) -> Option<&str> {
         match self {
             Entry::Done { at, .. }
@@ -305,7 +305,7 @@ impl Entry {
     }
 
     /// Whether `through`, an [`Entry::Through`], makes this entry useless:
-    /// it is an earlier `Through` for the same stream act, or it belongs to
+    /// it is an earlier `Through` for the same stream operator, or it belongs to
     /// an item of that stream that is now done. An output made in a group
     /// belongs to the item its group's scope names. An output `last` lifted
     /// out of groups from such an item is never made again, but its line
@@ -438,7 +438,7 @@ impl Entry {
 }
 
 /// The number of the stream item a key belongs to, when it belongs to an
-/// item the stream act at `call` gave. The keys of item 7 of `pipe[1]#0`
+/// item the stream operator at `call` gave. The keys of item 7 of `pipe[1]#0`
 /// start `pipe[1]#0@7/`.
 pub(crate) fn item_of_stream(at: &str, call: &str) -> Option<u64> {
     let rest = at.strip_prefix(call)?.strip_prefix('@')?;
@@ -465,7 +465,7 @@ impl Journal {
 
     /// Keep what the run handed out: append an entry, and drop the
     /// entries it makes useless. An [`Entry::Through`] replaces the one
-    /// before it for the same stream act and drops the entries of the
+    /// before it for the same stream operator and drops the entries of the
     /// items of that stream it passed. An output changes nothing.
     pub fn record(&mut self, event: &Event) {
         if let Event::Save(entry) = event {
@@ -592,7 +592,7 @@ impl Bookmark {
 
     /// Every input item through `position` is done, and nothing else is
     /// saved. A run from here does again whatever was in flight past the
-    /// position: acts are called again and outputs handed out again.
+    /// position: calls are made again and outputs handed out again.
     pub fn at(position: u64) -> Self {
         Bookmark {
             position,
@@ -659,7 +659,7 @@ impl Bookmark {
 
     /// Keep what the run handed out: append a line, or move the position
     /// and drop the lines it passed. A line with an [`Entry::Through`]
-    /// replaces the one before it for the same stream act, and drops the
+    /// replaces the one before it for the same stream operator, and drops the
     /// lines of the items of that stream it passed. [`Progress::Done`]
     /// keeps the item as done and drops its lines. An output changes
     /// nothing.

@@ -1,6 +1,6 @@
-//! Fake outside acts for the tests, and the example vines built in Rust.
+//! Fake outside operators for the tests, and the example vines built in Rust.
 //!
-//! The library ships no acts. A caller registers the Rust behind each
+//! The library ships no operators. A caller registers the Rust behind each
 //! name. Here the "outside" is a `World` in memory.
 #![allow(dead_code)]
 
@@ -14,7 +14,7 @@ use std::sync::{Arc, Mutex};
 
 use vine_lang::{json, OpError, OperatorSpec, Registry, Shape, Ty, Value};
 
-/// What the fake acts did, and which act should fail next.
+/// What the fake operators did, and which operator should fail next.
 #[derive(Default)]
 pub struct World {
     state: Mutex<State>,
@@ -30,13 +30,13 @@ struct State {
     started: u64,
     fail: BTreeMap<String, OpError>,
     hooks: BTreeMap<String, Hook>,
-    /// How long each act named here takes, on tokio's clock.
+    /// How long each operator named here takes, on tokio's clock.
     slow: BTreeMap<String, std::time::Duration>,
 }
 
 type Hook = Arc<dyn Fn() + Send + Sync>;
 
-/// How a fake stream act is registered: as one that gives only the items
+/// How a fake stream operator is registered: as one that gives only the items
 /// after those it gave, or as one that gives its items again from any
 /// point, the way a host that stores every item can.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -45,15 +45,15 @@ pub enum Gives {
     Again,
 }
 
-/// Register a stream act the way `gives` says.
-pub fn register_stream_act<F, S>(reg: &mut Registry, gives: Gives, spec: OperatorSpec, f: F)
+/// Register a stream operator the way `gives` says.
+pub fn register_stream<F, S>(reg: &mut Registry, gives: Gives, spec: OperatorSpec, f: F)
 where
     F: Fn(Value, vine_lang::OpContext) -> S + Send + Sync + 'static,
     S: futures::Stream<Item = Result<vine_lang::Part, OpError>> + Send + 'static,
 {
     match gives {
-        Gives::OnlyNew => reg.register_stream_act(spec, f),
-        Gives::Again => reg.register_replayable_stream_act(spec, f),
+        Gives::OnlyNew => reg.register_stream(spec, f),
+        Gives::Again => reg.register_replayable_stream(spec, f),
     }
     .unwrap();
 }
@@ -63,13 +63,13 @@ impl World {
         Arc::new(World::default())
     }
 
-    /// Make the named act fail the next time it is called.
-    pub fn fail(&self, act: &str, code: &str, message: &str) {
+    /// Make the named operator fail the next time it is called.
+    pub fn fail(&self, operator: &str, code: &str, message: &str) {
         let mut s = self.state.lock().unwrap();
-        s.fail.insert(act.into(), OpError::new(code, message));
+        s.fail.insert(operator.into(), OpError::new(code, message));
     }
 
-    /// Every act that ran, in order, such as `git.worktree_add job-1`.
+    /// Every operator that ran, in order, such as `git.worktree_add job-1`.
     pub fn log(&self) -> Vec<String> {
         self.state.lock().unwrap().log.clone()
     }
@@ -101,33 +101,37 @@ impl World {
         self.state.lock().unwrap().trees.insert(path.into());
     }
 
-    /// Run `hook` each time the named act runs. A test uses this to change
+    /// Run `hook` each time the named operator runs. A test uses this to change
     /// something else while a vine is partway through.
-    pub fn when(&self, act: &str, hook: impl Fn() + Send + Sync + 'static) {
+    pub fn when(&self, operator: &str, hook: impl Fn() + Send + Sync + 'static) {
         let mut s = self.state.lock().unwrap();
-        s.hooks.insert(act.into(), Arc::new(hook));
+        s.hooks.insert(operator.into(), Arc::new(hook));
     }
 
-    /// Make the named act take this long each time, on tokio's clock. A
+    /// Make the named operator take this long each time, on tokio's clock. A
     /// test that starts the clock paused gets exact times.
-    pub fn slow(&self, act: &str, takes: std::time::Duration) {
-        self.state.lock().unwrap().slow.insert(act.into(), takes);
+    pub fn slow(&self, operator: &str, takes: std::time::Duration) {
+        self.state
+            .lock()
+            .unwrap()
+            .slow
+            .insert(operator.into(), takes);
     }
 
-    /// Make the named act take this long when it acts on `detail`, such
+    /// Make the named operator take this long when it works on `detail`, such
     /// as `agent.start` in `/trees/j-2`, whatever [`World::slow`] says.
-    pub fn slow_for(&self, act: &str, detail: &str, takes: std::time::Duration) {
-        let key = format!("{act} {detail}");
+    pub fn slow_for(&self, operator: &str, detail: &str, takes: std::time::Duration) {
+        let key = format!("{operator} {detail}");
         self.state.lock().unwrap().slow.insert(key, takes);
     }
 
-    /// Wait as long as the named act takes on `detail`.
-    async fn take_time(&self, act: &str, detail: &str) {
+    /// Wait as long as the named operator takes on `detail`.
+    async fn take_time(&self, operator: &str, detail: &str) {
         let takes = {
             let s = self.state.lock().unwrap();
             s.slow
-                .get(&format!("{act} {detail}"))
-                .or_else(|| s.slow.get(act))
+                .get(&format!("{operator} {detail}"))
+                .or_else(|| s.slow.get(operator))
                 .copied()
         };
         if let Some(takes) = takes {
@@ -135,7 +139,7 @@ impl World {
         }
     }
 
-    /// Add a line to the log without running an act.
+    /// Add a line to the log without running an operator.
     pub fn note(&self, line: String) {
         self.state.lock().unwrap().log.push(line);
     }
@@ -145,14 +149,14 @@ impl World {
         self.log().iter().filter(|l| l.starts_with(prefix)).count()
     }
 
-    fn run(&self, act: &str, detail: &str) -> Result<(), OpError> {
+    fn run(&self, operator: &str, detail: &str) -> Result<(), OpError> {
         let hook = {
             let mut s = self.state.lock().unwrap();
-            if let Some(e) = s.fail.remove(act) {
+            if let Some(e) = s.fail.remove(operator) {
                 return Err(e);
             }
-            s.log.push(format!("{act} {detail}"));
-            s.hooks.get(act).cloned()
+            s.log.push(format!("{operator} {detail}"));
+            s.hooks.get(operator).cloned()
         };
         if let Some(hook) = hook {
             hook();
@@ -165,12 +169,12 @@ fn text(v: &Value, key: &str) -> String {
     v[key].as_str().unwrap_or_default().to_owned()
 }
 
-/// A registry with the fake `git` and `agent` acts.
+/// A registry with the fake `git` and `agent` operators.
 pub fn registry(world: &Arc<World>) -> Registry {
     let mut reg = Registry::new();
 
     let w = world.clone();
-    reg.register_act(
+    reg.register(
         OperatorSpec::new("git.refresh_branch")
             .settings(Shape::new().required("branch", Ty::Text))
             .touches(["git"]),
@@ -185,7 +189,7 @@ pub fn registry(world: &Arc<World>) -> Registry {
     .unwrap();
 
     let w = world.clone();
-    reg.register_act(
+    reg.register(
         OperatorSpec::new("git.branch_cut")
             .settings(
                 Shape::new()
@@ -206,7 +210,7 @@ pub fn registry(world: &Arc<World>) -> Registry {
     .unwrap();
 
     let w = world.clone();
-    reg.register_act(
+    reg.register(
         OperatorSpec::new("git.worktree_add")
             .settings(
                 Shape::new()
@@ -232,7 +236,7 @@ pub fn registry(world: &Arc<World>) -> Registry {
     // Removing one that is not there is not a failure, so it is safe to
     // run twice.
     let w = world.clone();
-    reg.register_act(
+    reg.register(
         OperatorSpec::new("git.worktree_remove")
             .settings(
                 Shape::new()
@@ -257,7 +261,7 @@ pub fn registry(world: &Arc<World>) -> Registry {
     .unwrap();
 
     let w = world.clone();
-    reg.register_act(
+    reg.register(
         OperatorSpec::new("git.commit")
             .settings(
                 Shape::new()
@@ -277,7 +281,7 @@ pub fn registry(world: &Arc<World>) -> Registry {
     .unwrap();
 
     let w = world.clone();
-    reg.register_act(
+    reg.register(
         OperatorSpec::new("agent.start")
             .settings(
                 Shape::new()
@@ -301,7 +305,7 @@ pub fn registry(world: &Arc<World>) -> Registry {
     // Stop an agent by its session. Stopping one that is not running is
     // not a failure, so it is safe to run twice.
     let w = world.clone();
-    reg.register_act(
+    reg.register(
         OperatorSpec::new("agent.stop")
             .settings(Shape::new().required("session", Ty::Text))
             .touches(["agent"]),
@@ -354,7 +358,7 @@ pub fn job_launch_pipe() -> vine_lang::pipe::PipeDef {
                 .required("tree", Ty::Text),
         )
         .output("failed", job().required("reason", Ty::Text))
-        .stages([
+        .operators([
             tap(
                 "git.refresh_branch",
                 json!({ "branch": "$item.plan_branch" }),

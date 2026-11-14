@@ -1,4 +1,4 @@
-//! The YAML layer. It reads the same stages the functions in the parent
+//! The YAML layer. It reads the same operators the functions in the parent
 //! module build.
 
 use std::collections::BTreeMap;
@@ -7,12 +7,12 @@ use std::time::Duration;
 use serde_json::{json, Value};
 
 use super::check::{assemble, malformed};
-use super::{Flatten, Keep, Pipe, PipeDef, Stage};
+use super::{Flatten, Keep, Operator, Pipe, PipeDef};
 use crate::error::LoadError;
 use crate::registry::Registry;
 use crate::shape::Shape;
 
-/// The YAML layer. It reads the same stages the functions above build.
+/// The YAML layer. It reads the same operators the functions above build.
 #[cfg(feature = "yaml")]
 pub(crate) fn load(reg: &Registry, yaml: &str) -> Result<Pipe, LoadError> {
     let raw: serde_yaml::Value =
@@ -48,25 +48,25 @@ pub(crate) fn load(reg: &Registry, yaml: &str) -> Result<Pipe, LoadError> {
         let shape = Shape::parse(v).map_err(|p| malformed(&format!("outputs.{k}"), &p))?;
         outputs.insert(k.clone(), shape);
     }
-    let Some(stages) = map.get("pipe") else {
+    let Some(ops) = map.get("pipe") else {
         return Err(malformed("vine", "missing `pipe`"));
     };
-    let stages = read_pipe(stages, "pipe")?;
+    let ops = read_pipe(ops, "pipe")?;
     assemble(
         reg,
         PipeDef {
             name,
             input,
             outputs,
-            stages,
+            operators: ops,
         },
     )
 }
 
-/// The four mapping stage keys, for a refusal that names them.
+/// The four mapping operator keys, for a refusal that names them.
 const MAP_KEYS: &str = "`concatMap`, `mergeMap`, `switchMap` or `exhaustMap`";
 
-/// Stage keys from before the stages took their RxJS names, and what
+/// Operator keys from before the operators took their RxJS names, and what
 /// replaces each. A vine that still uses one is refused, not read as an
 /// operator of that name.
 const RENAMED_STAGES: &[(&str, &str)] = &[
@@ -100,18 +100,18 @@ fn renamed(path: &str, old: &str, new: &str) -> LoadError {
 }
 
 #[cfg(feature = "yaml")]
-fn read_pipe(v: &Value, path: &str) -> Result<Vec<Stage>, LoadError> {
+fn read_pipe(v: &Value, path: &str) -> Result<Vec<Operator>, LoadError> {
     let Some(list) = v.as_array() else {
-        return Err(malformed(path, "a pipe is a list of stages"));
+        return Err(malformed(path, "a pipe is a list of operators"));
     };
     list.iter()
         .enumerate()
-        .map(|(i, s)| read_stage(s, &format!("{path}[{i}]")))
+        .map(|(i, s)| read_operator(s, &format!("{path}[{i}]")))
         .collect()
 }
 
 #[cfg(feature = "yaml")]
-fn read_stage(v: &Value, path: &str) -> Result<Stage, LoadError> {
+fn read_operator(v: &Value, path: &str) -> Result<Operator, LoadError> {
     const WORDS: &[&str] = &[
         "call",
         "tap",
@@ -135,12 +135,12 @@ fn read_stage(v: &Value, path: &str) -> Result<Stage, LoadError> {
         "emit",
     ];
     if v.as_str() == Some("last") {
-        return Ok(Stage::Last);
+        return Ok(Operator::Last);
     }
     let Some(map) = v.as_object() else {
         return Err(malformed(
             path,
-            "a stage is a map with one key, or the word `last`",
+            "an operator is a map with one key, or the word `last`",
         ));
     };
     let mut main: Vec<&String> = map
@@ -152,13 +152,13 @@ fn read_stage(v: &Value, path: &str) -> Result<Stage, LoadError> {
         (None, _) => {
             return Err(malformed(
                 path,
-                "a stage needs one key that says what it does",
+                "an operator needs one key that says what it does",
             ))
         }
         (Some(a), Some(b)) => {
             return Err(malformed(
                 path,
-                &format!("a stage does one thing, found `{b}` and `{a}`"),
+                &format!("an operator does one thing, found `{b}` and `{a}`"),
             ))
         }
     };
@@ -215,8 +215,11 @@ fn read_stage(v: &Value, path: &str) -> Result<Stage, LoadError> {
                 Some(Value::String(s)) => Some(s.clone()),
                 Some(_) => return Err(malformed(&format!("{path}.end"), "`end` is a name")),
             };
-            Stage::Call {
-                act: text(body, "`call` names one act, such as `git.worktree_add`")?,
+            Operator::Call {
+                name: text(
+                    body,
+                    "`call` names one operator, such as `git.worktree_add`",
+                )?,
                 with: with(),
                 keep: keep(into),
                 end,
@@ -224,8 +227,11 @@ fn read_stage(v: &Value, path: &str) -> Result<Stage, LoadError> {
         }
         "tap" => {
             takes(true, false)?;
-            Stage::Call {
-                act: text(body, "`tap` names one act, such as `git.refresh_branch`")?,
+            Operator::Call {
+                name: text(
+                    body,
+                    "`tap` names one operator, such as `git.refresh_branch`",
+                )?,
                 with: with(),
                 keep: Keep::Tap,
                 end: None,
@@ -233,18 +239,18 @@ fn read_stage(v: &Value, path: &str) -> Result<Stage, LoadError> {
         }
         "split" => {
             takes(false, true)?;
-            Stage::Split {
+            Operator::Split {
                 from: body.clone(),
                 into,
             }
         }
         "filter" => {
             takes(false, false)?;
-            Stage::Filter { when: body.clone() }
+            Operator::Filter { when: body.clone() }
         }
         "take" => {
             takes(false, false)?;
-            Stage::Take(
+            Operator::Take(
                 body.as_u64()
                     .ok_or_else(|| malformed(&here, "`take` is a whole number"))?,
             )
@@ -254,7 +260,7 @@ fn read_stage(v: &Value, path: &str) -> Result<Stage, LoadError> {
             if !body.is_null() {
                 return Err(malformed(&here, "`last` takes nothing: write `- last`"));
             }
-            Stage::Last
+            Operator::Last
         }
         "bufferCount" => {
             takes(false, true)?;
@@ -263,14 +269,14 @@ fn read_stage(v: &Value, path: &str) -> Result<Stage, LoadError> {
             let buffer_size = m.get("bufferSize").and_then(Value::as_u64).ok_or_else(|| {
                 malformed(&here, "`bufferCount` needs `bufferSize`, a whole number")
             })?;
-            Stage::BufferCount { buffer_size, into }
+            Operator::BufferCount { buffer_size, into }
         }
         "fork" => {
             takes(false, false)?;
             let Some(sides) = body.as_array() else {
                 return Err(malformed(&here, "`fork` is a list of side pipes"));
             };
-            Stage::Fork(
+            Operator::Fork(
                 sides
                     .iter()
                     .enumerate()
@@ -280,7 +286,7 @@ fn read_stage(v: &Value, path: &str) -> Result<Stage, LoadError> {
         }
         "forkJoin" => {
             takes(false, false)?;
-            Stage::ForkJoin(read_pipe(body, &here)?)
+            Operator::ForkJoin(read_pipe(body, &here)?)
         }
         "concatMap" | "mergeMap" | "switchMap" | "exhaustMap" => {
             takes(false, false)?;
@@ -297,7 +303,7 @@ fn read_stage(v: &Value, path: &str) -> Result<Stage, LoadError> {
                 return Err(renamed(
                     &here,
                     "overlap",
-                    &format!("{MAP_KEYS} as the stage key"),
+                    &format!("{MAP_KEYS} as the operator key"),
                 ));
             }
             if m.contains_key("at_once") {
@@ -323,7 +329,7 @@ fn read_stage(v: &Value, path: &str) -> Result<Stage, LoadError> {
                     &format!("`{key}` needs `do`, the pipe to run"),
                 ));
             };
-            Stage::Mapped {
+            Operator::Mapped {
                 flatten,
                 concurrent,
                 pipe: read_pipe(body, &format!("{here}.do"))?,
@@ -331,11 +337,11 @@ fn read_stage(v: &Value, path: &str) -> Result<Stage, LoadError> {
         }
         "catchError" => {
             takes(false, false)?;
-            Stage::CatchError(read_pipe(body, &here)?)
+            Operator::CatchError(read_pipe(body, &here)?)
         }
         "finalize" => {
             takes(false, false)?;
-            Stage::Finalize(read_pipe(body, &here)?)
+            Operator::Finalize(read_pipe(body, &here)?)
         }
         "retry" => {
             takes(false, false)?;
@@ -352,11 +358,11 @@ fn read_stage(v: &Value, path: &str) -> Result<Stage, LoadError> {
                     malformed(&format!("{here}.delay"), "`delay` is a time such as `5s`")
                 })?,
             };
-            Stage::Retry { count, delay }
+            Operator::Retry { count, delay }
         }
         "timeout" => {
             takes(false, false)?;
-            Stage::Timeout(
+            Operator::Timeout(
                 body.as_str()
                     .and_then(parse_duration)
                     .ok_or_else(|| malformed(&here, "`timeout` is a time such as `30s`"))?,
@@ -368,21 +374,21 @@ fn read_stage(v: &Value, path: &str) -> Result<Stage, LoadError> {
             match map.get("on") {
                 None => {}
                 Some(Value::Object(arms)) => {
-                    for (output, stages) in arms {
+                    for (output, ops) in arms {
                         on.push((
                             output.clone(),
-                            read_pipe(stages, &format!("{path}.on.{output}"))?,
+                            read_pipe(ops, &format!("{path}.on.{output}"))?,
                         ));
                     }
                 }
                 Some(_) => {
                     return Err(malformed(
                         &format!("{path}.on"),
-                        "`on` is a map of output name to stages",
+                        "`on` is a map of output name to operators",
                     ))
                 }
             }
-            Stage::Use {
+            Operator::Use {
                 vine: text(body, "`use` names one vine")?,
                 with: map.get("with").cloned(),
                 keep: keep(into),
@@ -403,7 +409,7 @@ fn read_stage(v: &Value, path: &str) -> Result<Stage, LoadError> {
                 Some(p) => Some(read_pipe(p, &format!("{here}.else"))?),
                 None => None,
             };
-            Stage::Branch {
+            Operator::Branch {
                 on: on.clone(),
                 cases: arms,
                 otherwise,
@@ -412,7 +418,7 @@ fn read_stage(v: &Value, path: &str) -> Result<Stage, LoadError> {
         "emit" => {
             takes(false, false)?;
             match body {
-                Value::String(to) => Stage::Emit {
+                Value::String(to) => Operator::Emit {
                     to: to.clone(),
                     with: None,
                 },
@@ -421,7 +427,7 @@ fn read_stage(v: &Value, path: &str) -> Result<Stage, LoadError> {
                     let Some(Value::String(to)) = m.get("to") else {
                         return Err(malformed(&here, "`emit` names the output in `to`"));
                     };
-                    Stage::Emit {
+                    Operator::Emit {
                         to: to.clone(),
                         with: m.get("with").cloned(),
                     }
@@ -431,7 +437,7 @@ fn read_stage(v: &Value, path: &str) -> Result<Stage, LoadError> {
         name => {
             debug_assert!(!WORDS.contains(&name));
             takes(false, true)?;
-            Stage::Op {
+            Operator::Named {
                 name: name.to_owned(),
                 with: body.clone(),
                 keep: keep(into),

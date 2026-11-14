@@ -6,7 +6,7 @@
 //! wrote. `agent.run` starts a session when there is none for the key and
 //! attaches to the one there is when there is. It gives the lines from the
 //! position the vine asks for, which can be any line the session wrote,
-//! and then the end. So it can be registered as a stream act that gives
+//! and then the end. So it can be registered as a stream operator that gives
 //! its items again.
 
 use std::collections::BTreeMap;
@@ -21,7 +21,7 @@ use vine_lang::pipe::{
 };
 use vine_lang::{json, OpError, OperatorSpec, Part, Registry, Shape, Ty, Value};
 
-use super::{register_stream_act, registry, Gives, World};
+use super::{register_stream, registry, Gives, World};
 
 /// How a session the host starts will go.
 #[derive(Debug, Clone)]
@@ -122,14 +122,14 @@ impl Host {
     }
 }
 
-/// `job_run`'s acts: the `git` fakes of [`registry`], `agent.run` on
+/// `job_run`'s operators: the `git` fakes of [`registry`], `agent.run` on
 /// `host`, and the `summarize` operator. `agent.run` gives only the lines
 /// after those it gave, so a saved run saves every line.
 pub fn job_run_registry(world: &Arc<World>, host: &Arc<Host>) -> Registry {
     job_run_registry_giving(world, host, Gives::OnlyNew)
 }
 
-/// `job_run`'s acts, with `agent.run` registered as a stream act that gives
+/// `job_run`'s operators, with `agent.run` registered as a stream operator that gives
 /// its lines again from any point, so a saved run saves how far it got.
 pub fn job_run_registry_again(world: &Arc<World>, host: &Arc<Host>) -> Registry {
     job_run_registry_giving(world, host, Gives::Again)
@@ -138,7 +138,7 @@ pub fn job_run_registry_again(world: &Arc<World>, host: &Arc<Host>) -> Registry 
 pub fn job_run_registry_giving(world: &Arc<World>, host: &Arc<Host>, gives: Gives) -> Registry {
     let mut reg = registry(world);
     let (w, h) = (world.clone(), host.clone());
-    register_stream_act(
+    register_stream(
         &mut reg,
         gives,
         OperatorSpec::new("agent.run")
@@ -244,7 +244,7 @@ pub fn job_run_pipe() -> PipeDef {
         .output("implemented", job().required("commit", Ty::Text))
         .output("stopped", job().required("reason", Ty::Text))
         .output("failed", job().required("reason", Ty::Text))
-        .stages([
+        .operators([
             call(
                 "git.worktree_add",
                 json!({ "name": "$item.job", "from": "$item.plan_branch" }),
