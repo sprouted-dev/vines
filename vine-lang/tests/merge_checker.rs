@@ -198,8 +198,8 @@ async fn an_act_on_the_value_last_picked_after_a_merge_is_refused() {
 
 #[tokio::test]
 async fn switch_map_and_exhaust_map_still_cannot_be_resumed() {
-    let maps: [(fn(Vec<Stage>) -> Stage, &str); 2] =
-        [(switch_map, "switchMap"), (exhaust_map, "exhaustMap")];
+    type MapStage = fn(Vec<Stage>) -> Stage;
+    let maps: [(MapStage, &str); 2] = [(switch_map, "switchMap"), (exhaust_map, "exhaustMap")];
     for (map, word) in maps {
         refused(
             jobs_vine([map(vec![one(), done()])]),

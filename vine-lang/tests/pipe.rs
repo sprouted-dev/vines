@@ -510,7 +510,8 @@ async fn exhaust_map_ignores_new_items_while_a_run_is_going() {
 #[test]
 fn concurrent_goes_with_merge_map_only_and_is_at_least_one() {
     let inner = || vec![emit("out")];
-    let others: [(fn(Vec<Stage>) -> Stage, &str); 3] = [
+    type MapStage = fn(Vec<Stage>) -> Stage;
+    let others: [(MapStage, &str); 3] = [
         (concat_map, "concatMap"),
         (switch_map, "switchMap"),
         (exhaust_map, "exhaustMap"),
