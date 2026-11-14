@@ -15,6 +15,11 @@
 //! of work. A replay matches the outputs of one group in that group's own
 //! order, so groups of an `each` that merges can finish in another order
 //! after a restart.
+//!
+//! The book also counts the outputs made at each place of each input item,
+//! which is what an output's id is made from. The counts are kept and
+//! forgotten with the counts of stage runs, so they stay as small as the
+//! work in flight.
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::fmt;
@@ -23,6 +28,7 @@ use std::sync::{Arc, Mutex};
 use serde_json::Value;
 
 use super::flow::lock;
+use super::output::OutputId;
 use super::tag::{Moves, Tag};
 use crate::journal::{item_of_stream, Bookmark, Ending, Entry, Journal, Line};
 use crate::registry::OpError;
@@ -60,6 +66,10 @@ pub(super) struct Book {
     handed: HashMap<(u64, String), VecDeque<Handed>>,
     /// For each stream act call that gives its items again: how far it got.
     calls: HashMap<Key, CallState>,
+    /// How many outputs were made so far in each group of work of each
+    /// input item, handed out or made again, counting outputs handed out
+    /// before a restart that are never made again.
+    made: HashMap<(u64, String), u64>,
 }
 
 /// One output the caller was handed before a restart.
@@ -68,6 +78,9 @@ struct Handed {
     /// The item of a stream act call it was made from, when `last` lifted
     /// it out of its groups.
     from: Option<String>,
+    /// The call's position passed that item, so the output is never made
+    /// again. It still holds its place in its group's order.
+    gone: bool,
 }
 
 /// How far one call of a stream act that gives its items again got.
@@ -118,11 +131,11 @@ pub(super) enum Saved {
 
 /// What the run should do with an output it made.
 pub(super) enum Handing {
-    /// Hand it out: the caller has not seen it.
-    Fresh,
+    /// Hand it out, with this id: the caller has not seen it.
+    Fresh(OutputId),
     /// The caller was handed it before the restart.
     Before,
-    /// The caller was handed another output next.
+    /// The caller was handed another output next: its name.
     Misfit(String),
 }
 
@@ -242,6 +255,7 @@ impl Book {
                 .push_back(Handed {
                     output: output.clone(),
                     from: from.clone(),
+                    gone: false,
                 }),
             Entry::Through { at, items, handed } => match self.position_of(key(at)) {
                 Some(Saved::Position {
@@ -258,7 +272,9 @@ impl Book {
                         .retain(|(of, within), _| *of != item || !passed(within));
                     for ((of, _), queue) in &mut self.handed {
                         if *of == item {
-                            queue.retain(|h| !h.from.as_deref().is_some_and(passed));
+                            for h in queue.iter_mut() {
+                                h.gone |= h.from.as_deref().is_some_and(passed);
+                            }
                         }
                     }
                 }
@@ -329,9 +345,11 @@ impl Book {
         state.through = through;
         state.handed.retain(|&n, _| n > through);
         let line = state.line(call);
-        self.counts.retain(|(item, at), _| {
-            *item != call.item || item_of_stream(at, &call.at).is_none_or(|n| n > through)
-        });
+        let live = |item: u64, at: &str| {
+            item != call.item || item_of_stream(at, &call.at).is_none_or(|n| n > through)
+        };
+        self.counts.retain(|(item, at), _| live(*item, at));
+        self.made.retain(|(item, at), _| live(*item, at));
         self.fresh.push_back(line);
     }
 
@@ -340,18 +358,24 @@ impl Book {
     /// caller was handed and the replay never made is still a misfit.
     pub(super) fn passed(&mut self, position: u64) {
         self.counts.retain(|(item, _), _| *item > position);
+        self.made.retain(|(item, _), _| *item > position);
     }
 
     /// Input item `n` is done past the position: forget what the run
     /// counted for it.
     pub(super) fn finished(&mut self, n: u64) {
         self.counts.retain(|(item, _), _| *item != n);
+        self.made.retain(|(item, _), _| *item != n);
     }
 
     /// Whether the output `name`, made from a value with `tag`, is new to
-    /// the caller. A new one is recorded as handed out. Outputs are
-    /// matched in order within the group of work they were made in.
+    /// the caller, and its id. A new one is recorded as handed out.
+    /// Outputs are matched in order within the group of work they were
+    /// made in.
     pub(super) fn hand(&mut self, tag: &Tag, name: &str) -> Handing {
+        let item = tag.item_number();
+        let within = tag.scope();
+        let id = self.next_id(item, within);
         if let Some((call, n)) = tag.stream() {
             let state = self.calls.entry((*call).clone()).or_default();
             *state.handed.entry(n).or_default() += 1;
@@ -361,10 +385,8 @@ impl Book {
             }
             let line = state.line(&call);
             self.fresh.push_back(line);
-            return Handing::Fresh;
+            return Handing::Fresh(id);
         }
-        let item = tag.item_number();
-        let within = tag.scope();
         let before = self
             .handed
             .get_mut(&(item, within.to_owned()))
@@ -381,15 +403,35 @@ impl Book {
                         from: tag.stream_item().map(str::to_owned),
                     },
                 });
-                Handing::Fresh
+                Handing::Fresh(id)
             }
         }
+    }
+
+    /// The id of the next output made in the group of work `within` of
+    /// input item `item`. Outputs handed out before a restart that are
+    /// never made again, next in that group's order, keep their places in
+    /// the count, so the outputs after them keep their ids.
+    fn next_id(&mut self, item: u64, within: &str) -> OutputId {
+        let place = (item, within.to_owned());
+        let mut gone = 0;
+        if let Some(queue) = self.handed.get_mut(&place) {
+            while queue.front().is_some_and(|h| h.gone) {
+                queue.pop_front();
+                gone += 1;
+            }
+        }
+        let n = self.made.entry(place).or_insert(0);
+        *n += gone;
+        let id = OutputId::at(item, within, *n);
+        *n += 1;
+        id
     }
 
     /// How many outputs the caller was handed that the run has not made
     /// again yet.
     pub(super) fn handed_left(&self) -> u64 {
-        let outputs: u64 = self.handed.values().map(|h| h.len() as u64).sum();
+        let outputs = self.handed.values().flatten().filter(|h| !h.gone).count() as u64;
         outputs + self.calls.values().map(|c| c.skip).sum::<u64>()
     }
 }

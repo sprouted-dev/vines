@@ -125,6 +125,13 @@
 //! stages rebuild what they held, such as a half full batch, because the
 //! same items flow through them again. See [`crate::journal`].
 //!
+//! Every output carries an [`OutputId`], made from where it stands in the
+//! run: the input item, the group of work, and how many outputs that
+//! group made before it. An output the caller was handed and whose line
+//! it had not saved comes again after a restart with the same id, so the
+//! caller drops repeats by id. Two outputs of one run never share an id,
+//! even with the same name and payload. See `output.rs`.
+//!
 //! Replay needs each act's key to name the same act every time. Keys
 //! count how many times a stage ran, so a replay must reach each stage in
 //! the same order the first run did. Where an `each` merges, values run
@@ -256,6 +263,7 @@ mod check;
 mod drive;
 mod flow;
 mod order;
+mod output;
 mod stream_call;
 mod tag;
 mod unit;
@@ -273,7 +281,6 @@ use serde_json::Value;
 
 use crate::error::RunError;
 use crate::journal::{Bookmark, Event, Journal, Progress};
-use crate::run::Output;
 use crate::shape::Shape;
 
 use book::{Book, Cx};
@@ -281,6 +288,7 @@ use drive::Saving;
 use flow::{fatal, Flowing, Items, Transform};
 
 pub(crate) use check::assemble;
+pub use output::{OutputId, PipeOutput};
 #[cfg(feature = "yaml")]
 pub(crate) use yaml::load;
 
@@ -736,9 +744,12 @@ impl Pipe {
     }
 
     /// Run the vine over a stream of items. What comes back is the stream
-    /// of what it emits. A failure no `catch` handles is the last thing
-    /// on the stream. Dropping the stream stops the run.
-    pub fn run<S>(&self, input: S) -> BoxStream<'static, Result<Output, RunError>>
+    /// of what it emits, each output with an id no other output of this run
+    /// has. A run that saves nothing cannot be resumed, so its ids count
+    /// the outputs of the whole run in the order they come, and do not
+    /// match the ids a saved run gives. A failure no `catch` handles is the
+    /// last thing on the stream. Dropping the stream stops the run.
+    pub fn run<S>(&self, input: S) -> BoxStream<'static, Result<PipeOutput, RunError>>
     where
         S: Stream<Item = Value> + Send + 'static,
     {
@@ -766,7 +777,10 @@ impl Pipe {
     /// The run hands out an output and then the [`Entry::Emitted`](crate::Entry::Emitted) that
     /// records it. If you save after every entry, no output is handed out
     /// twice. If the run stops after an output and before you saved the
-    /// entry after it, that output comes again.
+    /// entry after it, that output comes again, with the same
+    /// [`OutputId`]: drop it by its id. Ids are unique within this run and
+    /// its restarts; join them with your own key for the run to keep the
+    /// outputs of many runs apart.
     ///
     /// Under an `each` that merges, an output whose line was not saved can
     /// come again after other values' new outputs, not only first.
@@ -828,7 +842,9 @@ impl Pipe {
     /// [`Pipe::run_saved`]: an act with a saved result is not called again,
     /// and an output already handed out is not handed out again. If the run
     /// stops after an output and before you saved the line after it, that
-    /// output comes again.
+    /// output comes again, with the same [`OutputId`]. An id names the
+    /// input item it belongs to, counted from the first item ever, so ids
+    /// stay unique however many restarts the stream goes through.
     ///
     /// A vine that cannot replay in one order, or that keeps a count or a
     /// batch across items in a way a restart cannot rebuild, is refused: the
@@ -873,7 +889,7 @@ impl Pipe {
 
     /// Feed the vine one item and collect everything it emits. A vine that
     /// must give exactly one answer says so itself, with `take: 1`.
-    pub async fn run_one(&self, input: Value) -> Result<Vec<Output>, RunError> {
+    pub async fn run_one(&self, input: Value) -> Result<Vec<PipeOutput>, RunError> {
         let mut out = Vec::new();
         let mut results = self.run(stream::once(ready(input)));
         while let Some(r) = results.next().await {

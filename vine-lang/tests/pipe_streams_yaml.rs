@@ -10,7 +10,7 @@ use acts::agent::{job, job_run_pipe, job_run_registry, Host, Script};
 use acts::World;
 use futures::{stream, StreamExt};
 use vine_lang::pipe::{call, catch, collect, emit, fork, last, pipe, tap, Pipe, PipeDef, Stage};
-use vine_lang::{json, Entry, Event, Journal, LoadError, Output, RunError, Shape, Ty, Value};
+use vine_lang::{json, Entry, Event, Journal, LoadError, PipeOutput, RunError, Shape, Ty, Value};
 
 fn text() -> String {
     let path = format!("{}/vines/pipe/job_run.yaml", env!("CARGO_MANIFEST_DIR"));
@@ -35,9 +35,9 @@ async fn run(
     vine: &Pipe,
     saved: &mut Vec<Value>,
     drop_after: Option<usize>,
-) -> Result<Vec<Output>, RunError> {
+) -> Result<Vec<PipeOutput>, RunError> {
     let journal = Journal::from_json(&Value::Array(saved.clone())).unwrap();
-    let mut outs: Vec<Output> = Vec::new();
+    let mut outs: Vec<PipeOutput> = Vec::new();
     let mut run = vine.run_saved(stream::iter([job()]), journal);
     while let Some(event) = run.next().await {
         match event? {

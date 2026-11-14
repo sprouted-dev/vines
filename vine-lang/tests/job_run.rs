@@ -11,7 +11,7 @@ use std::time::Duration;
 use acts::agent::{expected, job, job_run_pipe, job_run_registry, Host, Script};
 use acts::World;
 use futures::{stream, StreamExt};
-use vine_lang::{json, Entry, Event, Journal, Output, Pipe, RunError, Value};
+use vine_lang::{json, Entry, Event, Journal, Pipe, PipeOutput, RunError, Value};
 
 fn vine(world: &Arc<World>, host: &Arc<Host>) -> Pipe {
     job_run_registry(world, host)
@@ -30,7 +30,7 @@ enum Drop {
     BeforeSaving(usize),
 }
 
-fn log_lines(outs: &[Output]) -> usize {
+fn log_lines(outs: &[PipeOutput]) -> usize {
     outs.iter().filter(|o| o.name == "log_line").count()
 }
 
@@ -39,7 +39,7 @@ fn log_lines(outs: &[Output]) -> usize {
 async fn run(
     vine: &Pipe,
     saved: &mut Vec<Value>,
-    outs: &mut Vec<Output>,
+    outs: &mut Vec<PipeOutput>,
     drop: Drop,
 ) -> Result<bool, RunError> {
     // Read the journal back from plain JSON, as a store would give it.
@@ -71,7 +71,7 @@ async fn run(
     Ok(true)
 }
 
-fn pairs(outs: &[Output]) -> Vec<(String, Value)> {
+fn pairs(outs: &[PipeOutput]) -> Vec<(String, Value)> {
     outs.iter()
         .map(|o| (o.name.clone(), o.payload.clone()))
         .collect()
@@ -297,7 +297,7 @@ async fn a_line_handed_out_whose_save_did_not_happen_comes_again_once() {
     run(&vine(&world, &host), &mut saved, &mut outs, Drop::Never)
         .await
         .unwrap();
-    let seventy: Vec<&Output> = outs
+    let seventy: Vec<&PipeOutput> = outs
         .iter()
         .filter(|o| o.name == "log_line" && o.payload["seq"] == 70)
         .collect();

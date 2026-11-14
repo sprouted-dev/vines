@@ -39,10 +39,10 @@
 //!   [`OpContext::resume_from`](crate::OpContext::resume_from) set to the
 //!   number of items saved, and the run carries on from there.
 //! - [`Entry::Emitted`]: the caller was handed this output. On replay the
-//!   same output is made again and not handed out twice. The outputs of
-//!   one group of work are matched in order, so an output made in a group
-//!   of an `each` that merges names its group, and the groups need not
-//!   finish in the same order again.
+//!   same output is made again, with the same [`OutputId`](crate::OutputId), and not handed
+//!   out twice. The outputs of one group of work are matched in order, so
+//!   an output made in a group of an `each` that merges names its group,
+//!   and the groups need not finish in the same order again.
 //! - [`Entry::Through`] and [`Entry::Stopped`]: for a stream act that gives
 //!   its items again, how far a call got, how many outputs made from the
 //!   items after that were handed out, and how it stopped. They take the
@@ -52,13 +52,31 @@
 //!   If the call had stopped, the run reads the act only up to the items it
 //!   gave before and then gives the saved end.
 //!
+//! # Output ids
+//!
+//! Every output a pipe hands out carries an [`OutputId`](crate::OutputId): the input item
+//! it belongs to (none in a journal, which covers the whole run), the
+//! group of work it was made in, and how many outputs that group made
+//! before it. A replay makes the same outputs in the same order within
+//! each group, so it makes each id again. No line saves an id: the lines
+//! that say where outputs stand are all a replay needs, so a journal or
+//! bookmark is the same size it was, and one saved before outputs had ids
+//! reads and resumes as it always did, giving the ids a run of today
+//! gives. An output handed out in the window between being handed out
+//! and its line being saved comes again after a restart, with its id, so a
+//! caller drops a repeat by id.
+//!
 //! # Keeping it small
 //!
 //! [`Journal::record`] and [`Bookmark::record`] keep what a run hands out.
 //! For most entries they append. An [`Entry::Through`] replaces the one
 //! before it for the same call, and drops every entry whose key belongs to
 //! an item of that call it passed: the keys of item 7 of `pipe[1]#0` start
-//! `pipe[1]#0@7/`. [`Journal::push`] appends and drops nothing.
+//! `pipe[1]#0@7/`. It keeps the `Emitted` line of an output `last` lifted
+//! out of groups from such an item: that output is never made again, but
+//! it took a place in the order of its group's outputs, and the outputs
+//! after it keep their ids by it. There is one such line for each time a
+//! `last` gives a value. [`Journal::push`] appends and drops nothing.
 //!
 //! # Groups of work
 //!
@@ -102,13 +120,13 @@ use std::collections::BTreeMap;
 
 use serde_json::{json, Value};
 
-use crate::run::Output;
+use crate::pipe::PipeOutput;
 
 /// What a resumable run gives its caller.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Event {
     /// The vine emitted this.
-    Output(Output),
+    Output(PipeOutput),
     /// Append this to the journal you keep for this run.
     Save(Entry),
 }
@@ -136,14 +154,16 @@ pub enum Entry {
     Item { at: String, value: Value },
     /// The stream act at `at` ended with `value`.
     Ended { at: String, value: Value },
-    /// The caller was handed one output with this name. `within` names
-    /// the group of work it was made in, such as `pipe[1].each@3/`, when
-    /// it was made in a group of an `each` that merges. A replay matches
-    /// the outputs of one group in order, whatever order the groups
-    /// finish in. `from` names the item of a stream act call the output
-    /// was made from, such as `pipe[1]#0@7/`, when `last` picked that item
-    /// out of groups: once the call's position passes it, the output is
-    /// never made again and the line is dropped.
+    /// The caller was handed one output with this name. Its id is not
+    /// saved: a replay makes it again from where the output stands.
+    /// `within` names the group of work it was made in, such as
+    /// `pipe[1].each@3/`, when it was made in a group of an `each` that
+    /// merges. A replay matches the outputs of one group in order,
+    /// whatever order the groups finish in. `from` names the item of a
+    /// stream act call the output was made from, such as `pipe[1]#0@7/`,
+    /// when `last` picked that item out of groups: once the call's
+    /// position passes it, the output is never made again. The line stays
+    /// all the same, so the outputs after it in its group keep their ids.
     Emitted {
         output: String,
         within: Option<String>,
@@ -243,7 +263,10 @@ impl Entry {
     /// Whether `through`, an [`Entry::Through`], makes this entry useless:
     /// it is an earlier `Through` for the same stream act, or it belongs to
     /// an item of that stream that is now done. An output made in a group
-    /// belongs to the item its group's scope names.
+    /// belongs to the item its group's scope names. An output `last` lifted
+    /// out of groups from such an item is never made again, but its line
+    /// still holds its place among the outputs of the group it was handed
+    /// out in, and is kept.
     fn passed_by(&self, through: &Entry) -> bool {
         let Entry::Through {
             at: call, items, ..
@@ -253,10 +276,10 @@ impl Entry {
         };
         match self {
             Entry::Through { at, .. } if at == call => true,
-            Entry::Emitted { within, from, .. } => [within, from]
-                .into_iter()
-                .flatten()
-                .any(|scope| item_of_stream(scope, call).is_some_and(|n| n <= *items)),
+            Entry::Emitted { within, .. } => within
+                .as_deref()
+                .and_then(|scope| item_of_stream(scope, call))
+                .is_some_and(|n| n <= *items),
             _ => self
                 .at()
                 .and_then(|at| item_of_stream(at, call))
@@ -449,7 +472,7 @@ impl FromIterator<Entry> for Journal {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Progress {
     /// The vine emitted this.
-    Output(Output),
+    Output(PipeOutput),
     /// Keep this line until the position passes its input item.
     Save(Line),
     /// Every input item through this number is fully done. Keep it as the

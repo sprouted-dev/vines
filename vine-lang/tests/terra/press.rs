@@ -251,7 +251,7 @@ impl Press {
     }
 
     /// Land one output and give it to the caller.
-    async fn output(&mut self, out: vine_lang::Output) {
+    async fn output(&mut self, out: vine_lang::PipeOutput) {
         let id = self.id.clone();
         let live = self.live.as_mut().expect("still live");
         let given = (out.name.clone(), out.payload.clone());

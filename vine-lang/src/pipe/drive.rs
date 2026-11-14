@@ -7,6 +7,11 @@
 //! position. So an output comes before the line that records it, and that
 //! line comes before the position, or the `Done`, that passes its item.
 //!
+//! Each output gets its id as it is handed out. A saved run asks the book,
+//! which counts outputs per input item and group of work. A run that saves
+//! nothing has no groups and no input items to name, so it counts the
+//! outputs of the whole run.
+//!
 //! A run from a bookmark skips the input items the bookmark keeps as done
 //! past its position: they are numbered and dropped without running.
 
@@ -19,6 +24,7 @@ use serde_json::Value;
 
 use super::book::{Book, Cx, Handing};
 use super::flow::{fatal, lock, run_error, Flow, Flowing};
+use super::output::{OutputId, PipeOutput};
 use super::tag::{Ledger, Moves, Tag};
 use super::Pipe;
 use crate::error::RunError;
@@ -100,6 +106,8 @@ impl Pipe {
         };
         let mut finished = move || ledger.as_ref().and_then(|l| lock(l).next_finished());
         let mut told: Option<u64> = None;
+        // The outputs handed out so far, in a run that saves nothing.
+        let mut unsaved: u64 = 0;
         let mut held: Option<Flow> = None;
         let (mut ended, mut stopped) = (false, false);
         stream::poll_fn(move |task| {
@@ -124,25 +132,37 @@ impl Pipe {
                 if let Some(flow) = held.take() {
                     match flow {
                         Ok(Flowing::Out(out, tag)) => {
-                            if let Some(b) = &book {
-                                let handing = lock(b).hand(&tag, &out.name);
-                                match handing {
-                                    Handing::Fresh => {}
-                                    // Handed out before the restart.
-                                    Handing::Before => continue,
-                                    Handing::Misfit(was) => {
-                                        stopped = true;
-                                        return Poll::Ready(Some(Err(RunError::ReplayMisfit {
-                                            problem: format!(
-                                                "the journal says output `{was}` was handed out next, and the run made `{}`",
-                                                out.name
-                                            ),
-                                        })));
+                            let id = match &book {
+                                Some(b) => {
+                                    let handing = lock(b).hand(&tag, &out.name);
+                                    match handing {
+                                        Handing::Fresh(id) => id,
+                                        // Handed out before the restart.
+                                        Handing::Before => continue,
+                                        Handing::Misfit(was) => {
+                                            stopped = true;
+                                            return Poll::Ready(Some(Err(
+                                                RunError::ReplayMisfit {
+                                                    problem: format!(
+                                                        "the journal says output `{was}` was handed out next, and the run made `{}`",
+                                                        out.name
+                                                    ),
+                                                },
+                                            )));
+                                        }
                                     }
                                 }
-                            }
+                                None => {
+                                    unsaved += 1;
+                                    OutputId::at(0, "", unsaved - 1)
+                                }
+                            };
                             // The tag drops here: the item may now be done.
-                            return Poll::Ready(Some(Ok(Progress::Output(out))));
+                            return Poll::Ready(Some(Ok(Progress::Output(PipeOutput {
+                                id,
+                                name: out.name,
+                                payload: out.payload,
+                            }))));
                         }
                         // The checker refuses a pipe with a path that does not emit.
                         Ok(Flowing::Value(..)) => {
