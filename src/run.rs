@@ -153,8 +153,12 @@ pub struct RunReport<R, E> {
 }
 
 impl<R, E> RunReport<R, E> {
-    /// The outcome, if no required observer failed. Otherwise
-    /// [`Gated`]: the outcome is not an answer.
+    /// The outcome, if no required observer failed.
+    ///
+    /// # Errors
+    ///
+    /// [`Gated`] when a required observer failed or did not settle: the
+    /// outcome is kept inside it, but it is not an answer.
     pub fn answer(self) -> Result<Outcome<R, E>, Gated<R, E>> {
         if self.gate_failures.is_empty() {
             Ok(self.outcome)
@@ -199,6 +203,10 @@ impl<R, E> Straggler<R, E> {
     /// Wait for the producer's eventual exit. It may well be
     /// [`Exit::Completed`]: a cancel request does not prove an effect did
     /// not happen.
+    ///
+    /// # Errors
+    ///
+    /// The [`Crash`] if the producer panicked or its task was aborted.
     pub async fn exit(self) -> Result<Exit<R, E>, Crash> {
         self.handle.await.map_err(crash)
     }
@@ -378,7 +386,11 @@ pub struct RunBuilder<P> {
 impl<P: Clone + Send + 'static> RunBuilder<P> {
     /// A run over a source that declares `source`. `stop_grace` bounds how
     /// long the run waits, after cancellation, for the producer to confirm
-    /// a stop, and for required observers to settle. It must be non-zero.
+    /// a stop, and for required observers to settle.
+    ///
+    /// # Errors
+    ///
+    /// [`PolicyError::ZeroDuration`] when `stop_grace` is zero.
     pub fn new(source: SourceDecl, stop_grace: Duration) -> Result<Self, PolicyError> {
         if stop_grace.is_zero() {
             return Err(PolicyError::ZeroDuration {
@@ -396,6 +408,12 @@ impl<P: Clone + Send + 'static> RunBuilder<P> {
     }
 
     /// Attach an ephemeral observer.
+    ///
+    /// # Errors
+    ///
+    /// The [`PolicyError`] for the first rule `policy` breaks against this
+    /// source (see [`crate::policy`]), or
+    /// [`PolicyError::DuplicateObserver`] when `name` is taken.
     pub fn observe(
         &mut self,
         name: impl Into<String>,
@@ -412,6 +430,11 @@ impl<P: Clone + Send + 'static> RunBuilder<P> {
 
     /// Attach a durable observer draining into `sink`. The drain starts with
     /// the run.
+    ///
+    /// # Errors
+    ///
+    /// As for [`Self::observe`]; `policy` must declare
+    /// `durability = durable`.
     pub fn observe_durable<S: DurableSink<P>>(
         &mut self,
         name: impl Into<String>,
@@ -480,6 +503,11 @@ impl<P: Clone + Send + 'static> RunContext<P> {
     /// future is ready at once. On a backpressure source it waits while a
     /// `stop_producer` observer is full, and returns
     /// [`EmitError::Cancelled`] if cancellation arrives first.
+    ///
+    /// # Errors
+    ///
+    /// [`EmitError::Cancelled`] as above, or [`EmitError::Ended`] when the
+    /// run has already ended. Either way the item comes back undelivered.
     pub async fn emit(&mut self, item: P) -> Result<(), EmitError<P>> {
         self.hub.emit(item, &self.scope).await
     }
@@ -519,6 +547,12 @@ impl<P: Clone + Send + 'static, R, E> Run<P, R, E> {
     /// [`crate::frame::GapReason::JoinedLate`] gap covering what it missed.
     /// `answer = required` is refused: a required observer must be declared
     /// before the start.
+    ///
+    /// # Errors
+    ///
+    /// As for [`RunBuilder::observe`], plus
+    /// [`PolicyError::LateRequiredObserver`] for `answer = required` and
+    /// [`PolicyError::RunEnded`] once the run has ended.
     pub fn observe(
         &self,
         name: impl Into<String>,
@@ -534,6 +568,11 @@ impl<P: Clone + Send + 'static, R, E> Run<P, R, E> {
 
     /// Attach a durable observer to the running run; its drain starts now.
     /// `answer = required` is refused, as for [`Self::observe`].
+    ///
+    /// # Errors
+    ///
+    /// As for [`Self::observe`]; `policy` must declare
+    /// `durability = durable`.
     pub fn observe_durable<S: DurableSink<P>>(
         &self,
         name: impl Into<String>,
@@ -565,9 +604,12 @@ impl<P, R, E> Run<P, R, E> {
 
     /// Wait for the one terminal report.
     pub async fn finish(mut self) -> RunReport<R, E> {
-        let report = match self.report.as_mut() {
-            Some(report) => report.await.ok(),
-            None => None,
+        // A receive error means the driver went away: reported below as
+        // `Crash::DriverLost`.
+        let report = if let Some(report) = self.report.as_mut() {
+            report.await.ok()
+        } else {
+            None
         };
         // Taken only now, so a `finish` dropped mid-wait still cancels.
         self.report = None;
@@ -637,16 +679,17 @@ async fn drive<P, R, E>(
     };
     let (outcome, straggler) = match first {
         Either::Left(joined) => (outcome_of(joined, scope.cause()), None),
-        Either::Right(cause) => match tokio::time::timeout(grace, &mut producer).await {
-            Ok(joined) => (outcome_of(joined, Some(cause)), None),
-            Err(_) => {
+        Either::Right(cause) => {
+            if let Ok(joined) = tokio::time::timeout(grace, &mut producer).await {
+                (outcome_of(joined, Some(cause)), None)
+            } else {
                 let outcome = match cause {
                     CancelCause::Requested => Outcome::Cancelled(Stop::Unconfirmed),
                     CancelCause::TimedOut => Outcome::TimedOut(Stop::Unconfirmed),
                 };
                 (outcome, Some(Straggler { handle: producer }))
             }
-        },
+        }
     };
     let emitted = hub.close(outcome.ending());
 
@@ -682,6 +725,10 @@ async fn drive<P, R, E>(
         })
         .collect();
 
+    #[expect(
+        clippy::let_underscore_must_use,
+        reason = "send fails only when the owner dropped the Run; nobody is left to report to"
+    )]
     let _ = report.send(RunReport {
         outcome,
         cancel_requested: scope.cause(),

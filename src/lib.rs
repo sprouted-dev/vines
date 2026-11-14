@@ -65,8 +65,6 @@
 //! # }
 //! ```
 
-#![warn(missing_docs)]
-
 pub mod batch;
 pub mod cancel;
 pub mod error;

@@ -283,7 +283,10 @@ impl<P> Outlet<P> {
 
     pub(crate) async fn wait_settled(&self) {
         let mut settled = self.settled.subscribe();
-        // The sender lives in `self`, so this cannot see a closed channel.
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "the sender lives in `self`, so this cannot see a closed channel"
+        )]
         let _ = settled.wait_for(Option::is_some).await;
     }
 

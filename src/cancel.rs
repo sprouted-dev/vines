@@ -65,18 +65,21 @@ impl CancelScope {
 
     /// A child scope: cancelled when this scope is, with this scope's
     /// deadline.
+    #[must_use]
     pub fn child(&self) -> Self {
         self.child_inner(None)
     }
 
     /// A child scope with its own deadline. The effective deadline is the
     /// earlier of `deadline` and this scope's.
+    #[must_use]
     pub fn child_with_deadline(&self, deadline: Instant) -> Self {
         self.child_inner(Some(deadline))
     }
 
     /// A child scope that times out `timeout` from now (or at this scope's
     /// deadline, if that is earlier).
+    #[must_use]
     pub fn child_with_timeout(&self, timeout: Duration) -> Self {
         self.child_inner(Some(Instant::now() + timeout))
     }

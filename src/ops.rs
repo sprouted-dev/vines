@@ -110,19 +110,19 @@ where
     };
     let shared = Arc::clone(&stats.inner);
     let tapped = stream.map(move |item| {
-        let mut state = shared.lock().unwrap_or_else(PoisonError::into_inner);
-        if state.detached {
-            state.skipped += 1;
+        let mut counts = shared.lock().unwrap_or_else(PoisonError::into_inner);
+        if counts.detached {
+            counts.skipped += 1;
             return item;
         }
-        state.calls += 1;
+        counts.calls += 1;
         if let Err(error) = f(&item) {
-            state.failures += 1;
-            if state.first_failure.is_none() {
-                state.first_failure = Some(error);
+            counts.failures += 1;
+            if counts.first_failure.is_none() {
+                counts.first_failure = Some(error);
             }
             if isolation == TapIsolation::DetachOnFirstFailure {
-                state.detached = true;
+                counts.detached = true;
             }
         }
         item

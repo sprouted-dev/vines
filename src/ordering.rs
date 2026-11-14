@@ -123,6 +123,10 @@ where
         let Some((seq, index)) = next else {
             return Poll::Ready(None);
         };
+        #[expect(
+            clippy::expect_used,
+            reason = "`index` was chosen above from a head that is `Some`"
+        )]
         let item = this.heads[index].take().expect("head chosen above");
         if let Some(after) = this.last {
             if seq < after {

@@ -99,7 +99,11 @@ impl<T> BatchPolicy<T> {
     }
 
     /// Also flush `max_wait` after a batch's first item, whether or not
-    /// more input arrives. Zero is refused.
+    /// more input arrives.
+    ///
+    /// # Errors
+    ///
+    /// [`PolicyError::ZeroDuration`] when `max_wait` is zero.
     pub fn max_wait(mut self, max_wait: Duration) -> Result<Self, PolicyError> {
         if max_wait.is_zero() {
             return Err(PolicyError::ZeroDuration {
@@ -112,6 +116,7 @@ impl<T> BatchPolicy<T> {
     }
 
     /// Also flush before a batch's total `size` would exceed `max_bytes`.
+    #[must_use]
     pub fn max_bytes(
         mut self,
         max_bytes: NonZeroUsize,
@@ -221,7 +226,7 @@ pub fn batch<S: Stream>(input: S, policy: BatchPolicy<S::Item>, scope: &CancelSc
 
 struct Held<'a, T> {
     policy: &'a BatchPolicy<T>,
-    held: &'a mut Vec<T>,
+    items: &'a mut Vec<T>,
     bytes: &'a mut usize,
     deadline: &'a mut Option<Pin<Box<Sleep>>>,
     out: &'a mut VecDeque<BatchEvent<T>>,
@@ -230,11 +235,11 @@ struct Held<'a, T> {
 impl<T> Held<'_, T> {
     fn flush(&mut self, reason: FlushReason) {
         *self.deadline = None;
-        if self.held.is_empty() {
+        if self.items.is_empty() {
             return;
         }
         self.out.push_back(BatchEvent::Batch(Batch {
-            items: std::mem::take(self.held),
+            items: std::mem::take(self.items),
             bytes: std::mem::take(self.bytes),
             reason,
         }));
@@ -260,14 +265,14 @@ impl<T> Held<'_, T> {
             }
             None => 0,
         };
-        if self.held.is_empty() {
+        if self.items.is_empty() {
             if let Some(wait) = self.policy.max_wait {
                 *self.deadline = Some(Box::pin(tokio::time::sleep_until(Instant::now() + wait)));
             }
         }
-        self.held.push(item);
+        self.items.push(item);
         *self.bytes += size;
-        if self.held.len() >= self.policy.max_items.get() {
+        if self.items.len() >= self.policy.max_items.get() {
             self.flush(FlushReason::Count);
         } else if let Some((max, _)) = &self.policy.max_bytes {
             if *self.bytes >= max.get() {
@@ -285,10 +290,10 @@ impl<T> Held<'_, T> {
             OnCancel::Discard => {
                 *self.deadline = None;
                 let discarded = Discarded {
-                    items: self.held.len(),
+                    items: self.items.len(),
                     bytes: *self.bytes,
                 };
-                self.held.clear();
+                self.items.clear();
                 *self.bytes = 0;
                 discarded
             }
@@ -312,7 +317,7 @@ impl<S: Stream> Stream for Batcher<S> {
             }
             let mut held = Held {
                 policy: this.policy,
-                held: this.held,
+                items: this.held,
                 bytes: this.bytes,
                 deadline: this.deadline,
                 out: this.out,

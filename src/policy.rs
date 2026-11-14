@@ -157,18 +157,21 @@ impl ObserverPolicy {
     }
 
     /// Set the answer authority.
+    #[must_use]
     pub fn answer(mut self, answer: Answer) -> Self {
         self.answer = answer;
         self
     }
 
     /// Set the delivery durability.
+    #[must_use]
     pub fn durability(mut self, durability: Durability) -> Self {
         self.durability = durability;
         self
     }
 
     /// Set the acceptable loss.
+    #[must_use]
     pub fn loss(mut self, loss: Loss) -> Self {
         self.loss = loss;
         self
@@ -184,6 +187,11 @@ impl ObserverPolicy {
     }
 
     /// Check the rules that need only the policy itself (rule 1).
+    ///
+    /// # Errors
+    ///
+    /// [`PolicyError::LossNoneForbidsDrop`] when `loss = none` meets a drop
+    /// overflow.
     pub fn check(&self, observer: &str) -> Result<(), PolicyError> {
         if self.loss == Loss::None && self.overflow.is_drop() {
             return Err(PolicyError::LossNoneForbidsDrop {
@@ -297,6 +305,13 @@ impl ObserverDecl {
     /// Validate into a typed policy. Checks that every limit is present
     /// and non-zero, and the rules that need only the policy (rule 1).
     /// Source and sink rules are checked when the observer is attached.
+    ///
+    /// # Errors
+    ///
+    /// [`PolicyError::MissingLimit`] or [`PolicyError::ZeroLimit`] for the
+    /// queue or spill quota, [`PolicyError::SpillRequiresQuota`] for a spill
+    /// without one, and [`PolicyError::LossNoneForbidsDrop`] as in
+    /// [`ObserverPolicy::check`].
     pub fn validate(&self, observer: &str) -> Result<ObserverPolicy, PolicyError> {
         let queue = nonzero(observer, "queue", self.queue)?;
         let overflow = match self.overflow {
@@ -325,6 +340,12 @@ impl ObserverDecl {
 }
 
 /// Validate an authored limit: present and non-zero.
+///
+/// # Errors
+///
+/// [`PolicyError::MissingLimit`] when `value` is `None`, and
+/// [`PolicyError::ZeroLimit`] when it is zero; both name `scope` and
+/// `field`.
 pub fn nonzero(
     scope: &str,
     field: &'static str,

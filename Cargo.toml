@@ -13,6 +13,9 @@ categories = ["asynchronous", "concurrency"]
 name = "vines"
 path = "src/lib.rs"
 
+[lints]
+workspace = true
+
 [dependencies]
 futures = { version = "0.3.32", default-features = false, features = ["std", "async-await"] }
 pin-project-lite = "0.2.17"
@@ -22,3 +25,50 @@ tokio-util = { version = "0.7.18", default-features = false }
 
 [dev-dependencies]
 tokio = { version = "1.52.3", features = ["rt", "time", "sync", "macros", "test-util"] }
+
+# A workspace so every crate in this repo (vine-lang, when it joins) shares
+# one lint table. Join with `[lints] workspace = true` and a `members` entry.
+[workspace]
+members = ["."]
+
+# Strict from the start: everything here is denied by `just clippy`
+# (`-D warnings`). Silence one site with
+# `#[expect(lint, reason = "...")]`, never `#[allow]`.
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+unreachable_pub = "warn"
+rust_2018_idioms = { level = "warn", priority = -1 }
+
+[workspace.lints.rustdoc]
+broken_intra_doc_links = "warn"
+private_intra_doc_links = "warn"
+
+[workspace.lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+# Panics belong in tests (clippy.toml allows them there) or behind an
+# `#[expect]` whose reason states the invariant.
+unwrap_used = "warn"
+expect_used = "warn"
+# Every lint exception carries a reason, and is an `#[expect]` so it goes
+# stale loudly when the lint stops firing.
+allow_attributes = "warn"
+allow_attributes_without_reason = "warn"
+# More than a few parameters, or several bools, is a missing type.
+too_many_arguments = "warn"
+fn_params_excessive_bools = "warn"
+# Debugging leftovers.
+dbg_macro = "warn"
+todo = "warn"
+unimplemented = "warn"
+# A library does not write to the terminal (clippy.toml allows tests to).
+print_stdout = "warn"
+print_stderr = "warn"
+# `let _ = fallible()` drops an error; say why with an `#[expect]`.
+let_underscore_must_use = "warn"
+
+# Pedantic lints turned off, each with why:
+# - must_use_candidate: `#[must_use]` on every getter is noise. Where dropping
+#   a value is a bug it is marked by hand (`Ack`, the stream types), and
+#   setters returning `Self` are held to it by `return_self_not_must_use`.
+must_use_candidate = "allow"
