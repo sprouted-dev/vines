@@ -47,17 +47,21 @@ async fn a_passed_deadline_is_visible_before_anyone_awaits() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn the_first_cause_wins() {
-    let timed_out = CancelScope::with_timeout(Duration::from_secs(1));
+async fn a_request_after_the_deadline_leaves_it_timed_out() {
+    let scope = CancelScope::with_timeout(Duration::from_secs(1));
     tokio::time::advance(Duration::from_secs(2)).await;
-    timed_out.cancel();
-    assert_eq!(timed_out.cause(), Some(CancelCause::TimedOut));
+    scope.cancel();
+    assert_eq!(scope.cause(), Some(CancelCause::TimedOut));
+    assert_eq!(scope.cancelled().await, CancelCause::TimedOut);
+}
 
-    let requested = CancelScope::with_timeout(Duration::from_secs(5));
-    requested.cancel();
+#[tokio::test(start_paused = true)]
+async fn a_deadline_after_a_request_leaves_it_requested() {
+    let scope = CancelScope::with_timeout(Duration::from_secs(5));
+    scope.cancel();
     tokio::time::advance(Duration::from_secs(10)).await;
-    assert_eq!(requested.cause(), Some(CancelCause::Requested));
-    assert_eq!(requested.cancelled().await, CancelCause::Requested);
+    assert_eq!(scope.cause(), Some(CancelCause::Requested));
+    assert_eq!(scope.cancelled().await, CancelCause::Requested);
 }
 
 #[tokio::test(start_paused = true)]
@@ -102,7 +106,7 @@ async fn a_childs_earlier_deadline_does_not_touch_the_parent() {
 #[tokio::test(start_paused = true)]
 async fn a_childs_later_deadline_is_capped_by_the_parent() {
     let parent = CancelScope::with_timeout(Duration::from_secs(2));
-    let child = parent.child_with_deadline(Instant::now() + Duration::from_secs(60));
+    let child = parent.child_with_deadline(Instant::now() + Duration::from_mins(1));
     assert_eq!(child.deadline(), parent.deadline());
     let started = Instant::now();
     assert_eq!(child.cancelled().await, CancelCause::TimedOut);

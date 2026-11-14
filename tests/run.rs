@@ -7,20 +7,21 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use common::{nz, settle, GRACE};
+use common::{builder, nz, GRACE};
 use futures::{FutureExt, StreamExt};
+use tokio::sync::oneshot::error::RecvError;
 use vines::cancel::{CancelCause, CancelScope};
 use vines::frame::{Ending, Frame, GapReason};
 use vines::policy::{ObserverPolicy, Overflow, SourceDecl};
 use vines::run::{Crash, EmitError, Exit, Outcome, RunBuilder, Stop};
 use vines::PolicyError;
 
-fn builder() -> RunBuilder<u32> {
-    RunBuilder::new(SourceDecl::without_backpressure(), GRACE).unwrap()
-}
-
 fn lossy(queue: usize) -> ObserverPolicy {
     ObserverPolicy::new(nz(queue), Overflow::DropNewest)
+}
+
+fn adapter_bug() -> Exit<(), ()> {
+    panic!("agent adapter bug")
 }
 
 #[tokio::test(start_paused = true)]
@@ -74,6 +75,7 @@ async fn a_full_progress_queue_never_holds_back_the_result() {
 #[tokio::test(start_paused = true)]
 async fn adding_observers_never_relaunches_the_producer() {
     let launches = Arc::new(AtomicUsize::new(0));
+    let (emitted_tx, emitted_rx) = tokio::sync::oneshot::channel::<()>();
     let (gate_tx, gate_rx) = tokio::sync::oneshot::channel::<()>();
     let mut b = builder();
     let first = b.observe("first", lossy(64)).unwrap();
@@ -83,11 +85,12 @@ async fn adding_observers_never_relaunches_the_producer() {
         counted.fetch_add(1, Ordering::SeqCst);
         ctx.emit(1).await.unwrap();
         ctx.emit(2).await.unwrap();
+        emitted_tx.send(()).unwrap();
         gate_rx.await.unwrap();
         ctx.emit(3).await.unwrap();
         Exit::<(), ()>::Completed(())
     });
-    settle().await;
+    emitted_rx.await.unwrap();
     let late = run.observe("late", lossy(64)).unwrap();
     gate_tx.send(()).unwrap();
 
@@ -109,10 +112,9 @@ async fn adding_observers_never_relaunches_the_producer() {
 
 #[tokio::test(start_paused = true)]
 async fn a_late_required_observer_is_refused() {
-    let (hold_tx, hold_rx) = tokio::sync::oneshot::channel::<()>();
-    let run = builder().spawn(&CancelScope::new(), |_ctx| async move {
-        let _ = hold_rx.await;
-        Exit::<(), ()>::Completed(())
+    let run = builder().spawn(&CancelScope::new(), |ctx| async move {
+        ctx.cancelled().await;
+        Exit::<(), ()>::Stopped
     });
     let error = run
         .observe("late", lossy(4).answer(vines::policy::Answer::Required))
@@ -124,16 +126,19 @@ async fn a_late_required_observer_is_refused() {
             observer: "late".into()
         }
     );
-    drop(hold_tx);
+    run.cancel();
     run.finish().await;
 }
 
 #[tokio::test(start_paused = true)]
 async fn observing_an_ended_run_is_refused() {
-    let run = builder().spawn(&CancelScope::new(), |_ctx| async {
+    let mut b = builder();
+    let watch = b.observe("watch", lossy(4)).unwrap();
+    let run = b.spawn(&CancelScope::new(), |_ctx| async {
         Exit::<(), ()>::Completed(())
     });
-    settle().await;
+    // The end marker is queued only once the run has ended.
+    watch.into_record().await;
     let error = run.observe("late", lossy(4)).err().unwrap();
     assert_eq!(
         error,
@@ -192,10 +197,7 @@ async fn a_panicking_producer_still_yields_one_result() {
     let display = b.observe("display", lossy(4)).unwrap();
     let run = b.spawn(&CancelScope::new(), |mut ctx| async move {
         ctx.emit(1).await.unwrap();
-        if ctx.emitted() == 1 {
-            panic!("agent adapter bug");
-        }
-        Exit::<(), ()>::Completed(())
+        adapter_bug()
     });
     let report = run.finish().await;
     assert_eq!(
@@ -242,7 +244,7 @@ async fn a_cancel_the_producer_ignores_is_never_claimed_as_a_stop() {
     let (effect_tx, effect_rx) = tokio::sync::oneshot::channel::<()>();
     let run = builder().spawn(&CancelScope::new(), |mut ctx| async move {
         // Ignores cancellation; finishes its effect later.
-        let _ = effect_rx.await;
+        effect_rx.await.unwrap();
         let late = ctx.emit(7).await;
         assert_eq!(late, Err(EmitError::Ended(7)), "the run already ended");
         Exit::<_, ()>::Completed("effect happened")
@@ -263,8 +265,11 @@ async fn a_cancel_the_producer_ignores_is_never_claimed_as_a_stop() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn a_straggler_can_be_aborted_without_claiming_a_stop() {
-    let run = builder().spawn(&CancelScope::new(), |_ctx| async {
+async fn aborting_a_straggler_drops_the_producer() {
+    let (alive_tx, alive_rx) = tokio::sync::oneshot::channel::<()>();
+    let run = builder().spawn(&CancelScope::new(), |_ctx| async move {
+        // Held until the producer's future is dropped.
+        let _alive = alive_tx;
         futures::future::pending::<()>().await;
         Exit::<(), ()>::Completed(())
     });
@@ -272,6 +277,8 @@ async fn a_straggler_can_be_aborted_without_claiming_a_stop() {
     let report = run.finish().await;
     assert_eq!(report.outcome, Outcome::Cancelled(Stop::Unconfirmed));
     report.straggler.unwrap().abort();
+    // The sender is dropped with the producer's future: the receive fails.
+    assert!(matches!(alive_rx.await, Err(RecvError { .. })));
 }
 
 #[tokio::test(start_paused = true)]
@@ -344,7 +351,7 @@ async fn dropping_the_run_handle_requests_cancellation() {
     let (seen_tx, seen_rx) = tokio::sync::oneshot::channel();
     let run = builder().spawn(&CancelScope::new(), |ctx| async move {
         let cause = ctx.cancelled().await;
-        let _ = seen_tx.send(cause);
+        seen_tx.send(cause).unwrap();
         Exit::<(), ()>::Stopped
     });
     drop(run);

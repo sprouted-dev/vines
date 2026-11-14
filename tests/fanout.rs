@@ -5,36 +5,13 @@ mod common;
 
 use std::time::Duration;
 
-use common::{nz, settle, MemorySink, GRACE};
+use common::{backpressured, builder, emit_all, nz, until_idle, MemorySink, GRACE};
 use futures::StreamExt;
 use vines::cancel::CancelScope;
-use vines::frame::{Ending, Frame, Gap, GapReason};
+use vines::frame::{Coverage, End, Ending, Frame, Gap, GapReason};
 use vines::observer::ObserverFailure;
-use vines::policy::{Answer, Durability, Loss, ObserverPolicy, Overflow, SourceDecl};
-use vines::run::{EmitError, Exit, Outcome, RunBuilder, Stop};
-
-fn builder() -> RunBuilder<u32> {
-    RunBuilder::new(SourceDecl::without_backpressure(), GRACE).unwrap()
-}
-
-fn backpressured() -> RunBuilder<u32> {
-    RunBuilder::new(SourceDecl::with_backpressure(), GRACE).unwrap()
-}
-
-/// Emit `0..n`, then complete with the count.
-fn emit_all(
-    n: u32,
-) -> impl FnOnce(vines::run::RunContext<u32>) -> futures::future::BoxFuture<'static, Exit<u64, ()>>
-{
-    move |mut ctx| {
-        Box::pin(async move {
-            for item in 0..n {
-                ctx.emit(item).await.unwrap();
-            }
-            Exit::Completed(ctx.emitted())
-        })
-    }
-}
+use vines::policy::{Answer, Durability, Loss, ObserverPolicy, Overflow};
+use vines::run::{EmitError, Exit, Outcome, Stop};
 
 #[tokio::test(start_paused = true)]
 async fn drop_newest_keeps_the_head_and_marks_the_tail_gap() {
@@ -96,18 +73,20 @@ async fn interleaved_drops_and_reads_give_separate_gaps_in_place() {
     let mut obs = b
         .observe("display", ObserverPolicy::new(nz(2), Overflow::DropNewest))
         .unwrap();
+    let (burst_tx, burst_rx) = tokio::sync::oneshot::channel::<()>();
     let (step_tx, mut step_rx) = tokio::sync::mpsc::channel::<()>(1);
     let run = b.spawn(&CancelScope::new(), move |mut ctx| async move {
         for item in 0..4 {
             ctx.emit(item).await.unwrap(); // 0, 1 queued; 2, 3 dropped
         }
+        burst_tx.send(()).unwrap();
         step_rx.recv().await;
         for item in 4..7 {
             ctx.emit(item).await.unwrap(); // after two reads: 4, 5 queued; 6 dropped
         }
         Exit::<(), ()>::Completed(())
     });
-    settle().await;
+    burst_rx.await.unwrap();
     assert_eq!(obs.next().await.unwrap().seq(), Some(0));
     assert_eq!(obs.next().await.unwrap().seq(), Some(1));
     step_tx.send(()).await.unwrap();
@@ -268,7 +247,7 @@ async fn a_required_observer_gates_the_result_until_it_takes_the_end() {
         .unwrap();
     let run = b.spawn(&CancelScope::new(), emit_all(3));
     let finish = tokio::spawn(run.finish());
-    settle().await;
+    until_idle().await;
     assert!(
         !finish.is_finished(),
         "the answer waits for the required observer"
@@ -276,7 +255,7 @@ async fn a_required_observer_gates_the_result_until_it_takes_the_end() {
     for expected in 0..3 {
         assert_eq!(obs.next().await.unwrap().seq(), Some(expected));
     }
-    settle().await;
+    until_idle().await;
     assert!(!finish.is_finished(), "items alone do not settle it");
     assert!(matches!(obs.next().await, Some(Frame::End(_))));
     let report = finish.await.unwrap();
@@ -440,7 +419,8 @@ async fn a_waiting_producer_is_released_by_cancellation() {
         }
         Exit::<(), ()>::Stopped
     });
-    settle().await;
+    // Parked in the second emit, waiting for room.
+    until_idle().await;
     run.cancel();
     let report = run.finish().await;
     assert_eq!(report.outcome, Outcome::Cancelled(Stop::Confirmed));
@@ -460,7 +440,8 @@ async fn a_stop_producer_observer_that_walks_away_releases_the_producer() {
         )
         .unwrap();
     let run = b.spawn(&CancelScope::new(), emit_all(5));
-    settle().await;
+    // Parked in the second emit: the queue of one is full.
+    until_idle().await;
     drop(obs);
     let report = run.finish().await;
     assert_eq!(report.emitted, 5);
@@ -549,22 +530,29 @@ async fn a_durable_sink_receives_gap_markers() {
         .unwrap();
     b.spawn(&CancelScope::new(), emit_all(10)).finish().await;
     handle.finished().await;
-    let frames = sink.frames();
-    let gaps: Vec<_> = frames
-        .iter()
-        .filter_map(|frame| match frame {
-            Frame::Gap(gap) => Some(*gap),
-            _ => None,
-        })
-        .collect();
-    assert!(!gaps.is_empty(), "the durable record says what it lacks");
-    match frames.last().unwrap() {
-        Frame::End(end) => {
-            assert!(!end.coverage.is_complete());
-            assert_eq!(end.coverage.lost, gaps.iter().map(Gap::count).sum::<u64>());
-        }
-        other => panic!("expected the end marker, got {other:?}"),
-    }
+    // The producer emits all ten before the slow sink takes the first.
+    assert_eq!(
+        sink.frames(),
+        vec![
+            Frame::Item { seq: 0, item: 0 },
+            Frame::Item { seq: 1, item: 1 },
+            Frame::Gap(Gap {
+                reason: GapReason::DroppedNewest,
+                first_seq: 2,
+                last_seq: 9
+            }),
+            Frame::End(End {
+                ending: Ending::Completed,
+                coverage: Coverage {
+                    emitted: 10,
+                    lost: 8,
+                    gaps: 1,
+                    failure: None
+                }
+            }),
+        ],
+        "the durable record says what it lacks"
+    );
 }
 
 #[tokio::test(start_paused = true)]
@@ -628,14 +616,16 @@ async fn a_panicking_sink_settles_instead_of_hanging_the_gate() {
 #[tokio::test(start_paused = true)]
 async fn a_late_durable_observer_starts_draining_at_once() {
     let sink = MemorySink::<u32>::new();
+    let (emitted_tx, emitted_rx) = tokio::sync::oneshot::channel::<()>();
     let (go_tx, go_rx) = tokio::sync::oneshot::channel::<()>();
     let run = builder().spawn(&CancelScope::new(), |mut ctx| async move {
         ctx.emit(0).await.unwrap();
+        emitted_tx.send(()).unwrap();
         go_rx.await.unwrap();
         ctx.emit(1).await.unwrap();
         Exit::<(), ()>::Completed(())
     });
-    settle().await;
+    emitted_rx.await.unwrap();
     let handle = run
         .observe_durable(
             "transcript",

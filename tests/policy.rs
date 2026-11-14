@@ -2,21 +2,11 @@
 
 mod common;
 
-use common::{nz, MemorySink, GRACE};
+use common::{backpressured, builder as unbackpressured, nz, MemorySink};
 use vines::policy::{
     Answer, Durability, Loss, ObserverDecl, ObserverPolicy, Overflow, OverflowDecl, OverflowKind,
-    SourceDecl,
 };
-use vines::run::RunBuilder;
 use vines::PolicyError;
-
-fn unbackpressured() -> RunBuilder<u32> {
-    RunBuilder::new(SourceDecl::without_backpressure(), GRACE).unwrap()
-}
-
-fn backpressured() -> RunBuilder<u32> {
-    RunBuilder::new(SourceDecl::with_backpressure(), GRACE).unwrap()
-}
 
 fn decl(overflow: OverflowDecl) -> ObserverDecl {
     ObserverDecl {
@@ -51,20 +41,18 @@ fn loss_none_forbids_both_drop_policies() {
 #[test]
 fn loss_none_accepts_spill_and_stop_producer() {
     let spill = ObserverPolicy::new(nz(8), Overflow::Spill { quota: nz(64) }).loss(Loss::None);
-    assert!(unbackpressured().observe("spill", spill).is_ok());
+    assert_eq!(unbackpressured().observe("spill", spill).err(), None);
     let stop = ObserverPolicy::new(nz(8), Overflow::StopProducer).loss(Loss::None);
-    assert!(backpressured().observe("stop", stop).is_ok());
+    assert_eq!(backpressured().observe("stop", stop).err(), None);
 }
 
 #[test]
 fn loss_allowed_accepts_drop_policies() {
     let mut b = unbackpressured();
-    assert!(b
-        .observe("a", ObserverPolicy::new(nz(1), Overflow::DropOldest))
-        .is_ok());
-    assert!(b
-        .observe("b", ObserverPolicy::new(nz(1), Overflow::DropNewest))
-        .is_ok());
+    for (name, overflow) in [("a", Overflow::DropOldest), ("b", Overflow::DropNewest)] {
+        let policy = ObserverPolicy::new(nz(1), overflow);
+        assert_eq!(b.observe(name, policy).err(), None);
+    }
 }
 
 #[test]
@@ -77,9 +65,12 @@ fn durable_requires_a_sink() {
             observer: "summary".into()
         })
     );
-    assert!(unbackpressured()
-        .observe_durable("summary", policy, MemorySink::new())
-        .is_ok());
+    assert_eq!(
+        unbackpressured()
+            .observe_durable("summary", policy, MemorySink::new())
+            .err(),
+        None
+    );
 }
 
 #[test]
@@ -113,15 +104,14 @@ fn stop_producer_requires_a_backpressure_source() {
             .err(),
         expected
     );
-    assert!(backpressured().observe("recorder", policy).is_ok());
+    assert_eq!(backpressured().observe("recorder", policy).err(), None);
 }
 
 #[tokio::test(start_paused = true)]
 async fn late_observers_are_checked_by_the_same_rules() {
-    let (hold_tx, hold_rx) = tokio::sync::oneshot::channel::<()>();
-    let run = unbackpressured().spawn(&vines::cancel::CancelScope::new(), |_ctx| async move {
-        let _ = hold_rx.await;
-        vines::run::Exit::<(), ()>::Completed(())
+    let run = unbackpressured().spawn(&vines::cancel::CancelScope::new(), |ctx| async move {
+        ctx.cancelled().await;
+        vines::run::Exit::<(), ()>::Stopped
     });
     let stop = ObserverPolicy::new(nz(8), Overflow::StopProducer);
     assert!(matches!(
@@ -143,7 +133,7 @@ async fn late_observers_are_checked_by_the_same_rules() {
         run.observe_durable("late", ephemeral, MemorySink::new()),
         Err(PolicyError::EphemeralGivenSink { .. })
     ));
-    drop(hold_tx);
+    run.cancel();
     run.finish().await;
 }
 
@@ -234,16 +224,22 @@ fn a_valid_declaration_becomes_the_typed_policy() {
 }
 
 #[test]
-fn errors_name_the_field_an_author_wrote() {
-    let message = PolicyError::StopProducerRequiresBackpressure {
-        observer: "recorder".into(),
+fn a_refusal_names_the_overflow_as_an_author_writes_it() {
+    for (overflow, authored) in [
+        (OverflowKind::DropOldest, "drop_oldest"),
+        (OverflowKind::DropNewest, "drop_newest"),
+        (OverflowKind::StopProducer, "stop_producer"),
+        (OverflowKind::Spill, "spill"),
+    ] {
+        let error = PolicyError::LossNoneForbidsDrop {
+            observer: "summary".into(),
+            overflow,
+        };
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "observer `summary`: loss=none forbids overflow={authored}; declare stop_producer or spill"
+            )
+        );
     }
-    .to_string();
-    assert!(message.contains("recorder") && message.contains("stop_producer"));
-    let message = PolicyError::LossNoneForbidsDrop {
-        observer: "summary".into(),
-        overflow: OverflowKind::DropOldest,
-    }
-    .to_string();
-    assert!(message.contains("drop_oldest"));
 }

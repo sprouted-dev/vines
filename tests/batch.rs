@@ -5,7 +5,7 @@ mod common;
 
 use std::time::Duration;
 
-use common::nz;
+use common::{nz, still_pending_after, within};
 use futures::{stream, StreamExt};
 use tokio::sync::mpsc;
 use tokio::time::Instant;
@@ -15,13 +15,6 @@ use vines::PolicyError;
 
 fn receiver_stream<T>(mut rx: mpsc::Receiver<T>) -> impl futures::Stream<Item = T> {
     stream::poll_fn(move |cx| rx.poll_recv(cx))
-}
-
-/// Bound a wait so a missing flush fails the test instead of hanging it.
-async fn within<F: std::future::Future>(future: F) -> F::Output {
-    tokio::time::timeout(Duration::from_secs(600), future)
-        .await
-        .expect("no event within 600s of paused time")
 }
 
 fn items<T: Clone>(event: &BatchEvent<T>) -> (Vec<T>, FlushReason) {
@@ -109,8 +102,10 @@ async fn a_count_flush_clears_the_deadline() {
         (vec![1, 2], FlushReason::Count)
     );
     // No empty deadline batch follows: the timer went with the batch.
-    let quiet = tokio::time::timeout(Duration::from_secs(60), batches.next()).await;
-    assert!(quiet.is_err(), "nothing held, nothing flushed");
+    assert!(
+        still_pending_after(Duration::from_mins(1), batches.next()).await,
+        "nothing held, nothing flushed"
+    );
     drop(tx);
     assert!(batches.next().await.is_none());
 }
@@ -140,16 +135,28 @@ async fn flushes_before_exceeding_max_bytes() {
     .collect()
     .await;
     let batches: Vec<Batch<&str>> = out.into_iter().filter_map(BatchEvent::into_batch).collect();
-    assert_eq!(batches[0].items, vec!["aaaa", "bbbb"]);
     assert_eq!(
-        (batches[0].bytes, batches[0].reason),
-        (8, FlushReason::Bytes)
+        batches,
+        vec![
+            // 4 + 4 = 8, then 4 more would be 12 > 10: flush first.
+            Batch {
+                items: vec!["aaaa", "bbbb"],
+                bytes: 8,
+                reason: FlushReason::Bytes
+            },
+            // 4 + 2 = 6, then 6 more would be 12 > 10: flush first.
+            Batch {
+                items: vec!["cccc", "dd"],
+                bytes: 6,
+                reason: FlushReason::Bytes
+            },
+            Batch {
+                items: vec!["eeeeee"],
+                bytes: 6,
+                reason: FlushReason::Completed
+            },
+        ]
     );
-    // 4 + 2 = 6, then 6 more would be 12 > 10: flush first.
-    assert_eq!(batches[1].items, vec!["cccc", "dd"]);
-    assert_eq!(batches[2].items, vec!["eeeeee"]);
-    assert_eq!(batches[2].reason, FlushReason::Completed);
-    assert!(batches.iter().all(|batch| batch.bytes <= 10));
 }
 
 #[tokio::test(start_paused = true)]
@@ -184,9 +191,7 @@ async fn cancel_with_flush_emits_what_is_held_then_marks_the_cancel() {
     );
     tx.send(1).await.unwrap();
     tx.send(2).await.unwrap();
-    assert!(tokio::time::timeout(Duration::from_secs(1), batches.next())
-        .await
-        .is_err());
+    assert!(still_pending_after(Duration::from_secs(1), batches.next()).await);
     scope.cancel();
     assert_eq!(
         items(&batches.next().await.unwrap()),
@@ -214,9 +219,7 @@ async fn cancel_with_discard_reports_what_it_dropped() {
     for n in [3usize, 4, 5] {
         tx.send(n).await.unwrap();
     }
-    assert!(tokio::time::timeout(Duration::from_secs(1), batches.next())
-        .await
-        .is_err());
+    assert!(still_pending_after(Duration::from_secs(1), batches.next()).await);
     scope.cancel();
     assert_eq!(
         batches.next().await.unwrap(),
