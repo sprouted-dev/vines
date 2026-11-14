@@ -76,6 +76,21 @@ const RENAMED_STAGES: &[(&str, &str)] = &[
     ("catch", "`catchError`"),
 ];
 
+/// Arguments from before `retry` and `bufferCount` took their RxJS names.
+const RENAMED_RETRY: &[(&str, &str)] = &[("times", "`count`"), ("wait", "`delay`")];
+const RENAMED_BUFFER_COUNT: &[(&str, &str)] = &[("size", "`bufferSize`")];
+
+/// Refuse an argument by its old name, naming the new one.
+fn refuse_renamed(body: &Value, path: &str, names: &[(&str, &str)]) -> Result<(), LoadError> {
+    let Some(m) = body.as_object() else {
+        return Ok(());
+    };
+    match names.iter().find(|(old, _)| m.contains_key(*old)) {
+        Some((old, new)) => Err(renamed(path, old, new)),
+        None => Ok(()),
+    }
+}
+
 fn renamed(path: &str, old: &str, new: &str) -> LoadError {
     LoadError::Renamed {
         path: path.into(),
@@ -243,12 +258,12 @@ fn read_stage(v: &Value, path: &str) -> Result<Stage, LoadError> {
         }
         "bufferCount" => {
             takes(false, true)?;
-            let m = fields(&["size"])?;
-            let size = m
-                .get("size")
-                .and_then(Value::as_u64)
-                .ok_or_else(|| malformed(&here, "`bufferCount` needs `size`, a whole number"))?;
-            Stage::BufferCount { size, into }
+            refuse_renamed(body, &here, RENAMED_BUFFER_COUNT)?;
+            let m = fields(&["bufferSize"])?;
+            let buffer_size = m.get("bufferSize").and_then(Value::as_u64).ok_or_else(|| {
+                malformed(&here, "`bufferCount` needs `bufferSize`, a whole number")
+            })?;
+            Stage::BufferCount { buffer_size, into }
         }
         "fork" => {
             takes(false, false)?;
@@ -324,19 +339,20 @@ fn read_stage(v: &Value, path: &str) -> Result<Stage, LoadError> {
         }
         "retry" => {
             takes(false, false)?;
-            let m = fields(&["times", "wait"])?;
-            let times = m
-                .get("times")
+            refuse_renamed(body, &here, RENAMED_RETRY)?;
+            let m = fields(&["count", "delay"])?;
+            let count = m
+                .get("count")
                 .and_then(Value::as_u64)
                 .and_then(|n| u32::try_from(n).ok())
-                .ok_or_else(|| malformed(&here, "`retry` needs `times`, a whole number"))?;
-            let wait = match m.get("wait") {
+                .ok_or_else(|| malformed(&here, "`retry` needs `count`, a whole number"))?;
+            let delay = match m.get("delay") {
                 None => Duration::ZERO,
                 Some(v) => v.as_str().and_then(parse_duration).ok_or_else(|| {
-                    malformed(&format!("{here}.wait"), "`wait` is a time such as `5s`")
+                    malformed(&format!("{here}.delay"), "`delay` is a time such as `5s`")
                 })?,
             };
-            Stage::Retry { times, wait }
+            Stage::Retry { count, delay }
         }
         "timeout" => {
             takes(false, false)?;

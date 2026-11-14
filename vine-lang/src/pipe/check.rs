@@ -420,9 +420,9 @@ impl Checker<'_> {
                 });
                 Ok((t, Vec::new()))
             }
-            Stage::Retry { times, wait } => {
-                let (times, wait) = (*times, *wait);
-                if times == 0 {
+            Stage::Retry { count, delay } => {
+                let (count, delay) = (*count, *delay);
+                if count == 0 {
                     return Err(malformed(
                         &format!("{path}.retry"),
                         "`retry` tries again at least once",
@@ -431,7 +431,7 @@ impl Checker<'_> {
                 let t = covering(move |item, tag, cx| {
                     let body = body.clone();
                     async move {
-                        let mut left = times;
+                        let mut left = count;
                         loop {
                             let attempt = one(Ok(Flowing::Value(item.clone(), tag.clone())));
                             let out: Vec<Flow> = body(attempt, cx.clone()).collect().await;
@@ -439,7 +439,7 @@ impl Checker<'_> {
                                 return out;
                             }
                             left -= 1;
-                            tokio::time::sleep(wait).await;
+                            tokio::time::sleep(delay).await;
                         }
                     }
                     .boxed()
@@ -697,12 +697,12 @@ impl Checker<'_> {
                 });
                 Ok((t, known))
             }
-            Stage::BufferCount { size, into } => {
+            Stage::BufferCount { buffer_size, into } => {
                 let here = format!("{path}.bufferCount");
-                if *size == 0 {
+                if *buffer_size == 0 {
                     return Err(malformed(
                         &here,
-                        "`bufferCount` needs a `size` of at least 1",
+                        "`bufferCount` needs a `bufferSize` of at least 1",
                     ));
                 }
                 if let Some(name) = into {
@@ -722,7 +722,7 @@ impl Checker<'_> {
                     ),
                 };
                 self.sites.buffer_count(path, feeds);
-                let size = usize::try_from(*size).unwrap_or(usize::MAX);
+                let size = usize::try_from(*buffer_size).unwrap_or(usize::MAX);
                 let (into, at) = (into.clone(), path.to_owned());
                 let t: Transform = Arc::new(move |items: Items, _cx: Cx| {
                     batches(items, size, into.clone(), at.clone())

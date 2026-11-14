@@ -26,7 +26,7 @@ The stages are in `src/pipe/`. Worked examples are in `vines/pipe/`.
 
 **Order the covering stages by what each should see.** `catchError`, `finalize`, `retry` and `timeout` each cover everything before them in their pipe. So `retry` then `catchError` means "try three times, then handle the failure". `catchError` then `retry` means the retry never sees a failure, because the `catchError` already handled it.
 
-**Give `retry` a wait, and a `timeout` to anything that can hang.** A timeout fails the item with the code `timeout`, and a `catchError` after it can handle that like any other failure. The `catchError` gets the item as it reached the stages the timeout covers, not as it was partway through them, so undo by what the input names: `job_launch` removes the working copy by the job's name. See `vines/pipe/job_launch.yaml`.
+**Give `retry` a `delay`, and a `timeout` to anything that can hang.** Write `retry: { count: 3, delay: 5s }`. A timeout fails the item with the code `timeout`, and a `catchError` after it can handle that like any other failure. The `catchError` gets the item as it reached the stages the timeout covers, not as it was partway through them, so undo by what the input names: `job_launch` removes the working copy by the job's name. See `vines/pipe/job_launch.yaml`.
 
 **Resume a vine with a `timeout` as any other.** A saved run saves what the clock decided for each run of the stages a timeout covers, before anything that depends on it, so a replay never asks the clock again. What you can rely on, with `run_saved` and with `run_from`, inside a `mergeMap`, inside a vine run by `use`, and with `catchError` or `retry` before or after the timeout:
 
@@ -70,7 +70,7 @@ The stages are in `src/pipe/`. Worked examples are in `vines/pipe/`.
 
 **Use `fork` to do more than one thing with each item.** Each item goes down every side pipe, then on down the main pipe. A side pipe sees the whole stream, so `bufferCount` and `last` work in it. Write `filter: $item.line` first in a side pipe that should skip a stream act's end item.
 
-**Use `last` to wait for the end of a stream, and `bufferCount` to batch it.** `bufferCount: { size: 50 }` gives `{ items, count }`, and what is left when the stream ends. With `into: batch` the item is the last one of the batch, so you keep its fields.
+**Use `last` to wait for the end of a stream, and `bufferCount` to batch it.** `bufferCount: { bufferSize: 50 }` gives `{ items, count }`, and what is left when the stream ends. With `into: batch` the item is the last one of the batch, so you keep its fields.
 
 **Use `forkJoin` for quick acts that do not depend on each other.** They run side by side and the pipe goes on when all are done. Each one needs its own `into`.
 
@@ -85,7 +85,7 @@ The stages are in `src/pipe/`. Worked examples are in `vines/pipe/`.
 
 Reach for `concatMap` first: it is the one that cannot surprise you. Only `mergeMap` takes `concurrent`. `switchMap` and `exhaustMap` cannot be resumed.
 
-**Write the RxJS name.** The stages use the RxJS names where RxJS has one. A vine that still says `each`, `overlap`, `at_once`, `collect`, `together` or `catch` is refused when it loads, and the error names the key to write instead.
+**Write the RxJS name.** The stages use the RxJS names where RxJS has one. A vine that still says `each`, `overlap`, `at_once`, `collect`, `together` or `catch` is refused when it loads, and the error names the key to write instead. So is `retry` with `times` or `wait` (now `count` and `delay`) and `bufferCount` with `size` (now `bufferSize`).
 
 **Make every act safe to run twice.** A result can repeat after a crash, and an act whose entry was not saved runs again. An act that creates or writes should give the same result the second time: `git.worktree_add` for a name that has a working copy gives that copy, and `agent.start` in a directory with an agent running gives that agent.
 
@@ -162,10 +162,10 @@ Reach for `concatMap` first: it is the one that cannot surprise you. Only `merge
 - A pipe, or a case of a `branch`, a `catchError` or a `use`, that does not end at an `emit`. A `branch` with no `else` counts. A `filter` or `take` before the `emit` can still drop an item, so a run can give no output.
 - A stage that can never run because everything before it already emitted.
 - `fork` with no side pipe, an emit in a side pipe to an output nobody declared, and a `finalize` that holds a fork that emits. An emit in a side pipe does not count as the main pipe emitting.
-- `bufferCount` with a size of 0.
+- `bufferCount` with a `bufferSize` of 0.
 - `last` or `bufferCount` where they could only ever see one item.
 - `concurrent` on any mapping stage but `mergeMap`, or a `concurrent` of 0.
-- An old stage key: `each`, `overlap`, `at_once`, `collect`, `together` or `catch`. The error names the key that replaced it.
+- An old stage key: `each`, `overlap`, `at_once`, `collect`, `together` or `catch`, or an old argument: `times` or `wait` on `retry`, `size` on `bufferCount`. The error names the key that replaced it.
 - `tap` on a stream act, a stream act inside `forkJoin`, and `end` on an act that is not a stream act.
 - A stream act that gives its items again, where a later item could not rebuild what comes after it: a `take` that its items reach, a `bufferCount` that could mix two calls, or a `retry` over it. The call is saved item by item, and `Pipe::saves_every_item` says where and why. A vine that refuses this for a vine it runs by `use` cannot be resumed.
 - For both ways to resume: `switchMap` and `exhaustMap`, `take` or `bufferCount` after a `mergeMap` (in a side pipe too), an act on the item `last` picked after one, and a `catchError` or `finalize` that covers one at any depth. `Pipe::resumable` says so, and the run gives `NotResumable` with the reason and the stage's path. A `timeout` is not refused.

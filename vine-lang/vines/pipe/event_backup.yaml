@@ -11,7 +11,7 @@ input: { seq: int, body: text }
 outputs:
   stored: { name: text, first: int, last: int, count: int }
 pipe:
-  - bufferCount: { size: 5 }
+  - bufferCount: { bufferSize: 5 }
   - call: backup.store
     with: { items: $item.items }
     into: stored

@@ -188,7 +188,7 @@ fn the_same_mistake_with_a_new_stage_is_refused_with_the_same_error() {
         ),
         (
             vec![buffer_count(0), emit("out")],
-            "  - bufferCount: { size: 0 }\n  - emit: out\n".into(),
+            "  - bufferCount: { bufferSize: 0 }\n  - emit: out\n".into(),
         ),
         (
             vec![last(), emit("out"), catch_error([emit("out")])],
@@ -264,7 +264,7 @@ fn buffer_count_takes_a_size_and_an_into() {
         matches!(err, LoadError::Malformed { ref path, .. } if path == "pipe[0].bufferCount"),
         "{err}"
     );
-    let err = bad("  - bufferCount: { size: 2, every: 5s }\n  - emit: out\n");
+    let err = bad("  - bufferCount: { bufferSize: 2, every: 5s }\n  - emit: out\n");
     assert_eq!(
         err,
         LoadError::UnknownKey {
@@ -272,7 +272,7 @@ fn buffer_count_takes_a_size_and_an_into() {
             key: "every".into()
         }
     );
-    let err = bad("  - bufferCount: { size: 2 }\n    with: {}\n  - emit: out\n");
+    let err = bad("  - bufferCount: { bufferSize: 2 }\n    with: {}\n  - emit: out\n");
     assert_eq!(
         err,
         LoadError::UnknownKey {

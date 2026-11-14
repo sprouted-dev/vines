@@ -97,7 +97,8 @@
 //!   get the item as it was when it failed, plus the failure as
 //!   `$item.error`.
 //! - [`finalize`]: run these stages afterwards, however the work ended.
-//! - [`retry`]: if a covered stage fails, wait and run them again.
+//! - [`retry`]: if a covered stage fails, wait `delay` and run them again,
+//!   up to `count` more times.
 //! - [`timeout`]: fail the item if the covered stages take too long.
 //!
 //! One failing item does not stop the items after it, as long as a
@@ -372,9 +373,9 @@ pub enum Stage {
     Take(u64),
     /// When the stream ends, let only its final item through.
     Last,
-    /// Batches of `size`, and what is left when the stream ends.
+    /// Batches of `buffer_size`, and what is left when the stream ends.
     BufferCount {
-        size: u64,
+        buffer_size: u64,
         into: Option<String>,
     },
     ForkJoin(Vec<Stage>),
@@ -394,10 +395,11 @@ pub enum Stage {
     /// Covers the stages before it: run these afterwards, however the
     /// item's work ended.
     Finalize(Vec<Stage>),
-    /// Covers the stages before it: if one fails, run them again.
+    /// Covers the stages before it: if one fails, wait `delay` and run
+    /// them again, up to `count` more times.
     Retry {
-        times: u32,
-        wait: Duration,
+        count: u32,
+        delay: Duration,
     },
     /// Covers the stages before it: fail if they take longer than this.
     Timeout(Duration),
@@ -522,12 +524,15 @@ pub fn last() -> Stage {
     Stage::Last
 }
 
-/// Gather items into batches of `size`. A batch is `{ items, count }`. When
+/// Gather items into batches of `buffer_size`. A batch is `{ items, count }`. When
 /// the stream ends, what is left comes as one more, smaller batch. An empty
 /// batch is never given. With [`into`](Stage::into), the item is the last
 /// one of the batch with the batch added under that name.
-pub fn buffer_count(size: u64) -> Stage {
-    Stage::BufferCount { size, into: None }
+pub fn buffer_count(buffer_size: u64) -> Stage {
+    Stage::BufferCount {
+        buffer_size,
+        into: None,
+    }
 }
 
 /// Run these operators or acts side by side for one item, and go on when
@@ -590,10 +595,11 @@ pub fn finalize(stages: impl IntoIterator<Item = Stage>) -> Stage {
     Stage::Finalize(stages.into_iter().collect())
 }
 
-/// If a stage before this one fails for an item, wait and run them again,
-/// up to `times` more times. Every act they run must be safe to repeat.
-pub fn retry(times: u32, wait: Duration) -> Stage {
-    Stage::Retry { times, wait }
+/// If a stage before this one fails for an item, wait `delay` and run them
+/// again, up to `count` more times. Every act they run must be safe to
+/// repeat.
+pub fn retry(count: u32, delay: Duration) -> Stage {
+    Stage::Retry { count, delay }
 }
 
 /// Fail an item with the code `timeout` if the stages before this one

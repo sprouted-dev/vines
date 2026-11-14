@@ -535,6 +535,24 @@ fn collect_is_refused_and_the_error_names_buffer_count() {
 }
 
 #[test]
+fn retry_refuses_times_and_the_error_names_count() {
+    let err = bad("  - set: { n: 1 }\n  - retry: { times: 2 }\n  - emit: out\n");
+    assert_eq!(err, renamed("pipe[1].retry", "times", "`count`"));
+}
+
+#[test]
+fn retry_refuses_wait_and_the_error_names_delay() {
+    let err = bad("  - set: { n: 1 }\n  - retry: { count: 2, wait: 5s }\n  - emit: out\n");
+    assert_eq!(err, renamed("pipe[1].retry", "wait", "`delay`"));
+}
+
+#[test]
+fn buffer_count_refuses_size_and_the_error_names_buffer_size() {
+    let err = bad("  - bufferCount: { size: 2 }\n  - emit: out\n");
+    assert_eq!(err, renamed("pipe[0].bufferCount", "size", "`bufferSize`"));
+}
+
+#[test]
 fn together_is_refused_and_the_error_names_fork_join() {
     let err = bad("  - together: [ { call: git.commit, into: c } ]\n  - emit: out\n");
     assert_eq!(err, renamed("pipe[0]", "together", "`forkJoin`"));
@@ -615,17 +633,17 @@ fn branch_needs_its_cases_and_catch_error_and_finalize_take_a_list() {
 
 #[test]
 fn retry_and_timeout_read_their_times() {
-    let err = bad("  - set: { n: 1 }\n  - retry: { wait: 5s }\n  - emit: out\n");
+    let err = bad("  - set: { n: 1 }\n  - retry: { delay: 5s }\n  - emit: out\n");
     assert!(
         matches!(err, LoadError::Malformed { ref path, .. } if path == "pipe[1].retry"),
         "{err}"
     );
-    let err = bad("  - set: { n: 1 }\n  - retry: { times: 2, wait: soon }\n  - emit: out\n");
+    let err = bad("  - set: { n: 1 }\n  - retry: { count: 2, delay: soon }\n  - emit: out\n");
     assert!(
-        matches!(err, LoadError::Malformed { ref path, .. } if path == "pipe[1].retry.wait"),
+        matches!(err, LoadError::Malformed { ref path, .. } if path == "pipe[1].retry.delay"),
         "{err}"
     );
-    let err = bad("  - set: { n: 1 }\n  - retry: { times: 2, pause: 5s }\n  - emit: out\n");
+    let err = bad("  - set: { n: 1 }\n  - retry: { count: 2, pause: 5s }\n  - emit: out\n");
     assert_eq!(
         err,
         LoadError::UnknownKey {
@@ -639,7 +657,7 @@ fn retry_and_timeout_read_their_times() {
         "{err}"
     );
     let world = World::new();
-    let doc = "vine: v\ninput: { n: int }\noutputs: { out: { n: int } }\npipe:\n  - set: { n: $item.n }\n  - retry: { times: 2, wait: 5s }\n  - timeout: 30s\n  - emit: out\n";
+    let doc = "vine: v\ninput: { n: int }\noutputs: { out: { n: int } }\npipe:\n  - set: { n: $item.n }\n  - retry: { count: 2, delay: 5s }\n  - timeout: 30s\n  - emit: out\n";
     registry(&world).load_pipe(doc).unwrap();
 }
 

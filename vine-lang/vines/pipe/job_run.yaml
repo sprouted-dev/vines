@@ -37,7 +37,7 @@ pipe:
         - emit: { to: log_line, with: { job: $item.job, seq: $item.line.seq, text: $item.line.text } }
       - - filter: $item.line
         # 50 lines at a time, and what is left when the agent ends.
-        - bufferCount: { size: 50 }
+        - bufferCount: { bufferSize: 50 }
           into: batch
         - summarize: { items: $item.batch.items }
           into: summary
