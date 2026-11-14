@@ -69,14 +69,17 @@ impl std::fmt::Debug for Pipe {
 }
 
 impl Pipe {
+    /// The vine's name.
     pub fn name(&self) -> &str {
         &self.name
     }
 
+    /// The shape every input item must fit.
     pub fn input(&self) -> &Shape {
         &self.input
     }
 
+    /// The named outputs and the shape of what each carries.
     pub fn outputs(&self) -> &BTreeMap<String, Shape> {
         &self.outputs
     }
@@ -165,7 +168,7 @@ impl Pipe {
     /// records it. If you save after every entry, no output is handed out
     /// twice. If the run stops after an output and before you saved the
     /// entry after it, that output comes again, with the same
-    /// [`OutputId`]: drop it by its id. Ids are unique within this run and
+    /// [`OutputId`](super::OutputId): drop it by its id. Ids are unique within this run and
     /// its restarts; join them with your own key for the run to keep the
     /// outputs of many runs apart.
     ///
@@ -233,7 +236,7 @@ impl Pipe {
     /// [`Pipe::run_saved`]: a call with a saved result is not made again,
     /// and an output already handed out is not handed out again. If the run
     /// stops after an output and before you saved the line after it, that
-    /// output comes again, with the same [`OutputId`]. An id names the
+    /// output comes again, with the same [`OutputId`](super::OutputId). An id names the
     /// input item it belongs to, counted from the first item ever, so ids
     /// stay unique however many restarts the stream goes through.
     ///
@@ -292,6 +295,10 @@ impl Pipe {
 
     /// Feed the vine one item and collect everything it emits. A vine that
     /// must give exactly one answer says so itself, with `take: 1`.
+    ///
+    /// # Errors
+    ///
+    /// The [`RunError`] that ends the run, as [`Pipe::run`] gives it.
     pub async fn run_one(&self, input: Value) -> Result<Vec<PipeOutput>, RunError> {
         let mut out = Vec::new();
         let mut results = self.run(stream::once(ready(input)));

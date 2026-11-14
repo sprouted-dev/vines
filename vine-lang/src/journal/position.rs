@@ -91,6 +91,7 @@ pub enum Progress {
 pub struct Line {
     /// The input item, counted from 1.
     pub item: u64,
+    /// What was saved.
     pub entry: Entry,
 }
 
@@ -103,6 +104,10 @@ impl Line {
     }
 
     /// Read a line written by [`Line::to_json`].
+    ///
+    /// # Errors
+    ///
+    /// The [`LineError`] that says what in `v` is not a line.
     pub fn from_json(v: &Value) -> Result<Line, LineError> {
         let Some(map) = v.as_object() else {
             return Err(LineError::NotAMap);
@@ -154,6 +159,7 @@ impl Bookmark {
         self.position
     }
 
+    /// The lines kept for the input items past the position, oldest first.
     pub fn lines(&self) -> &[Line] {
         &self.lines
     }
@@ -206,6 +212,7 @@ impl Bookmark {
         self.lines.len()
     }
 
+    /// Whether no line is kept.
     pub fn is_empty(&self) -> bool {
         self.lines.is_empty()
     }
@@ -262,6 +269,10 @@ impl Bookmark {
     }
 
     /// Read a bookmark written by [`Bookmark::to_json`].
+    ///
+    /// # Errors
+    ///
+    /// The [`BookmarkError`] that says what in `v` is not a bookmark.
     pub fn from_json(v: &Value) -> Result<Bookmark, BookmarkError> {
         let Some(map) = v.as_object() else {
             return Err(BookmarkError::NotAMap);

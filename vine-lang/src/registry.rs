@@ -42,7 +42,9 @@ use crate::shape::{Shape, Ty};
 /// `message` as `$item.error`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OpError {
+    /// What went wrong, as a word a `catchError` can branch on.
     pub code: String,
+    /// What went wrong, for a person.
     pub message: String,
 }
 
@@ -53,6 +55,7 @@ impl OpError {
     /// is not saved, so a resumed run asks the operator again.
     pub const CANCELLED: &'static str = "cancelled";
 
+    /// A failure with this code and message.
     pub fn new(code: impl Into<String>, message: impl Into<String>) -> Self {
         OpError {
             code: code.into(),
@@ -60,6 +63,7 @@ impl OpError {
         }
     }
 
+    /// The failure of an operator that stopped because it was cancelled.
     pub fn cancelled(message: impl Into<String>) -> Self {
         Self::new(Self::CANCELLED, message)
     }
@@ -95,8 +99,11 @@ impl OpContext {
 /// What an operator declares about itself.
 #[derive(Debug, Clone, PartialEq)]
 pub struct OperatorSpec {
+    /// The name a pipe runs it by.
     pub name: String,
+    /// The shape its resolved settings must fit.
     pub settings: Shape,
+    /// The shape of what it gives, when it declares one.
     pub returns: Option<Shape>,
     /// For a stream operator: the shape of the value it ends with.
     pub ends: Option<Shape>,
@@ -116,6 +123,7 @@ impl OperatorSpec {
         }
     }
 
+    /// Declare the shape its resolved settings must fit.
     #[must_use]
     pub fn settings(mut self, shape: Shape) -> Self {
         self.settings = shape;
@@ -314,6 +322,10 @@ impl Registry {
     /// operator that touches nothing ([`RegistryError::TouchesNothing`]),
     /// a name already registered, and a touch that is not dot-separated
     /// lower `snake_case` words.
+    ///
+    /// # Errors
+    ///
+    /// The [`RegistryError`] for the first of those rules `spec` breaks.
     pub fn register<F, Fut>(&mut self, spec: OperatorSpec, f: F) -> Result<(), RegistryError>
     where
         F: Fn(Value, OpContext) -> Fut + Send + Sync + 'static,
@@ -337,6 +349,10 @@ impl Registry {
     /// [`OpContext::resume_from`] and gives only the items after those it
     /// already gave. So one that starts long work should start it the
     /// first time and attach to it after that.
+    ///
+    /// # Errors
+    ///
+    /// As for [`Registry::register`].
     pub fn register_stream<F, S>(&mut self, spec: OperatorSpec, f: F) -> Result<(), RegistryError>
     where
         F: Fn(Value, OpContext) -> S + Send + Sync + 'static,
@@ -361,6 +377,10 @@ impl Registry {
     /// item, the run saves every item it gives instead.
     /// [`Pipe::saves_every_item`](crate::Pipe::saves_every_item) says
     /// where and why.
+    ///
+    /// # Errors
+    ///
+    /// As for [`Registry::register`].
     pub fn register_replayable_stream<F, S>(
         &mut self,
         spec: OperatorSpec,
@@ -471,6 +491,10 @@ impl Registry {
     /// Make a checked vine available to other vines, which run it with a
     /// `use` operator. A vine can only use a vine that was added before it
     /// was built, so two vines can never use each other.
+    ///
+    /// # Errors
+    ///
+    /// [`RegistryError::Duplicate`] when a vine of the same name was added.
     pub fn add_vine(&mut self, vine: crate::pipe::Pipe) -> Result<(), RegistryError> {
         if self.vines.contains_key(vine.name()) {
             return Err(RegistryError::Duplicate(vine.name().to_owned()));
@@ -484,11 +508,20 @@ impl Registry {
     }
 
     /// Check a vine built as a pipe in Rust and return it ready to run.
+    ///
+    /// # Errors
+    ///
+    /// The [`LoadError`] for the first thing the checker refuses.
     pub fn build_pipe(&self, def: crate::pipe::PipeDef) -> Result<crate::pipe::Pipe, LoadError> {
         crate::pipe::assemble(self, def)
     }
 
     /// Check a vine written as a pipe in YAML and return it ready to run.
+    ///
+    /// # Errors
+    ///
+    /// [`LoadError::Yaml`] when the text is not YAML, or the first thing
+    /// the reader or the checker refuses.
     #[cfg(feature = "yaml")]
     pub fn load_pipe(&self, yaml: &str) -> Result<crate::pipe::Pipe, LoadError> {
         crate::pipe::load(self, yaml)

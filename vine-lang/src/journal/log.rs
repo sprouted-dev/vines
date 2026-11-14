@@ -62,14 +62,17 @@ impl Journal {
         }
     }
 
+    /// The entries, oldest first.
     pub fn entries(&self) -> &[Entry] {
         &self.entries
     }
 
+    /// How many entries are kept.
     pub fn len(&self) -> usize {
         self.entries.len()
     }
 
+    /// Whether no entry is kept: a fresh start.
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
@@ -85,6 +88,11 @@ impl Journal {
     }
 
     /// Read a JSON list of entries.
+    ///
+    /// # Errors
+    ///
+    /// [`JournalError::NotAList`], or [`JournalError::Entry`] for the first
+    /// entry that cannot be read.
     pub fn from_json(v: &Value) -> Result<Journal, JournalError> {
         let Some(list) = v.as_array() else {
             return Err(JournalError::NotAList);

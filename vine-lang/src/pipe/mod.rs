@@ -137,7 +137,7 @@
 //!
 //! [`Pipe::run_saved`] runs a vine and hands the caller, besides what it
 //! emits, [`Entry`](crate::Entry) values to save. After a restart the
-//! caller runs the vine again over the same input with the [`Journal`] it
+//! caller runs the vine again over the same input with the [`Journal`](crate::Journal) it
 //! saved. The run replays: a `call` with a saved result is not made again,
 //! a stream operator gives its saved items again and then carries on from
 //! where it was, and an output the caller was already handed is not handed
@@ -194,8 +194,8 @@
 //! would never shrink. [`Pipe::run_from`] runs it with a saved position
 //! instead. It gives the same outputs and the same entries, each as a
 //! [`Line`](crate::Line) naming the input item it belongs to, and
-//! [`Progress::Through`] with `n` once every input item through `n` is
-//! fully done. The caller keeps a [`Bookmark`]: the position and the lines
+//! [`Progress::Through`](crate::Progress::Through) with `n` once every input item through `n` is
+//! fully done. The caller keeps a [`Bookmark`](crate::Bookmark): the position and the lines
 //! past it. After a restart it feeds the items after the position, and the
 //! items that were in flight replay from their lines.
 //!
@@ -222,7 +222,7 @@
 //! `branch` and stream operators all can.
 //!
 //! Under a `mergeMap`, an input item can be done before an
-//! earlier one. The run gives [`Progress::Done`] for it, the caller's
+//! earlier one. The run gives [`Progress::Done`](crate::Progress::Done) for it, the caller's
 //! bookmark keeps its number and drops its lines, and a run from that
 //! bookmark skips it. The position still moves only past items in order.
 //! So the bookmark holds the lines of the items in flight, at most
@@ -259,7 +259,7 @@
 //! item `k` start with the call's key and `k`, such as
 //! `pipe[1]#0@7/pipe[4]#0`, so they line up whichever item a restart
 //! begins at. When the position passes `k`, the caller's
-//! [`Journal::record`] or [`Bookmark::record`] drops those lines. So what
+//! [`Journal::record`](crate::Journal::record) or [`Bookmark::record`](crate::Bookmark::record) drops those lines. So what
 //! the caller keeps for a call is a few lines, however many items it
 //! gives.
 //!
@@ -284,7 +284,7 @@
 //! `finalize` does not run when the caller drops the stream partway: Rust
 //! has no async drop. A run that is dropped and never resumed leaves
 //! behind whatever its calls made. A journal only grows, except for the
-//! lines a [`Journal::record`] drops for a stream operator saved by
+//! lines a [`Journal::record`](crate::Journal::record) drops for a stream operator saved by
 //! position. A bookmark shrinks as the position moves. A stream operator
 //! saved item by item keeps every line until its item is done.
 

@@ -94,12 +94,19 @@ pub fn is_name(s: &str) -> bool {
 /// A reference such as `$item.job`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Ref {
+    /// The name it reads, such as `item`.
     pub root: String,
+    /// The fields it walks into, in order, such as `["job"]`.
     pub path: Vec<String>,
 }
 
 impl Ref {
     /// Parse the text after the `$`.
+    ///
+    /// # Errors
+    ///
+    /// [`RefError::BadRoot`] or [`RefError::BadSegment`] when a segment is
+    /// not lower `snake_case`.
     pub fn parse(body: &str) -> Result<Ref, RefError> {
         let mut parts = body.split('.');
         let root = parts.next().unwrap_or_default();
@@ -122,6 +129,7 @@ impl Ref {
         })
     }
 
+    /// The value it reads in `env`; null where a name or field is missing.
     pub fn eval(&self, env: &Env) -> Value {
         let mut cur = env.get(&self.root).cloned().unwrap_or(Value::Null);
         for seg in &self.path {
@@ -150,13 +158,22 @@ pub type Env = BTreeMap<String, Value>;
 /// An unresolved value: literal parts and references.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Template {
+    /// A value taken as written.
     Lit(Value),
+    /// A reference, replaced by the value it reads.
     Ref(Ref),
+    /// A map whose values are templates.
     Obj(BTreeMap<String, Template>),
+    /// A list whose elements are templates.
     List(Vec<Template>),
 }
 
 impl Template {
+    /// Read a settings or `with:` value as a template.
+    ///
+    /// # Errors
+    ///
+    /// The [`RefError`] of the first `$` string that is not a reference.
     pub fn parse(v: &Value) -> Result<Template, RefError> {
         Ok(match v {
             Value::String(s) => {
@@ -185,6 +202,7 @@ impl Template {
         })
     }
 
+    /// Every reference in the template, in order.
     pub fn refs(&self) -> Vec<&Ref> {
         let mut out = Vec::new();
         self.collect(&mut out);
@@ -200,6 +218,7 @@ impl Template {
         }
     }
 
+    /// The value the template makes in `env`.
     pub fn resolve(&self, env: &Env) -> Value {
         match self {
             Template::Lit(v) => v.clone(),
@@ -215,11 +234,14 @@ impl Template {
 /// One side of a condition.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Operand {
+    /// A reference, read when the condition is checked.
     Ref(Ref),
+    /// A value as written.
     Lit(Value),
 }
 
 impl Operand {
+    /// The operand's value in `env`.
     pub fn eval(&self, env: &Env) -> Value {
         match self {
             Operand::Ref(r) => r.eval(env),
@@ -248,6 +270,7 @@ impl Operand {
         }
     }
 
+    /// The reference, when the operand is one.
     pub fn as_ref(&self) -> Option<&Ref> {
         match self {
             Operand::Ref(r) => Some(r),
@@ -259,12 +282,20 @@ impl Operand {
 /// A `filter` condition.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Cond {
+    /// True when the operand is neither null nor false.
     Truthy(Operand),
+    /// True when the operands are equal JSON.
     Eq(Operand, Operand),
+    /// True when the operands are not equal JSON.
     Ne(Operand, Operand),
 }
 
 impl Cond {
+    /// Read a condition written as text, or a bool.
+    ///
+    /// # Errors
+    ///
+    /// The [`CondError`] that says why the text is not a condition.
     pub fn parse(v: &Value) -> Result<Cond, CondError> {
         let s = match v {
             Value::Bool(b) => return Ok(Cond::Truthy(Operand::Lit(Value::Bool(*b)))),
@@ -286,6 +317,7 @@ impl Cond {
         }
     }
 
+    /// Every reference the condition reads.
     pub fn refs(&self) -> Vec<&Ref> {
         match self {
             Cond::Truthy(a) => a.as_ref().into_iter().collect(),
@@ -293,6 +325,7 @@ impl Cond {
         }
     }
 
+    /// Whether the condition holds in `env`.
     pub fn eval(&self, env: &Env) -> bool {
         match self {
             Cond::Truthy(a) => !matches!(a.eval(env), Value::Null | Value::Bool(false)),

@@ -51,42 +51,62 @@ pub enum Keep {
 pub enum Operator {
     /// A registered pure operator, written by its name, such as `set`.
     Named {
+        /// The operator's registered name.
         name: String,
+        /// Its settings, a template over `$item`.
         with: Value,
+        /// What its result does to the item.
         keep: Keep,
     },
     /// A registered operator that touches something outside, run by
     /// `call` or `tap`, such as `git.worktree_add`.
     Call {
+        /// The operator's registered name.
         name: String,
+        /// Its settings, a template over `$item`.
         with: Value,
+        /// What its result does to the item; [`Keep::Tap`] for `tap`.
         keep: Keep,
         /// For a stream operator: the field its end value goes under, on
         /// one last item.
         end: Option<String>,
     },
+    /// One item becomes one item per element of a list.
     Split {
+        /// Where the list is, a template such as `$item.jobs`.
         from: Value,
+        /// The field each element is added under; without it, each
+        /// element is the new item.
         into: Option<String>,
     },
+    /// Drop the items a condition does not hold for.
     Filter {
+        /// The condition, as written.
         when: Value,
     },
+    /// Let this many items through, then end the stream.
     Take(u64),
     /// When the stream ends, let only its final item through.
     Last,
     /// Batches of `buffer_size`, and what is left when the stream ends.
     BufferCount {
+        /// How many items make a batch.
         buffer_size: u64,
+        /// The field the batch is added under, on the batch's last item.
         into: Option<String>,
     },
+    /// Registered operators run side by side for one item, each with
+    /// `into`.
     ForkJoin(Vec<Operator>),
     /// `concatMap`, `mergeMap`, `switchMap` or `exhaustMap`, as `flatten`
     /// says: run a pipe for each item. `concurrent` caps how many run side
     /// by side, and only `mergeMap` takes it.
     Mapped {
+        /// Which of the four.
         flatten: Flatten,
+        /// For `mergeMap`: at most this many side by side.
         concurrent: Option<usize>,
+        /// The pipe run for each item.
         pipe: Vec<Operator>,
     },
     /// Send each item down every side pipe, and on down this one.
@@ -100,7 +120,9 @@ pub enum Operator {
     /// Applies to the operators before it: if one fails, wait `delay` and
     /// run them again, up to `count` more times.
     Retry {
+        /// How many more times to try.
         count: u32,
+        /// How long to wait before each try.
         delay: Duration,
     },
     /// Applies to the operators before it: fail if they take longer than
@@ -108,18 +130,31 @@ pub enum Operator {
     Timeout(Duration),
     /// Run another vine for each item.
     Use {
+        /// The vine's name in the registry.
         vine: String,
+        /// Its input, a template over `$item`; without it, the item.
         with: Option<Value>,
+        /// What each thing it emits does to the item.
         keep: Keep,
+        /// For each of its outputs, the operators run on what it sends
+        /// there.
         on: Vec<(String, Vec<Operator>)>,
     },
+    /// Run the pipe whose case key equals a value of the item.
     Branch {
+        /// The value to match, a template such as `$item.state`.
         on: Value,
+        /// Each case key and its pipe.
         cases: Vec<(String, Vec<Operator>)>,
+        /// The pipe for an item that matches no case; without it, the item
+        /// passes through.
         otherwise: Option<Vec<Operator>>,
     },
+    /// Send the item, or a value made from it, to one of the vine's outputs.
     Emit {
+        /// The output's name.
         to: String,
+        /// The payload, a template over `$item`; without it, the item.
         with: Option<Value>,
     },
 }

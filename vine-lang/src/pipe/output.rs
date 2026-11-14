@@ -56,6 +56,7 @@ pub struct PipeOutput {
     pub id: OutputId,
     /// The declared output it was sent to.
     pub name: String,
+    /// What was sent, fitting the output's shape.
     pub payload: Value,
 }
 

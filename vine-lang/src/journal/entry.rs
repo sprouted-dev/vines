@@ -60,24 +60,46 @@ pub enum EntryError {
 pub enum Entry {
     /// The call at `at` was given `input` and gave `result`.
     Done {
+        /// The call's key.
         at: String,
+        /// The settings it was given.
         input: Value,
+        /// What it gave.
         result: Value,
     },
     /// The call at `at` was given `input` and failed. For a stream operator this
     /// ends its stream.
     Failed {
+        /// The call's key.
         at: String,
+        /// The settings it was given.
         input: Value,
+        /// The failure's code.
         code: String,
+        /// The failure's message.
         message: String,
     },
     /// The stream operator at `at` was called with `input`.
-    Started { at: String, input: Value },
+    Started {
+        /// The call's key.
+        at: String,
+        /// The settings it was given.
+        input: Value,
+    },
     /// The stream operator at `at` gave one more item.
-    Item { at: String, value: Value },
+    Item {
+        /// The call's key.
+        at: String,
+        /// The item.
+        value: Value,
+    },
     /// The stream operator at `at` ended with `value`.
-    Ended { at: String, value: Value },
+    Ended {
+        /// The call's key.
+        at: String,
+        /// The end value.
+        value: Value,
+    },
     /// The caller was handed one output with this name. Its id is not
     /// saved: a replay makes it again from where the output stands.
     /// `within` names the group of work it was made in, such as
@@ -89,22 +111,44 @@ pub enum Entry {
     /// position passes it, the output is never made again. The line stays
     /// all the same, so the outputs after it in its group keep their ids.
     Emitted {
+        /// The output's name.
         output: String,
+        /// The group of work it was made in, when it was made in one.
         within: Option<String>,
+        /// The stream item `last` picked it out of groups from, if any.
         from: Option<String>,
     },
     /// For a stream operator that gives its items again: every item it gave
     /// through number `items` is fully done, and `handed` outputs made
     /// from the items after them were handed out. A later `Through` for
     /// the same `at` replaces this one.
-    Through { at: String, items: u64, handed: u64 },
+    Through {
+        /// The call's key.
+        at: String,
+        /// The call's position: every item through this one is done.
+        items: u64,
+        /// Outputs made from the items after the position, handed out.
+        handed: u64,
+    },
     /// A stream operator that gives its items again stopped after giving
     /// `items` items, in the way `how` says.
-    Stopped { at: String, items: u64, how: Ending },
+    Stopped {
+        /// The call's key.
+        at: String,
+        /// How many items it gave.
+        items: u64,
+        /// How it stopped.
+        how: Ending,
+    },
     /// The `timeout` at `at` decided this for one run of the operators it
     /// applies to, such as `pipe[2].timeout@0`. A replay takes the decision
     /// from here and does not ask the clock again.
-    Timed { at: String, timing: Timing },
+    Timed {
+        /// The scope of the run of the `timeout`.
+        at: String,
+        /// What it decided.
+        timing: Timing,
+    },
 }
 
 /// What a `timeout` decided for one run of the operators it applies to.
@@ -141,7 +185,12 @@ pub enum Ending {
     /// It ended with this value.
     Ended(Value),
     /// It failed this way.
-    Failed { code: String, message: String },
+    Failed {
+        /// The failure's code.
+        code: String,
+        /// The failure's message.
+        message: String,
+    },
     /// The run stopped reading it partway, because a `catchError` or `finalize`
     /// took over the rest of the item's work.
     Abandoned,
@@ -267,6 +316,10 @@ impl Entry {
     }
 
     /// Read an entry written by [`Entry::to_json`].
+    ///
+    /// # Errors
+    ///
+    /// The [`EntryError`] that says what in `v` is not an entry.
     pub fn from_json(v: &Value) -> Result<Entry, EntryError> {
         let Some(map) = v.as_object() else {
             return Err(EntryError::NotAMap);

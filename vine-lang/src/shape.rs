@@ -135,12 +135,19 @@ pub enum FitError {
 /// A simple field type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Ty {
+    /// Any text, empty included.
     Text,
+    /// Non-empty text.
     Id,
+    /// A whole number.
     Int,
+    /// `true` or `false`.
     Bool,
+    /// Any map.
     Object,
+    /// Any list.
     List,
+    /// Anything, null included.
     Any,
 }
 
@@ -189,7 +196,9 @@ impl fmt::Display for Ty {
 /// One field of a shape.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Field {
+    /// The type its value must have.
     pub ty: Ty,
+    /// Whether it must be present and not null.
     pub required: bool,
 }
 
@@ -235,15 +244,21 @@ impl Shape {
         self
     }
 
+    /// The field of this name, if the shape lists it.
     pub fn field(&self, name: &str) -> Option<&Field> {
         self.fields.get(name)
     }
 
+    /// Whether the shape accepts fields it does not list.
     pub fn is_open(&self) -> bool {
         self.open
     }
 
     /// Parse a shape written in a vine document.
+    ///
+    /// # Errors
+    ///
+    /// The [`ShapeError`] that says what in `v` is not a shape.
     pub fn parse(v: &Value) -> Result<Shape, ShapeError> {
         let Some(map) = v.as_object() else {
             return Err(ShapeError::NotAMap { found: kind(v) });
@@ -275,6 +290,10 @@ impl Shape {
     }
 
     /// Check a concrete value against the shape.
+    ///
+    /// # Errors
+    ///
+    /// The [`Misfit`] that says how `v` does not fit.
     pub fn check(&self, v: &Value) -> Result<(), Misfit> {
         let Some(map) = v.as_object() else {
             return Err(Misfit::NotAMap { found: kind(v) });
@@ -309,6 +328,10 @@ impl Shape {
     }
 
     /// Whether every value of this shape is sure to fit `target`.
+    ///
+    /// # Errors
+    ///
+    /// The [`FitError`] that names a field or openness that may not fit.
     pub fn fits_into(&self, target: &Shape) -> Result<(), FitError> {
         if self.open && !target.open {
             return Err(FitError::Open);
@@ -352,6 +375,10 @@ impl Shape {
     /// Check an unresolved template as far as is knowable before running:
     /// field names, required fields, and the types of literal values.
     /// References are checked at run time, once resolved.
+    ///
+    /// # Errors
+    ///
+    /// The [`Misfit`] that says how a literal part does not fit.
     pub fn check_template(&self, t: &Template) -> Result<(), Misfit> {
         let fields = match t {
             Template::Ref(_) => return Ok(()),
