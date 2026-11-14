@@ -1,0 +1,20 @@
+# Stop an agent and remove the working copy it ran in. A helper: no move
+# starts it, and other vines of the trellis run it with `use`.
+#
+# The agent is stopped first. If that fails, the working copy stays, so
+# nothing is removed from under an agent that is still running. Both acts
+# are safe to run twice: stopping an agent that is not running, or
+# removing a working copy that is not there, is not a failure.
+vine: job_teardown
+input: { session: text, tree: text }
+outputs:
+  torn_down: { tree: text }
+  failed: { reason: text }
+pipe:
+  - tap: agent.stop
+    with: { session: $item.session }
+  - tap: git.worktree_remove
+    with: { path: $item.tree }
+  - emit: { to: torn_down, with: { tree: $item.tree } }
+  - catch:
+      - emit: { to: failed, with: { reason: $item.error.message } }

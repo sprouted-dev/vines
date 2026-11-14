@@ -1,0 +1,28 @@
+# Undo a launch whose output Terra abandoned, because a fact the launch
+# read changed while `job_launch` ran. The `abandoned` event carries the
+# output as `work`.
+#
+# A `started` output means a working copy and a running agent exist, so
+# tear both down. Any other output, such as `failed`, left nothing behind:
+# `job_launch` cleans up after itself when it fails.
+vine: job_launch_undo
+input: { job: id, output: text, work: object }
+outputs:
+  undone: { job: id, tree: text }
+  nothing_to_undo: { job: id, output: text }
+  failed: { job: id, reason: text }
+pipe:
+  - branch:
+      on: $item.output
+      cases:
+        started:
+          - use: job_teardown
+            with: { session: $item.work.session, tree: $item.work.tree }
+            into: teardown
+            on:
+              torn_down:
+                - emit: { to: undone, with: { job: $item.job, tree: $item.teardown.tree } }
+              failed:
+                - emit: { to: failed, with: { job: $item.job, reason: $item.teardown.reason } }
+      else:
+        - emit: { to: nothing_to_undo, with: { job: $item.job, output: $item.output } }

@@ -1,30 +1,62 @@
-# Launch every job of a plan that can start now, two at a time. This vine
-# runs `job_launch` as one of its stages. It is one run: nothing between
-# the two vines is seen from outside. Use it where nobody else needs to
-# hear each launch being asked for.
+# Launch every job of a plan, one at a time, by pressing the `launch`
+# move for each. This vine does not run `job_launch` itself: Terra checks
+# the move's gates for each job, builds `job_launch`'s input from the
+# job's facts, and lands each output of `job_launch` as an event before
+# this vine hears of it. So the vine passes only the job's id.
+#
+# `move.launch` is a stream act that Terra registers. It gives one item
+# per output of the inner vine, `{ output, event, landed, payload }`, and
+# ends with `{ status }`: `done`, `failed` with a `reason`, or `refused`
+# with the `gate` that refused it. A refused job is data here, not a
+# failure, so the jobs after it still go on.
+#
+# `request` is the id of this vine's own press. Terra builds each inner
+# press's id from it, so after a restart the same press attaches to the
+# first and the job is not launched twice.
 vine: plan_launch_all
-input: { plan: id, plan_branch: text, jobs: list }
+input: { plan: id, request: text, jobs: list }
 outputs:
   launched: { plan: id, job: id, session: text }
   not_launched: { plan: id, job: id, reason: text }
+  refused: { plan: id, job: id, gate: text }
+  done: { plan: id, jobs: list }
 pipe:
   - split: $item.jobs
     into: job
-  - filter: $item.job.state == "ready"
-  - filter: $item.job.waiting_on == 0
-  - each:
-      overlap: merge
-      at_once: 2
-      do:
-        - use: job_launch
-          with: { job: $item.job.id, plan_branch: $item.plan_branch, brief: $item.job.brief }
-          into: result
-          on:
-            started:
-              - emit:
-                  to: launched
-                  with: { plan: $item.plan, job: $item.job.id, session: $item.result.session }
-            failed:
-              - emit:
-                  to: not_launched
-                  with: { plan: $item.plan, job: $item.job.id, reason: $item.result.reason }
+  - call: move.launch
+    with: { request: $item.request, job: $item.job }
+    into: pressed
+    end: ended
+  - fork:
+      # What `job_launch` emitted, once Terra landed it. An output Terra
+      # abandoned has `landed: false`, and the cleanup vine answers it.
+      - - filter: $item.pressed.landed
+        - branch:
+            on: $item.pressed.output
+            cases:
+              started:
+                - emit:
+                    to: launched
+                    with: { plan: $item.plan, job: $item.job, session: $item.pressed.payload.session }
+              failed:
+                - emit:
+                    to: not_launched
+                    with: { plan: $item.plan, job: $item.job, reason: $item.pressed.payload.reason }
+      # How the press ended. A refusal names the gate.
+      - - filter: $item.ended
+        - branch:
+            on: $item.ended.status
+            cases:
+              refused:
+                - emit:
+                    to: refused
+                    with: { plan: $item.plan, job: $item.job, gate: $item.ended.gate }
+              failed:
+                - emit:
+                    to: not_launched
+                    with: { plan: $item.plan, job: $item.job, reason: $item.ended.reason }
+  # Only each job's end item goes on, and the last of them says all are
+  # done.
+  - filter: $item.ended
+  - last
+  - emit: { to: done, with: { plan: $item.plan, jobs: $item.jobs } }

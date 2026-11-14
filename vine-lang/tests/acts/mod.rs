@@ -24,6 +24,10 @@ pub struct World {
 struct State {
     log: Vec<String>,
     trees: BTreeSet<String>,
+    /// Running agents: session id to the directory it runs in.
+    agents: BTreeMap<String, String>,
+    /// How many agents were ever started, for the next session id.
+    started: u64,
     fail: BTreeMap<String, OpError>,
     hooks: BTreeMap<String, Hook>,
 }
@@ -71,6 +75,24 @@ impl World {
     /// The working copies that exist now.
     pub fn trees(&self) -> Vec<String> {
         self.state.lock().unwrap().trees.iter().cloned().collect()
+    }
+
+    /// The sessions of the agents running now.
+    pub fn agents(&self) -> Vec<String> {
+        self.state.lock().unwrap().agents.keys().cloned().collect()
+    }
+
+    /// Start an agent in `dir`, or give the session of the one running
+    /// there, so starting twice in one directory starts one agent.
+    fn start_agent(&self, dir: &str) -> String {
+        let mut s = self.state.lock().unwrap();
+        if let Some((id, _)) = s.agents.iter().find(|(_, d)| *d == dir) {
+            return id.clone();
+        }
+        s.started += 1;
+        let id = format!("session-{}", s.started);
+        s.agents.insert(id.clone(), dir.to_owned());
+        id
     }
 
     pub fn add_tree(&self, path: &str) {
@@ -238,8 +260,28 @@ pub fn registry(world: &Arc<World>) -> Registry {
         move |v, _cx| {
             let w = w.clone();
             async move {
-                w.run("agent.start", &text(&v, "dir"))?;
-                Ok(json!({ "id": "session-1" }))
+                let dir = text(&v, "dir");
+                w.run("agent.start", &dir)?;
+                Ok(json!({ "id": w.start_agent(&dir) }))
+            }
+        },
+    )
+    .unwrap();
+
+    // Stop an agent by its session. Stopping one that is not running is
+    // not a failure, so it is safe to run twice.
+    let w = world.clone();
+    reg.register_act(
+        OperatorSpec::new("agent.stop")
+            .settings(Shape::new().required("session", Ty::Text))
+            .touches(["agent"]),
+        move |v, _cx| {
+            let w = w.clone();
+            async move {
+                let session = text(&v, "session");
+                w.run("agent.stop", &session)?;
+                w.state.lock().unwrap().agents.remove(&session);
+                Ok(json!({}))
             }
         },
     )

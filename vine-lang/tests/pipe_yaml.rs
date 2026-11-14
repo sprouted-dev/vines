@@ -559,44 +559,42 @@ fn on_goes_only_with_use_and_is_a_map_of_outputs() {
 
 // ------------------------------------------------- one vine runs another
 
-/// A registry that holds `job_launch`, and `plan_launch_all` built on it.
-fn launch_all(world: &Arc<World>) -> Pipe {
+/// A registry that holds the helper `job_teardown`, and `job_launch_undo`
+/// built on it.
+fn undo(world: &Arc<World>) -> Pipe {
     let mut reg = registry(world);
-    let launch = reg.load_pipe(&text("job_launch")).unwrap();
-    reg.add_vine(launch).unwrap();
-    reg.load_pipe(&text("plan_launch_all")).unwrap()
+    let teardown = reg.load_pipe(&text("job_teardown")).unwrap();
+    reg.add_vine(teardown).unwrap();
+    reg.load_pipe(&text("job_launch_undo")).unwrap()
 }
 
-fn plan(jobs: Value) -> Value {
-    json!({ "plan": "p-1", "plan_branch": "plan/p-1", "jobs": jobs })
-}
-
-fn ready(id: &str) -> Value {
-    json!({ "id": id, "state": "ready", "waiting_on": 0, "brief": "work" })
+fn abandoned(output: &str) -> Value {
+    json!({
+        "job": "j-1",
+        "output": output,
+        "work": { "job": "j-1", "session": "session-9", "tree": "/trees/j-1" },
+    })
 }
 
 #[tokio::test]
-async fn plan_launch_all_launches_every_job_that_can_start() {
+async fn job_launch_undo_runs_its_helper_to_stop_the_agent_and_remove_the_tree() {
     let world = World::new();
-    let vine = launch_all(&world);
-    let jobs = json!([
-        ready("j-1"),
-        { "id": "j-2", "state": "ready", "waiting_on": 1, "brief": "work" },
-        ready("j-3"),
-        { "id": "j-4", "state": "done", "waiting_on": 0, "brief": "work" },
-    ]);
-    let out = vine.run_one(plan(jobs)).await.unwrap();
-    let mut got: Vec<(&str, &Value)> = out
-        .iter()
-        .map(|o| (o.name.as_str(), &o.payload["job"]))
-        .collect();
-    got.sort_by_key(|(_, job)| job.to_string());
+    world.add_tree("/trees/j-1");
+    let vine = undo(&world);
+    let out = one(&vine, abandoned("started")).await;
     assert_eq!(
-        got,
-        [("launched", &json!("j-1")), ("launched", &json!("j-3"))]
+        out,
+        (
+            "undone".into(),
+            json!({ "job": "j-1", "tree": "/trees/j-1" })
+        )
     );
-    assert_eq!(world.trees(), ["/trees/j-1", "/trees/j-3"]);
-    // It reaches what `job_launch` reaches.
+    assert_eq!(
+        world.log(),
+        ["agent.stop session-9", "git.worktree_remove /trees/j-1"]
+    );
+    assert!(world.trees().is_empty());
+    // It reaches what `job_teardown` reaches.
     assert_eq!(
         vine.reach().iter().map(String::as_str).collect::<Vec<_>>(),
         ["agent", "git"]
@@ -604,39 +602,43 @@ async fn plan_launch_all_launches_every_job_that_can_start() {
 }
 
 #[tokio::test]
-async fn plan_launch_all_reports_a_job_that_did_not_launch_and_launches_the_rest() {
+async fn job_launch_undo_reports_a_helper_that_failed_and_keeps_the_tree() {
     let world = World::new();
-    world.fail("agent.start", "unavailable", "no agent host");
-    let vine = launch_all(&world);
-    let out = vine
-        .run_one(plan(json!([ready("j-1"), ready("j-2")])))
-        .await
-        .unwrap();
-    let mut names: Vec<&str> = out.iter().map(|o| o.name.as_str()).collect();
-    names.sort_unstable();
-    assert_eq!(names, ["launched", "not_launched"]);
-    let failed = out.iter().find(|o| o.name == "not_launched").unwrap();
-    assert_eq!(failed.payload["reason"], "no agent host");
-    // The job that did not launch left no working copy behind.
-    assert_eq!(world.trees().len(), 1);
+    world.add_tree("/trees/j-1");
+    world.fail("agent.stop", "unavailable", "no agent host");
+    let out = one(&undo(&world), abandoned("started")).await;
+    assert_eq!(
+        out,
+        (
+            "failed".into(),
+            json!({ "job": "j-1", "reason": "no agent host" })
+        )
+    );
+    assert_eq!(world.trees(), ["/trees/j-1"]);
 }
 
 #[tokio::test]
-async fn plan_launch_all_emits_nothing_for_a_plan_with_nothing_to_start() {
+async fn job_launch_undo_has_nothing_to_undo_for_an_output_that_made_nothing() {
     let world = World::new();
-    let out = launch_all(&world).run_one(plan(json!([]))).await.unwrap();
-    assert!(out.is_empty());
+    let out = one(&undo(&world), abandoned("failed")).await;
+    assert_eq!(
+        out,
+        (
+            "nothing_to_undo".into(),
+            json!({ "job": "j-1", "output": "failed" })
+        )
+    );
     assert!(world.log().is_empty());
 }
 
 #[test]
-fn plan_launch_all_cannot_load_before_the_vine_it_uses() {
+fn job_launch_undo_cannot_load_before_the_vine_it_uses() {
     let world = World::new();
     let err = registry(&world)
-        .load_pipe(&text("plan_launch_all"))
+        .load_pipe(&text("job_launch_undo"))
         .unwrap_err();
     assert!(
-        matches!(err, LoadError::UnknownVine { ref name, .. } if name == "job_launch"),
+        matches!(err, LoadError::UnknownVine { ref name, .. } if name == "job_teardown"),
         "{err}"
     );
 }
