@@ -174,6 +174,7 @@ mod book;
 mod check;
 mod drive;
 mod flow;
+mod stream_call;
 mod tag;
 mod unit;
 #[cfg(feature = "yaml")]
