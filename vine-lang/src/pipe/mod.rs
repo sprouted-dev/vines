@@ -171,6 +171,7 @@
 //! a month keeps every line until its item is done.
 
 mod book;
+mod call_sites;
 mod check;
 mod drive;
 mod flow;
@@ -556,7 +557,24 @@ pub struct Pipe {
     unresumable: Option<String>,
     /// Why the vine cannot run from a saved position, if it cannot.
     unpositioned: Option<String>,
+    /// The stream act calls saved item by item, and why.
+    saves_every_item: Vec<SavesEveryItem>,
+    /// Some stream act call, here or in a vine this one uses, is saved by
+    /// position.
+    by_position: bool,
     transform: Transform,
+}
+
+/// A stream act call that a saved run saves item by item, so what the
+/// caller keeps grows with every item it gives, and why.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SavesEveryItem {
+    /// The path of the `call` stage, such as `pipe[1]`.
+    pub path: String,
+    /// The stream act it calls.
+    pub act: String,
+    /// Why it cannot be saved by position.
+    pub why: String,
 }
 
 impl std::fmt::Debug for Pipe {
@@ -595,6 +613,16 @@ impl Pipe {
     /// Whether [`Pipe::run_from`] can run this vine.
     pub fn resumable_from_position(&self) -> bool {
         self.unresumable.is_none() && self.unpositioned.is_none()
+    }
+
+    /// The stream act calls that a saved run saves item by item, with the
+    /// reason for each: the act does not say it gives its items again, or
+    /// a stage after it could not be rebuilt from a later item. Calls in
+    /// vines this one runs by `use` are named by the `use` stage's path,
+    /// such as `pipe[2]>job_run:pipe[1]`. Every other stream act call is
+    /// saved by position, and what the caller keeps for it stays bounded.
+    pub fn saves_every_item(&self) -> &[SavesEveryItem] {
+        &self.saves_every_item
     }
 
     fn refused(&self, why: &str) -> RunError {

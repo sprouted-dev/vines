@@ -76,8 +76,12 @@ impl OpContext {
         self
     }
 
-    /// For a stream act: how many items this same call gave in an earlier
-    /// run that was saved. Start after them. It is 0 on a fresh start.
+    /// For a stream act: give the items of this same call from the one
+    /// after this many. It is 0 on a fresh start. For an act registered
+    /// with [`Registry::register_stream_act`] it is the number of items the
+    /// call gave in an earlier run that was saved. For one registered with
+    /// [`Registry::register_replayable_stream_act`] it can be fewer: the
+    /// items through it are fully done, and the act gives the rest again.
     pub fn resume_from(&self) -> u64 {
         self.resume_from
     }
@@ -158,10 +162,23 @@ pub type ActStream = BoxStream<'static, Result<Part, OpError>>;
 
 pub(crate) type StreamHandler = Arc<dyn Fn(Value, OpContext) -> ActStream + Send + Sync>;
 
+/// What a stream act can do when a run that was saved asks it for its
+/// items again.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Gives {
+    /// It gives only the items after those it gave, so the run saves every
+    /// item it gives.
+    OnlyNew,
+    /// It can give its items again from any item it gave, so the run saves
+    /// only how far it got.
+    Again,
+}
+
 #[derive(Clone)]
 pub(crate) struct RegisteredStreamAct {
     pub spec: Arc<OperatorSpec>,
     pub handler: StreamHandler,
+    pub gives: Gives,
 }
 
 pub(crate) type Handler =
@@ -327,6 +344,47 @@ impl Registry {
         F: Fn(Value, OpContext) -> S + Send + Sync + 'static,
         S: Stream<Item = Result<Part, OpError>> + Send + 'static,
     {
+        self.insert_stream_act(spec, Gives::OnlyNew, f)
+    }
+
+    /// Register a stream act that can give its items again from any item
+    /// it gave, such as an agent host that stores every line a session
+    /// wrote. A saved run then keeps how far it got instead of every item,
+    /// so what the caller keeps does not grow with the stream.
+    ///
+    /// The act makes a promise: called again for the same input with
+    /// [`OpContext::resume_from`] set to `n`, it gives the same items it
+    /// gave the first time, from item `n + 1` on, and then goes on as it
+    /// would have. `n` can be any number up to the items it gave. A run
+    /// catches an act that gives fewer items again than it gave before it
+    /// stopped. It cannot see an act that gives other items.
+    ///
+    /// Where a vine's stages could not be rebuilt from a later item, the
+    /// run saves every item of the act instead.
+    /// [`Pipe::saves_every_item`](crate::Pipe::saves_every_item) says
+    /// where and why.
+    pub fn register_replayable_stream_act<F, S>(
+        &mut self,
+        spec: OperatorSpec,
+        f: F,
+    ) -> Result<(), RegistryError>
+    where
+        F: Fn(Value, OpContext) -> S + Send + Sync + 'static,
+        S: Stream<Item = Result<Part, OpError>> + Send + 'static,
+    {
+        self.insert_stream_act(spec, Gives::Again, f)
+    }
+
+    fn insert_stream_act<F, S>(
+        &mut self,
+        spec: OperatorSpec,
+        gives: Gives,
+        f: F,
+    ) -> Result<(), RegistryError>
+    where
+        F: Fn(Value, OpContext) -> S + Send + Sync + 'static,
+        S: Stream<Item = Result<Part, OpError>> + Send + 'static,
+    {
         self.check_act(&spec)?;
         let handler: StreamHandler = Arc::new(move |v, cx| f(v, cx).boxed());
         self.stream_acts.insert(
@@ -334,6 +392,7 @@ impl Registry {
             RegisteredStreamAct {
                 spec: Arc::new(spec),
                 handler,
+                gives,
             },
         );
         Ok(())

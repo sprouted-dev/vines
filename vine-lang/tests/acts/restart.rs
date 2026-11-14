@@ -1,8 +1,9 @@
-//! A caller that runs a vine from a saved position, kills it at chosen
-//! points, and restarts it from what it saved, through JSON each time.
+//! A caller that runs a vine from a saved position, or from a journal,
+//! kills it at chosen points, and restarts it from what it saved, through
+//! JSON each time.
 
 use futures::{stream, StreamExt};
-use vine_lang::{Bookmark, Pipe, Progress, RunError, Value};
+use vine_lang::{Bookmark, Event, Journal, Pipe, Progress, RunError, Value};
 
 /// Everything a caller saw and kept over one or more runs.
 pub struct Caller {
@@ -13,6 +14,8 @@ pub struct Caller {
     pub throughs: Vec<u64>,
     /// The most lines the bookmark held at once.
     pub most: usize,
+    /// The largest the saved bookmark was, in bytes of JSON.
+    pub largest: usize,
 }
 
 impl Caller {
@@ -36,6 +39,7 @@ impl From<Bookmark> for Caller {
             outs: Vec::new(),
             throughs: Vec::new(),
             most: 0,
+            largest: 0,
         }
     }
 }
@@ -75,6 +79,7 @@ pub async fn run(vine: &Pipe, input: &[Value], caller: &mut Caller, kill: Option
         bookmark.record(&progress);
         caller.saved = bookmark.to_json();
         caller.most = caller.most.max(bookmark.len());
+        caller.largest = caller.largest.max(caller.saved.to_string().len());
         seen += 1;
         if Some(seen) == kill {
             return End::Killed {
@@ -142,4 +147,107 @@ pub fn assert_forward(throughs: &[u64]) {
         throughs.windows(2).all(|w| w[0] < w[1]),
         "the position went back or stood still: {throughs:?}"
     );
+}
+
+/// Everything a caller of `run_saved` saw and kept over one or more runs.
+#[derive(Default)]
+pub struct Keeper {
+    /// The journal, as a store would hold it.
+    pub saved: Value,
+    pub outs: Vec<(String, Value)>,
+    /// The most entries the journal held at once.
+    pub most: usize,
+    /// The largest the saved journal was, in bytes of JSON.
+    pub largest: usize,
+}
+
+impl Keeper {
+    pub fn new() -> Keeper {
+        Keeper {
+            saved: Journal::new().to_json(),
+            ..Keeper::default()
+        }
+    }
+
+    pub fn journal(&self) -> Journal {
+        Journal::from_json(&self.saved).unwrap()
+    }
+}
+
+/// Run `vine` once with `run_saved`, as a caller would: read the journal
+/// back from JSON, feed the whole input, and after every event record it
+/// and save the journal. Stop after `kill` events.
+pub async fn run_saved(
+    vine: &Pipe,
+    input: &[Value],
+    keeper: &mut Keeper,
+    kill: Option<usize>,
+) -> End {
+    let mut journal = keeper.journal();
+    let mut run = vine.run_saved(stream::iter(input.to_vec()), journal.clone());
+    let mut seen = 0;
+    while let Some(event) = run.next().await {
+        let event = match event {
+            Ok(e) => e,
+            Err(e) => return End::Failed(e),
+        };
+        if let Event::Output(o) = &event {
+            keeper.outs.push((o.name.clone(), o.payload.clone()));
+        }
+        journal.record(&event);
+        keeper.saved = journal.to_json();
+        keeper.most = keeper.most.max(journal.len());
+        keeper.largest = keeper.largest.max(keeper.saved.to_string().len());
+        seen += 1;
+        if Some(seen) == kill {
+            return End::Killed {
+                after_output: matches!(event, Event::Output(_)),
+            };
+        }
+    }
+    End::Ended
+}
+
+/// [`run_saved`] with kills after each count of events in `kills`, then
+/// to the end, as [`run_with_kills`] does for a bookmark. Gives how many
+/// outputs came twice because the kill fell between an output and the
+/// entry that records it.
+pub async fn run_saved_with_kills(
+    vine: impl Fn() -> Pipe,
+    input: &[Value],
+    keeper: &mut Keeper,
+    kills: &[usize],
+) -> usize {
+    let mut repeats = 0;
+    let mut repeat_of: Option<usize> = None;
+    let plan = kills.iter().map(|&k| Some(k)).chain([None]);
+    for kill in plan {
+        let mark = keeper.outs.len();
+        let end = run_saved(&vine(), input, keeper, kill).await;
+        if let Some(at) = repeat_of.take() {
+            assert_eq!(
+                keeper.outs.get(mark),
+                keeper.outs.get(at),
+                "the output handed out before the kill comes again first"
+            );
+            keeper.outs.remove(mark);
+            repeats += 1;
+        }
+        match end {
+            End::Killed { after_output } => {
+                if after_output {
+                    repeat_of = Some(keeper.outs.len() - 1);
+                }
+            }
+            End::Ended => return repeats,
+            End::Failed(e) => panic!("kills {kills:?}: {e}"),
+        }
+    }
+    repeats
+}
+
+/// How many events an uninterrupted `run_saved` gives.
+pub async fn events_saved(vine: &Pipe, input: &[Value]) -> usize {
+    let run = vine.run_saved(stream::iter(input.to_vec()), Journal::new());
+    run.count().await
 }

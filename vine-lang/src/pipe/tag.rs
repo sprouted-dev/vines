@@ -9,10 +9,18 @@
 //!
 //! An output's tag is dropped when the run hands the output out, so an item
 //! is not done until its outputs have been handed out.
+//!
+//! The same idea works one level down. In a saved run, each item a stream
+//! act that gives its items again gives gets a tag of its own, numbered
+//! from 1 within that call and counted by a ledger of the call's own. It
+//! holds the tag of the value the act was given, so that value is not done
+//! while any item the act gave is in flight. When the call's ledger moves,
+//! it says so on [`Moves`], and the run saves how far the call got.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::{Arc, Mutex};
 
+use super::book::Key;
 use super::flow::lock;
 
 /// The input items a value came from. Empty in a run that does not save
@@ -21,12 +29,19 @@ use super::flow::lock;
 pub(super) struct Tag(Option<Arc<Hold>>);
 
 struct Hold {
-    /// The first and last input item this value came from.
+    /// The first and last item this value came from, as `ledger` counts
+    /// them: input items, or the items one stream act call gave.
     first: u64,
     last: u64,
     ledger: Arc<Mutex<Ledger>>,
-    /// For a batch: the tags of the values in it. Empty for an input item.
+    /// For a batch: the tags of the values in it. Empty for one item.
     parts: Vec<Tag>,
+    /// For an item a stream act call gave, or a batch of them: the call.
+    call: Option<Arc<Key>>,
+    /// For an item a stream act call gave: the tag of the value the call
+    /// was given. It is held, never read, so that value is not done while
+    /// this item is in flight.
+    _up: Tag,
 }
 
 impl Drop for Hold {
@@ -45,27 +60,50 @@ impl Tag {
             last: n,
             ledger: ledger.clone(),
             parts: Vec::new(),
+            call: None,
+            _up: Tag::default(),
+        })))
+    }
+
+    /// The tag of item `n` that the stream act call `call` gave, counted by
+    /// the call's `ledger`. `up` is the tag of the value the call was
+    /// given.
+    pub(super) fn given(n: u64, ledger: &Arc<Mutex<Ledger>>, call: &Arc<Key>, up: &Tag) -> Tag {
+        Tag(Some(Arc::new(Hold {
+            first: n,
+            last: n,
+            ledger: ledger.clone(),
+            parts: Vec::new(),
+            call: Some(call.clone()),
+            _up: up.clone(),
         })))
     }
 
     /// The tag of a batch made of values with these tags. The items in it
-    /// are done together: the position never stops between them.
+    /// are done together: the position never stops between them. The
+    /// batch is counted by the ledger of its last value. The checker keeps
+    /// the items of two stream act calls out of one batch.
     pub(super) fn batch(parts: Vec<Tag>) -> Tag {
-        let holds: Vec<&Arc<Hold>> = parts.iter().filter_map(|t| t.0.as_ref()).collect();
-        let (Some(first), Some(last), Some(any)) = (
-            holds.iter().map(|h| h.first).min(),
-            holds.iter().map(|h| h.last).max(),
-            holds.first(),
-        ) else {
+        let Some(newest) = parts.iter().rev().find_map(|t| t.0.as_ref()) else {
             return Tag::default();
         };
-        let ledger = any.ledger.clone();
+        let ledger = newest.ledger.clone();
+        let call = newest.call.clone();
+        let holds: Vec<&Arc<Hold>> = parts
+            .iter()
+            .filter_map(|t| t.0.as_ref())
+            .filter(|h| Arc::ptr_eq(&h.ledger, &ledger))
+            .collect();
+        let first = holds.iter().map(|h| h.first).min().unwrap_or(newest.first);
+        let last = holds.iter().map(|h| h.last).max().unwrap_or(newest.last);
         lock(&ledger).join(first, last);
         Tag(Some(Arc::new(Hold {
             first,
             last,
             ledger,
             parts,
+            call,
+            _up: Tag::default(),
         })))
     }
 
@@ -79,8 +117,43 @@ impl Tag {
     /// The input item a journal line for this value belongs to: the last
     /// item it came from. 0 in a run that does not save its position.
     pub(super) fn item_number(&self) -> u64 {
-        self.0.as_ref().map_or(0, |h| h.last)
+        match &self.0 {
+            None => 0,
+            Some(h) => match &h.call {
+                Some(call) => call.item,
+                None => h.last,
+            },
+        }
     }
+
+    /// Where the keys of acts run for this value start. Empty unless the
+    /// value came from an item a stream act gives again: then it is that
+    /// call's key and the item's number, such as `pipe[1]#0@7/`, so the
+    /// keys of item 7 are the same whichever item a restart begins at.
+    pub(super) fn scope(&self) -> String {
+        match self.stream() {
+            Some((call, n)) => format!("{}@{n}/", call.at),
+            None => String::new(),
+        }
+    }
+
+    /// The stream act call this value came from, and the number of its
+    /// item, when the call gives its items again.
+    pub(super) fn stream(&self) -> Option<(Arc<Key>, u64)> {
+        let hold = self.0.as_ref()?;
+        Some((hold.call.clone()?, hold.last))
+    }
+}
+
+/// Where a stream act call's ledger says it moved: the call, and the
+/// number of its items now fully done.
+pub(super) type Moves = Arc<Mutex<VecDeque<(Arc<Key>, u64)>>>;
+
+/// Who to tell when a stream act call's ledger moves.
+#[derive(Debug)]
+struct Notify {
+    call: Arc<Key>,
+    moves: Moves,
 }
 
 /// Which input items are done, and the position: every item through it is
@@ -94,6 +167,8 @@ pub(super) struct Ledger {
     /// Runs of items that are done together, first to last. They never
     /// overlap and all lie past the position.
     joins: BTreeMap<u64, u64>,
+    /// For the ledger of a stream act call: where to say it moved.
+    notify: Option<Notify>,
 }
 
 impl Ledger {
@@ -105,14 +180,29 @@ impl Ledger {
         }
     }
 
+    /// A ledger for the items the stream act call `call` gives, when the
+    /// items through `position` are done. It says on `moves` each time it
+    /// moves.
+    pub(super) fn of_call(position: u64, call: Arc<Key>, moves: Moves) -> Ledger {
+        Ledger {
+            position,
+            notify: Some(Notify { call, moves }),
+            ..Ledger::default()
+        }
+    }
+
     pub(super) fn position(&self) -> u64 {
         self.position
     }
 
     fn done(&mut self, n: u64) {
         if n > self.position {
+            let before = self.position;
             self.done.insert(n);
             self.advance();
+            if let Some(notify) = self.notify.as_ref().filter(|_| self.position > before) {
+                lock(&notify.moves).push_back((notify.call.clone(), self.position));
+            }
         }
     }
 

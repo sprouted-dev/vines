@@ -8,7 +8,7 @@ mod acts;
 use std::sync::Arc;
 use std::time::Duration;
 
-use acts::agent::{job, job_run_pipe, job_run_registry, Host, Script};
+use acts::agent::{expected, job, job_run_pipe, job_run_registry, Host, Script};
 use acts::World;
 use futures::{stream, StreamExt};
 use vine_lang::{json, Entry, Event, Journal, Output, Pipe, RunError, Value};
@@ -68,40 +68,6 @@ async fn run(
         }
     }
     Ok(true)
-}
-
-/// What an uninterrupted run of `lines` lines that ends with `end` emits.
-fn expected(lines: u64, end: &str) -> Vec<(String, Value)> {
-    let mut out = Vec::new();
-    for seq in 1..=lines {
-        out.push((
-            "log_line".into(),
-            json!({ "job": "job-1", "seq": seq, "text": format!("line {seq}") }),
-        ));
-        if seq % 50 == 0 {
-            out.push((
-                "summary".into(),
-                json!({ "job": "job-1", "lines": seq, "text": format!("50 lines, last: line {seq}") }),
-            ));
-        }
-    }
-    if !lines.is_multiple_of(50) {
-        out.push((
-            "summary".into(),
-            json!({ "job": "job-1", "lines": lines, "text": format!("{} lines, last: line {lines}", lines % 50) }),
-        ));
-    }
-    out.push(match end {
-        "finished" => (
-            "implemented".into(),
-            json!({ "job": "job-1", "commit": "abc123" }),
-        ),
-        status => (
-            "stopped".into(),
-            json!({ "job": "job-1", "reason": status }),
-        ),
-    });
-    out
 }
 
 fn pairs(outs: &[Output]) -> Vec<(String, Value)> {

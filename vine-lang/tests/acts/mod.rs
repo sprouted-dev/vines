@@ -30,6 +30,28 @@ struct State {
 
 type Hook = Arc<dyn Fn() + Send + Sync>;
 
+/// How a fake stream act is registered: as one that gives only the items
+/// after those it gave, or as one that gives its items again from any
+/// point, the way a host that stores every item can.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Gives {
+    OnlyNew,
+    Again,
+}
+
+/// Register a stream act the way `gives` says.
+pub fn register_stream_act<F, S>(reg: &mut Registry, gives: Gives, spec: OperatorSpec, f: F)
+where
+    F: Fn(Value, vine_lang::OpContext) -> S + Send + Sync + 'static,
+    S: futures::Stream<Item = Result<vine_lang::Part, OpError>> + Send + 'static,
+{
+    match gives {
+        Gives::OnlyNew => reg.register_stream_act(spec, f),
+        Gives::Again => reg.register_replayable_stream_act(spec, f),
+    }
+    .unwrap();
+}
+
 impl World {
     pub fn new() -> Arc<World> {
         Arc::new(World::default())

@@ -8,7 +8,8 @@
 //!   replaces it.
 //! - `feed.pages { seq, pages }` is a stream act: it gives `{ page }` for
 //!   each page of one event, from the page after `resume_from`, and ends
-//!   with `{ pages }`.
+//!   with `{ pages }`. Every page can be fetched again, so it can be
+//!   registered as a stream act that gives its items again.
 //!
 //! Every call is a line in the world's log, such as `archive.put 3`,
 //! `backup.store 1-5`, `feed.pages 3 from 0` or, after a restart,
@@ -20,14 +21,25 @@ use futures::stream;
 use vine_lang::pipe::{call, catch, collect, emit_with, filter, fork, pipe, PipeDef, Stage};
 use vine_lang::{json, OpError, OperatorSpec, Part, Registry, Shape, Ty, Value};
 
-use super::World;
+use super::{register_stream_act, Gives, World};
 
 fn seq(v: &Value) -> u64 {
     v["seq"].as_u64().unwrap_or_default()
 }
 
-/// A registry with the three feed acts on `world`.
+/// A registry with the three feed acts on `world`. `feed.pages` gives
+/// only the pages after those it gave, so a saved run saves every page.
 pub fn feed_registry(world: &Arc<World>) -> Registry {
+    feed_registry_giving(world, Gives::OnlyNew)
+}
+
+/// The feed acts, with `feed.pages` registered as a stream act that gives
+/// its pages again from any point, so a saved run saves how far it got.
+pub fn feed_registry_again(world: &Arc<World>) -> Registry {
+    feed_registry_giving(world, Gives::Again)
+}
+
+pub fn feed_registry_giving(world: &Arc<World>, gives: Gives) -> Registry {
     let mut reg = Registry::new();
 
     let w = world.clone();
@@ -84,7 +96,9 @@ pub fn feed_registry(world: &Arc<World>) -> Registry {
     .unwrap();
 
     let w = world.clone();
-    reg.register_stream_act(
+    register_stream_act(
+        &mut reg,
+        gives,
         OperatorSpec::new("feed.pages")
             .settings(
                 Shape::new()
@@ -110,8 +124,7 @@ pub fn feed_registry(world: &Arc<World>) -> Registry {
             parts.push(Ok(Part::End(json!({ "pages": pages }))));
             stream::iter(parts)
         },
-    )
-    .unwrap();
+    );
 
     reg
 }

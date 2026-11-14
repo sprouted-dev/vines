@@ -2,9 +2,12 @@
 //!
 //! The host owns its sessions, keyed by `key`. A session makes lines on
 //! tokio's clock in a task of its own, whether or not a vine reads them,
-//! and then ends with a status. `agent.run` starts a session when there is
-//! none for the key and attaches to the one there is when there is. It
-//! gives the lines from the position the vine asks for, and then the end.
+//! and then ends with a status. The host stores every line a session
+//! wrote. `agent.run` starts a session when there is none for the key and
+//! attaches to the one there is when there is. It gives the lines from the
+//! position the vine asks for, which can be any line the session wrote,
+//! and then the end. So it can be registered as a stream act that gives
+//! its items again.
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
@@ -17,7 +20,7 @@ use vine_lang::pipe::{
 };
 use vine_lang::{json, OpError, OperatorSpec, Part, Registry, Shape, Ty, Value};
 
-use super::{registry, World};
+use super::{register_stream_act, registry, Gives, World};
 
 /// How a session the host starts will go.
 #[derive(Debug, Clone)]
@@ -30,6 +33,10 @@ pub struct Script {
     pub end: String,
     /// Lose the connection after this many lines are read: the read fails.
     pub lost_after: Option<u64>,
+    /// After a restart the host has only the first this many lines: an
+    /// attach gives no line past them and then ends. A host that breaks
+    /// its promise to give the same lines again.
+    pub forgets_after: Option<u64>,
 }
 
 impl Script {
@@ -39,6 +46,7 @@ impl Script {
             every: Duration::from_secs(1),
             end: end.into(),
             lost_after: None,
+            forgets_after: None,
         }
     }
 }
@@ -73,8 +81,14 @@ impl Host {
         sessions.get(key).map(|tx| tx.borrow().clone())
     }
 
-    /// Start the session for `key`, or attach to the one there is.
-    fn open(&self, world: &World, key: &str, from: u64) -> (watch::Receiver<Session>, Script) {
+    /// Start the session for `key`, or attach to the one there is. Says
+    /// which it did.
+    fn open(
+        &self,
+        world: &World,
+        key: &str,
+        from: u64,
+    ) -> (watch::Receiver<Session>, Script, bool) {
         let script = self
             .scripts
             .lock()
@@ -85,7 +99,7 @@ impl Host {
         let mut sessions = self.sessions.lock().unwrap();
         if let Some(tx) = sessions.get(key) {
             world.note(format!("agent.attach {key} from {from}"));
-            return (tx.subscribe(), script);
+            return (tx.subscribe(), script, true);
         }
         world.note(format!("agent.start {key}"));
         let tx = Arc::new(watch::Sender::new(Session::default()));
@@ -103,16 +117,29 @@ impl Host {
             }
             tx.send_modify(|s| s.status = Some(make.end.clone()));
         });
-        (rx, script)
+        (rx, script, false)
     }
 }
 
 /// `job_run`'s acts: the `git` fakes of [`registry`], `agent.run` on
-/// `host`, and the `summarize` operator.
+/// `host`, and the `summarize` operator. `agent.run` gives only the lines
+/// after those it gave, so a saved run saves every line.
 pub fn job_run_registry(world: &Arc<World>, host: &Arc<Host>) -> Registry {
+    job_run_registry_giving(world, host, Gives::OnlyNew)
+}
+
+/// `job_run`'s acts, with `agent.run` registered as a stream act that gives
+/// its lines again from any point, so a saved run saves how far it got.
+pub fn job_run_registry_again(world: &Arc<World>, host: &Arc<Host>) -> Registry {
+    job_run_registry_giving(world, host, Gives::Again)
+}
+
+pub fn job_run_registry_giving(world: &Arc<World>, host: &Arc<Host>, gives: Gives) -> Registry {
     let mut reg = registry(world);
     let (w, h) = (world.clone(), host.clone());
-    reg.register_stream_act(
+    register_stream_act(
+        &mut reg,
+        gives,
         OperatorSpec::new("agent.run")
             .settings(
                 Shape::new()
@@ -134,8 +161,12 @@ pub fn job_run_registry(world: &Arc<World>, host: &Arc<Host>) -> Registry {
         move |v, cx| {
             let key = v["key"].as_str().unwrap_or_default().to_owned();
             let from = cx.resume_from();
-            let (rx, script) = h.open(&w, &key, from);
+            let (rx, script, attached) = h.open(&w, &key, from);
             let start = usize::try_from(from).unwrap();
+            let kept = script
+                .forgets_after
+                .filter(|_| attached)
+                .map(|n| usize::try_from(n).unwrap());
             stream::unfold((rx, start, false), move |(mut rx, at, done)| {
                 let lost_after = script.lost_after;
                 async move {
@@ -149,7 +180,8 @@ pub fn job_run_registry(world: &Arc<World>, host: &Arc<Host>) -> Registry {
                         }
                         let next = {
                             let s = rx.borrow_and_update();
-                            if let Some(line) = s.lines.get(at) {
+                            let forgot = kept.is_some_and(|n| at >= n);
+                            if let Some(line) = s.lines.get(at).filter(|_| !forgot) {
                                 Some(Part::Item(line.clone()))
                             } else {
                                 s.status.as_ref().map(|status| {
@@ -172,8 +204,7 @@ pub fn job_run_registry(world: &Arc<World>, host: &Arc<Host>) -> Registry {
                 }
             })
         },
-    )
-    .unwrap();
+    );
     reg.register(
         OperatorSpec::new("summarize")
             .settings(Shape::new().required("items", Ty::List))
@@ -275,4 +306,38 @@ pub fn job_run_pipe() -> PipeDef {
 /// The input `job_run` takes.
 pub fn job() -> Value {
     json!({ "job": "job-1", "plan_branch": "plan/p-1", "brief": "do the work" })
+}
+
+/// What an uninterrupted run of `lines` lines that ends with `end` emits.
+pub fn expected(lines: u64, end: &str) -> Vec<(String, Value)> {
+    let mut out = Vec::new();
+    for seq in 1..=lines {
+        out.push((
+            "log_line".into(),
+            json!({ "job": "job-1", "seq": seq, "text": format!("line {seq}") }),
+        ));
+        if seq % 50 == 0 {
+            out.push((
+                "summary".into(),
+                json!({ "job": "job-1", "lines": seq, "text": format!("50 lines, last: line {seq}") }),
+            ));
+        }
+    }
+    if !lines.is_multiple_of(50) {
+        out.push((
+            "summary".into(),
+            json!({ "job": "job-1", "lines": lines, "text": format!("{} lines, last: line {lines}", lines % 50) }),
+        ));
+    }
+    out.push(match end {
+        "finished" => (
+            "implemented".into(),
+            json!({ "job": "job-1", "commit": "abc123" }),
+        ),
+        status => (
+            "stopped".into(),
+            json!({ "job": "job-1", "reason": status }),
+        ),
+    });
+    out
 }

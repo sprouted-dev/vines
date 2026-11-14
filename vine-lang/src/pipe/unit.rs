@@ -1,6 +1,6 @@
 //! An operator or act, ready to run for one item.
 
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use futures::future::BoxFuture;
 use futures::FutureExt;
@@ -9,6 +9,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::book::{Cx, Saved};
 use super::flow::{env_of, fatal, misfit, Fault, OpFault};
+use super::stream_call::ItemSaving;
 use super::tag::Tag;
 use super::Keep;
 use crate::error::RunError;
@@ -36,6 +37,9 @@ pub(super) struct Unit {
     pub(super) with: Template,
     pub(super) keep: Keep,
     pub(super) end: Option<String>,
+    /// For a stream act: how a call is saved. The checker sets it once it
+    /// has seen the stages after the act.
+    pub(super) saving: Arc<OnceLock<ItemSaving>>,
 }
 
 impl Unit {
@@ -88,7 +92,7 @@ impl Unit {
                         }
                         return outcome.map_err(|e| unit.failed(e, &item, &tag));
                     }
-                    Some(Saved::Stream { .. }) => {
+                    Some(Saved::Stream { .. } | Saved::Position { .. }) => {
                         return Err(misfit(format!(
                             "`{key}` was saved as a stream act, and `{}` is not one",
                             unit.spec.name

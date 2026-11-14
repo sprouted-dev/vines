@@ -97,6 +97,26 @@ pub enum Entry {
     Ended { at: String, value: Value },
     /// The caller was handed one output with this name.
     Emitted { output: String },
+    /// For a stream act that gives its items again: every item it gave
+    /// through number `items` is fully done, and `handed` outputs made
+    /// from the items after them were handed out. A later `Through` for
+    /// the same `at` replaces this one.
+    Through { at: String, items: u64, handed: u64 },
+    /// A stream act that gives its items again stopped after giving
+    /// `items` items, in the way `how` says.
+    Stopped { at: String, items: u64, how: Ending },
+}
+
+/// How a stream act that gives its items again stopped.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Ending {
+    /// It ended with this value.
+    Ended(Value),
+    /// It failed this way.
+    Failed { code: String, message: String },
+    /// The run stopped reading it partway, because a `catch` or `finalize`
+    /// took over the rest of the item's work.
+    Abandoned,
 }
 
 impl Entry {
@@ -118,6 +138,59 @@ impl Entry {
             Entry::Item { at, value } => json!({ "kind": "item", "at": at, "value": value }),
             Entry::Ended { at, value } => json!({ "kind": "ended", "at": at, "value": value }),
             Entry::Emitted { output } => json!({ "kind": "emitted", "output": output }),
+            Entry::Through { at, items, handed } => {
+                json!({ "kind": "through", "at": at, "items": items, "handed": handed })
+            }
+            Entry::Stopped { at, items, how } => {
+                let mut v = json!({ "kind": "stopped", "at": at, "items": items });
+                match how {
+                    Ending::Ended(value) => {
+                        v["how"] = json!("ended");
+                        v["value"] = value.clone();
+                    }
+                    Ending::Failed { code, message } => {
+                        v["how"] = json!("failed");
+                        v["code"] = json!(code);
+                        v["message"] = json!(message);
+                    }
+                    Ending::Abandoned => v["how"] = json!("abandoned"),
+                }
+                v
+            }
+        }
+    }
+
+    /// Where the act this entry is about stands, such as `pipe[1]#0`. An
+    /// [`Entry::Emitted`] names no act.
+    pub fn at(&self) -> Option<&str> {
+        match self {
+            Entry::Done { at, .. }
+            | Entry::Failed { at, .. }
+            | Entry::Started { at, .. }
+            | Entry::Item { at, .. }
+            | Entry::Ended { at, .. }
+            | Entry::Through { at, .. }
+            | Entry::Stopped { at, .. } => Some(at),
+            Entry::Emitted { .. } => None,
+        }
+    }
+
+    /// Whether `through`, an [`Entry::Through`], makes this entry useless:
+    /// it is an earlier `Through` for the same stream act, or it belongs to
+    /// an item of that stream that is now done.
+    fn passed_by(&self, through: &Entry) -> bool {
+        let Entry::Through {
+            at: call, items, ..
+        } = through
+        else {
+            return false;
+        };
+        match self {
+            Entry::Through { at, .. } if at == call => true,
+            _ => self
+                .at()
+                .and_then(|at| item_of_stream(at, call))
+                .is_some_and(|n| n <= *items),
         }
     }
 
@@ -136,6 +209,11 @@ impl Entry {
             map.get(key)
                 .cloned()
                 .ok_or_else(|| format!("an entry needs `{key}`"))
+        };
+        let count = |key: &str| -> Result<u64, String> {
+            map.get(key)
+                .and_then(Value::as_u64)
+                .ok_or_else(|| format!("an entry needs `{key}` as a whole number"))
         };
         let kind = text("kind")?;
         let entry = match kind.as_str() {
@@ -165,6 +243,24 @@ impl Entry {
             "emitted" => Entry::Emitted {
                 output: text("output")?,
             },
+            "through" => Entry::Through {
+                at: text("at")?,
+                items: count("items")?,
+                handed: count("handed")?,
+            },
+            "stopped" => Entry::Stopped {
+                at: text("at")?,
+                items: count("items")?,
+                how: match text("how")?.as_str() {
+                    "ended" => Ending::Ended(value("value")?),
+                    "failed" => Ending::Failed {
+                        code: text("code")?,
+                        message: text("message")?,
+                    },
+                    "abandoned" => Ending::Abandoned,
+                    other => return Err(format!("unknown way to stop `{other}`")),
+                },
+            },
             other => return Err(format!("unknown entry kind `{other}`")),
         };
         let known: &[&str] = match &entry {
@@ -173,12 +269,27 @@ impl Entry {
             Entry::Started { .. } => &["kind", "at", "input"],
             Entry::Item { .. } | Entry::Ended { .. } => &["kind", "at", "value"],
             Entry::Emitted { .. } => &["kind", "output"],
+            Entry::Through { .. } => &["kind", "at", "items", "handed"],
+            Entry::Stopped { how, .. } => match how {
+                Ending::Ended(_) => &["kind", "at", "items", "how", "value"],
+                Ending::Failed { .. } => &["kind", "at", "items", "how", "code", "message"],
+                Ending::Abandoned => &["kind", "at", "items", "how"],
+            },
         };
         if let Some(extra) = map.keys().find(|k| !known.contains(&k.as_str())) {
             return Err(format!("a `{kind}` entry has no field `{extra}`"));
         }
         Ok(entry)
     }
+}
+
+/// The number of the stream item a key belongs to, when it belongs to an
+/// item the stream act at `call` gave. The keys of item 7 of `pipe[1]#0`
+/// start `pipe[1]#0@7/`.
+pub(crate) fn item_of_stream(at: &str, call: &str) -> Option<u64> {
+    let rest = at.strip_prefix(call)?.strip_prefix('@')?;
+    let (number, _) = rest.split_once('/')?;
+    number.parse().ok()
 }
 
 /// Everything a caller saved for one run, oldest first.
@@ -193,8 +304,22 @@ impl Journal {
         Self::default()
     }
 
+    /// Append an entry as it is, dropping nothing.
     pub fn push(&mut self, entry: Entry) {
         self.entries.push(entry);
+    }
+
+    /// Keep what the run handed out: append an entry, and drop the
+    /// entries it makes useless. An [`Entry::Through`] replaces the one
+    /// before it for the same stream act and drops the entries of the
+    /// items of that stream it passed. An output changes nothing.
+    pub fn record(&mut self, event: &Event) {
+        if let Event::Save(entry) = event {
+            if matches!(entry, Entry::Through { .. }) {
+                self.entries.retain(|kept| !kept.passed_by(entry));
+            }
+            self.entries.push(entry.clone());
+        }
     }
 
     pub fn entries(&self) -> &[Entry] {
@@ -334,11 +459,21 @@ impl Bookmark {
     }
 
     /// Keep what the run handed out: append a line, or move the position
-    /// and drop the lines it passed. An output changes nothing.
+    /// and drop the lines it passed. A line with an [`Entry::Through`]
+    /// replaces the one before it for the same stream act, and drops the
+    /// lines of the items of that stream it passed. An output changes
+    /// nothing.
     pub fn record(&mut self, progress: &Progress) {
         match progress {
             Progress::Output(_) => {}
-            Progress::Save(line) => self.lines.push(line.clone()),
+            Progress::Save(line) => {
+                if matches!(line.entry, Entry::Through { .. }) {
+                    self.lines.retain(|kept| {
+                        kept.item != line.item || !kept.entry.passed_by(&line.entry)
+                    });
+                }
+                self.lines.push(line.clone());
+            }
             Progress::Through(n) => {
                 self.position = *n;
                 self.lines.retain(|line| line.item > *n);

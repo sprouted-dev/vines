@@ -1,10 +1,11 @@
 //! The loop that runs a checked vine and hands its caller what comes out.
 //!
 //! One loop serves all three ways to run. It hands out, in this order:
-//! the lines to save as soon as they are known, then the next output, and,
-//! when it holds nothing, the position if it moved. So an output comes
-//! before the line that records it, and that line comes before the
-//! position that passes its item.
+//! the lines to save as soon as they are known, then the lines that say a
+//! stream act call moved, then the next output, and, when it holds
+//! nothing, the position if it moved. So an output comes before the line
+//! that records it, and that line comes before the position that passes
+//! its item.
 
 use std::sync::{Arc, Mutex};
 use std::task::Poll;
@@ -15,7 +16,7 @@ use serde_json::Value;
 
 use super::book::{Book, Cx, Handing};
 use super::flow::{fatal, lock, run_error, Flow, Flowing};
-use super::tag::{Ledger, Tag};
+use super::tag::{Ledger, Moves, Tag};
 use super::Pipe;
 use crate::error::RunError;
 use crate::journal::Progress;
@@ -63,7 +64,9 @@ impl Pipe {
         let cx = Cx {
             book: book.clone(),
             scope: "".into(),
+            moves: Moves::default(),
         };
+        let moves = cx.moves.clone();
         let mut inner = (self.transform)(checked.boxed(), cx);
         let mut reported = first.saturating_sub(1);
         let moved = move |reported: u64| {
@@ -83,11 +86,22 @@ impl Pipe {
                 if let Some(line) = book.as_ref().and_then(|b| lock(b).fresh.pop_front()) {
                     return Poll::Ready(Some(Ok(Progress::Save(line))));
                 }
+                if let Some(b) = &book {
+                    let moved: Vec<_> = lock(&moves).drain(..).collect();
+                    if !moved.is_empty() {
+                        let mut b = lock(b);
+                        for (call, through) in moved {
+                            b.moved(&call, through);
+                        }
+                        continue;
+                    }
+                }
                 if let Some(flow) = held.take() {
                     match flow {
                         Ok(Flowing::Out(out, tag)) => {
                             if let Some(b) = &book {
-                                match lock(b).hand(tag.item_number(), &out.name) {
+                                let handing = lock(b).hand(&tag, &out.name);
+                                match handing {
                                     Handing::Fresh => {}
                                     // Handed out before the restart.
                                     Handing::Before => continue,
@@ -143,7 +157,8 @@ impl Pipe {
                     Poll::Ready(Some(flow)) => held = Some(flow),
                     Poll::Ready(None) => ended = true,
                     Poll::Pending => {
-                        let more = book.as_ref().is_some_and(|b| !lock(b).fresh.is_empty());
+                        let more = book.as_ref().is_some_and(|b| !lock(b).fresh.is_empty())
+                            || (book.is_some() && !lock(&moves).is_empty());
                         if more || moved(reported).is_some() {
                             continue;
                         }

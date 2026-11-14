@@ -9,6 +9,7 @@ use futures::{FutureExt, StreamExt};
 use serde_json::Value;
 
 use super::book::Cx;
+use super::call_sites::{CallSites, Feed};
 use super::flow::{
     batches, chain, covering, env_of, fatal, forked, handleable, held, last_of, latest_or_first,
     one, per_item, per_item_stream, rescued, tidied, Fault, Flow, Flowing, Items, OpFault,
@@ -48,6 +49,14 @@ pub(super) struct Checker<'a> {
     reach: BTreeSet<String>,
     unresumable: Option<String>,
     unpositioned: Option<String>,
+    sites: CallSites,
+}
+
+/// A checked pipe: what runs it, and the stream act calls whose items
+/// reach its end.
+pub(super) struct Built {
+    pub(super) transform: Transform,
+    pub(super) feeds: Vec<Feed>,
 }
 
 pub(crate) fn assemble(reg: &Registry, def: PipeDef) -> Result<Pipe, LoadError> {
@@ -72,27 +81,32 @@ pub(crate) fn assemble(reg: &Registry, def: PipeDef) -> Result<Pipe, LoadError> 
         reach: BTreeSet::new(),
         unresumable: None,
         unpositioned: None,
+        sites: CallSites::default(),
     };
-    let (transform, _) = cx.pipe(
+    let built = cx.pipe(
         &def.stages,
         "pipe",
         Some(def.input.clone()),
         false,
         Stream::Whole,
+        Vec::new(),
     )?;
     if !emits(&def.stages) {
         return Err(LoadError::MissingOutput {
             path: "pipe".into(),
         });
     }
+    let settled = cx.sites.settle();
     Ok(Pipe {
         name: def.name,
         input: def.input,
         outputs: cx.outputs,
         reach: cx.reach,
-        unresumable: cx.unresumable,
+        unresumable: cx.unresumable.or(settled.unresumable),
         unpositioned: cx.unpositioned,
-        transform,
+        saves_every_item: settled.saves_every_item,
+        by_position: settled.by_position,
+        transform: built.transform,
     })
 }
 
@@ -176,7 +190,9 @@ impl Checker<'_> {
     /// Check a pipe and build it. `single` says the stream reaching it is
     /// one item, as inside `each`, `branch`, `catch`, `finalize` and the
     /// arms of `use`. `stream` says whether it sees the whole input stream,
-    /// which matters for a run from a saved position.
+    /// which matters for a run from a saved position. `feeds` are the
+    /// stream act calls whose items reach its start: a fork's side pipe
+    /// sees what reaches the fork.
     fn pipe(
         &mut self,
         stages: &[Stage],
@@ -184,10 +200,12 @@ impl Checker<'_> {
         mut known: Known,
         single: bool,
         stream: Stream,
-    ) -> Result<(Transform, Known), LoadError> {
+        mut feeds: Vec<Feed>,
+    ) -> Result<Built, LoadError> {
         if stages.is_empty() {
             return Err(malformed(path, "a pipe needs at least one stage"));
         }
+        let mark = self.sites.mark();
         // The stages before the last covering stage run once per item.
         let last_cover = stages.iter().rposition(|s| covers(s).is_some());
         let mut one_item = last_cover.is_some() || single;
@@ -221,10 +239,19 @@ impl Checker<'_> {
                     ));
                 }
                 let body = chain(std::mem::take(&mut transforms));
-                transforms.push(self.cover(stage, &here, body)?);
+                let (t, handler_feeds) = self.cover(stage, &here, body)?;
+                transforms.push(t);
+                if matches!(stage, Stage::Retry { .. }) {
+                    self.sites.retry(&here, mark);
+                }
+                feeds.extend(handler_feeds.into_iter().map(Feed::out_of_nested));
                 known = None;
                 if Some(i) == last_cover {
                     one_item = single && !many;
+                    feeds = feeds
+                        .into_iter()
+                        .map(|f| f.past_last_cover(single))
+                        .collect();
                 }
                 continue;
             }
@@ -252,7 +279,7 @@ impl Checker<'_> {
                 },
             };
             self.check_position(stage, &here, &here_stream);
-            let (t, next) = self.stage(stage, &here, known, one_item, here_stream)?;
+            let (t, next) = self.stage(stage, &here, known, one_item, here_stream, &mut feeds)?;
             transforms.push(t);
             known = next;
             if self.makes_many(stage) {
@@ -263,7 +290,10 @@ impl Checker<'_> {
                 maker = Some(here.clone());
             }
         }
-        Ok((chain(transforms), known))
+        Ok(Built {
+            transform: chain(transforms),
+            feeds,
+        })
     }
 
     /// Refuse, for a run from a saved position, a stage that keeps
@@ -315,29 +345,34 @@ impl Checker<'_> {
 
     /// A stage that covers the stages before it, `body`, one item at a
     /// time.
+    /// Gives what runs it, and the stream act calls whose items come out
+    /// of a `catch` handler.
     fn cover(
         &mut self,
         stage: &Stage,
         path: &str,
         body: Transform,
-    ) -> Result<Transform, LoadError> {
+    ) -> Result<(Transform, Vec<Feed>), LoadError> {
         match stage {
             Stage::Catch(stages) => {
                 // The item as it was when it failed is not known here.
-                let (handler, _) = self.pipe(
+                let built = self.pipe(
                     stages,
                     &format!("{path}.catch"),
                     None,
                     true,
                     Stream::PerItem,
+                    Vec::new(),
                 )?;
-                Ok(per_item_stream(move |item, tag, cx| {
+                let handler = built.transform;
+                let t = per_item_stream(move |item, tag, cx| {
                     rescued(
                         body(one(Ok(Flowing::Value(item, tag))), cx.clone()),
                         handler.clone(),
                         cx,
                     )
-                }))
+                });
+                Ok((t, built.feeds))
             }
             Stage::Finalize(stages) => {
                 let here = format!("{path}.finalize");
@@ -347,14 +382,18 @@ impl Checker<'_> {
                         "`finalize` is for cleanup and may not emit",
                     ));
                 }
-                let (cleanup, _) = self.pipe(stages, &here, None, true, Stream::PerItem)?;
-                Ok(per_item_stream(move |item, tag, cx| {
+                // What the cleanup gives is dropped, so no feed comes out.
+                let cleanup = self
+                    .pipe(stages, &here, None, true, Stream::PerItem, Vec::new())?
+                    .transform;
+                let t = per_item_stream(move |item, tag, cx| {
                     let work = body(
                         one(Ok(Flowing::Value(item.clone(), tag.clone()))),
                         cx.clone(),
                     );
                     tidied(work, cleanup.clone(), item, tag, cx)
-                }))
+                });
+                Ok((t, Vec::new()))
             }
             Stage::Retry { times, wait } => {
                 let (times, wait) = (*times, *wait);
@@ -364,7 +403,7 @@ impl Checker<'_> {
                         "`retry` tries again at least once",
                     ));
                 }
-                Ok(covering(move |item, tag, cx| {
+                let t = covering(move |item, tag, cx| {
                     let body = body.clone();
                     async move {
                         let mut left = times;
@@ -379,7 +418,8 @@ impl Checker<'_> {
                         }
                     }
                     .boxed()
-                }))
+                });
+                Ok((t, Vec::new()))
             }
             Stage::Timeout(limit) => {
                 let limit = *limit;
@@ -393,7 +433,7 @@ impl Checker<'_> {
                     "{path} is a `timeout`, and a replay cannot know where the time ran out"
                 ));
                 let at = path.to_owned();
-                Ok(covering(move |item, tag, cx| {
+                let t = covering(move |item, tag, cx| {
                     let (body, at) = (body.clone(), at.clone());
                     async move {
                         let run = body(one(Ok(Flowing::Value(item.clone(), tag.clone()))), cx)
@@ -413,7 +453,8 @@ impl Checker<'_> {
                         }
                     }
                     .boxed()
-                }))
+                });
+                Ok((t, Vec::new()))
             }
             _ => unreachable!("only covering stages get here"),
         }
@@ -529,10 +570,13 @@ impl Checker<'_> {
             with: template,
             keep: keep.clone(),
             end: end.clone(),
+            saving: Arc::default(),
         };
         Ok((unit, next))
     }
 
+    /// Check one stage and build it. `feeds` are the stream act calls
+    /// whose items reach it; a stage that starts new ones adds them.
     fn stage(
         &mut self,
         stage: &Stage,
@@ -540,10 +584,17 @@ impl Checker<'_> {
         known: Known,
         single: bool,
         stream: Stream,
+        feeds: &mut Vec<Feed>,
     ) -> Result<(Transform, Known), LoadError> {
         match stage {
             Stage::Op { .. } | Stage::Call { .. } => {
                 let (unit, next) = self.unit(stage, path, &known)?;
+                if let Some(act) = self.reg.get_stream_act(&unit.spec.name) {
+                    let gives = act.gives;
+                    let saving = unit.saving.clone();
+                    let name = unit.spec.name.clone();
+                    feeds.extend(self.sites.call(path, &name, gives, single, saving));
+                }
                 if matches!(unit.runner, Runner::Stream(_)) {
                     Ok((
                         per_item_stream(move |item, tag, cx| unit.stream(item, tag, cx)),
@@ -629,6 +680,7 @@ impl Checker<'_> {
                         "`take` lets at least one item through",
                     ));
                 }
+                self.sites.take(path, feeds);
                 let count = usize::try_from(*count).unwrap_or(usize::MAX);
                 let t: Transform = Arc::new(move |items: Items, _cx: Cx| items.take(count).boxed());
                 Ok((t, known))
@@ -658,6 +710,7 @@ impl Checker<'_> {
                             .required("count", Ty::Int),
                     ),
                 };
+                self.sites.collect(path, feeds);
                 let size = usize::try_from(*size).unwrap_or(usize::MAX);
                 let (into, at) = (into.clone(), path.to_owned());
                 let t: Transform = Arc::new(move |items: Items, _cx: Cx| {
@@ -758,8 +811,16 @@ impl Checker<'_> {
                         }
                     ));
                 }
-                let (inner, _) =
-                    self.pipe(pipe, &format!("{here}.do"), known, true, Stream::PerItem)?;
+                let built = self.pipe(
+                    pipe,
+                    &format!("{here}.do"),
+                    known,
+                    true,
+                    Stream::PerItem,
+                    Vec::new(),
+                )?;
+                feeds.extend(built.feeds.into_iter().map(Feed::out_of_nested));
+                let inner = built.transform;
                 let (overlap, at_once) = (*overlap, *at_once);
                 let t: Transform = Arc::new(move |items: Items, cx: Cx| {
                     let inner = inner.clone();
@@ -789,11 +850,21 @@ impl Checker<'_> {
                     return Err(malformed(&here, "`fork` needs at least one side pipe"));
                 }
                 let mut built = Vec::new();
+                let mut side_feeds = Vec::new();
                 for (j, side) in sides.iter().enumerate() {
                     let at = format!("{here}[{j}]");
-                    let (t, _) = self.pipe(side, &at, known.clone(), single, stream.clone())?;
-                    built.push(t);
+                    let side = self.pipe(
+                        side,
+                        &at,
+                        known.clone(),
+                        single,
+                        stream.clone(),
+                        feeds.clone(),
+                    )?;
+                    built.push(side.transform);
+                    side_feeds.extend(side.feeds.into_iter().map(Feed::out_of_side));
                 }
+                feeds.extend(side_feeds);
                 let t: Transform =
                     Arc::new(move |items: Items, cx: Cx| forked(items, built.clone(), cx));
                 Ok((t, known))
@@ -860,8 +931,9 @@ impl Checker<'_> {
                     if arms.contains_key(output) {
                         return Err(malformed(&at, "this output is listed twice"));
                     }
-                    let (arm, _) = self.pipe(stages, &at, None, true, Stream::PerItem)?;
-                    arms.insert(output.clone(), arm);
+                    let arm = self.pipe(stages, &at, None, true, Stream::PerItem, Vec::new())?;
+                    feeds.extend(arm.feeds.into_iter().map(Feed::out_of_nested));
+                    arms.insert(output.clone(), arm.transform);
                 }
                 if let Some(missing) = other.outputs().keys().find(|o| !arms.contains_key(*o)) {
                     return Err(malformed(
@@ -874,6 +946,12 @@ impl Checker<'_> {
                 if let Some(why) = &other.unresumable {
                     self.not_resumable(format!("{path} uses vine `{vine}`, and {why}"));
                 }
+                feeds.extend(self.sites.used(
+                    path,
+                    vine,
+                    other.by_position,
+                    &other.saves_every_item,
+                ));
                 self.reach.extend(other.reach().iter().cloned());
                 let (keep, at) = (keep.clone(), path.to_owned());
                 let t: Transform = Arc::new(move |items: Items, cx: Cx| {
@@ -941,13 +1019,17 @@ impl Checker<'_> {
                     if arms.contains_key(key) {
                         return Err(malformed(&at, "this case is listed twice"));
                     }
-                    let (arm, _) = self.pipe(pipe, &at, known.clone(), true, Stream::PerItem)?;
-                    arms.insert(key.clone(), arm);
+                    let arm =
+                        self.pipe(pipe, &at, known.clone(), true, Stream::PerItem, Vec::new())?;
+                    feeds.extend(arm.feeds.into_iter().map(Feed::out_of_nested));
+                    arms.insert(key.clone(), arm.transform);
                 }
                 let fallback = match otherwise {
                     Some(pipe) => {
                         let at = format!("{here}.else");
-                        Some(self.pipe(pipe, &at, known, true, Stream::PerItem)?.0)
+                        let arm = self.pipe(pipe, &at, known, true, Stream::PerItem, Vec::new())?;
+                        feeds.extend(arm.feeds.into_iter().map(Feed::out_of_nested));
+                        Some(arm.transform)
                     }
                     None => None,
                 };

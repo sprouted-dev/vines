@@ -40,7 +40,7 @@ pub mod stream;
 pub mod vine;
 
 pub use error::{LoadError, RegistryError, RunError};
-pub use journal::{Bookmark, Entry, Event, Journal, Line, Progress};
+pub use journal::{Bookmark, Ending, Entry, Event, Journal, Line, Progress};
 pub use pipe::Pipe;
 pub use registry::{ActStream, OpContext, OpError, OperatorSpec, Part, Registry};
 pub use run::Output;
