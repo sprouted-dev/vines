@@ -600,6 +600,11 @@ pub struct Pipe {
     input: Shape,
     outputs: Arc<BTreeMap<String, Shape>>,
     reach: BTreeSet<String>,
+    /// The acts its `call` and `tap` stages name, here and in the vines it
+    /// uses.
+    acts: BTreeSet<String>,
+    /// The vines it runs with `use`, and the vines those use.
+    uses: BTreeSet<String>,
     /// Why the vine cannot be resumed, if it cannot.
     unresumable: Option<String>,
     /// Why the vine cannot run from a saved position, if it cannot.
@@ -650,6 +655,21 @@ impl Pipe {
     /// Everything this vine's operators and acts touch, sorted.
     pub fn reach(&self) -> &BTreeSet<String> {
         &self.reach
+    }
+
+    /// Every act this vine runs with `call` or `tap`, here or in a vine it
+    /// runs with `use`, sorted. Operators are not acts and are not listed.
+    pub fn acts(&self) -> &BTreeSet<String> {
+        &self.acts
+    }
+
+    /// Every vine this vine runs with `use`, and every vine those run with
+    /// `use`, sorted by name. Empty for a vine that uses none.
+    ///
+    /// The library has no rule about which vine may use which. A caller
+    /// with such a rule reads this to apply it.
+    pub fn uses(&self) -> &BTreeSet<String> {
+        &self.uses
     }
 
     /// Whether [`Pipe::run_saved`] can run this vine.

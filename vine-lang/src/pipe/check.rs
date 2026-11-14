@@ -47,6 +47,8 @@ pub(super) struct Checker<'a> {
     reg: &'a Registry,
     outputs: Arc<BTreeMap<String, Shape>>,
     reach: BTreeSet<String>,
+    acts: BTreeSet<String>,
+    uses: BTreeSet<String>,
     unresumable: Option<String>,
     unpositioned: Option<String>,
     sites: CallSites,
@@ -79,6 +81,8 @@ pub(crate) fn assemble(reg: &Registry, def: PipeDef) -> Result<Pipe, LoadError> 
         reg,
         outputs: Arc::new(def.outputs),
         reach: BTreeSet::new(),
+        acts: BTreeSet::new(),
+        uses: BTreeSet::new(),
         unresumable: None,
         unpositioned: None,
         sites: CallSites::default(),
@@ -102,6 +106,8 @@ pub(crate) fn assemble(reg: &Registry, def: PipeDef) -> Result<Pipe, LoadError> 
         input: def.input,
         outputs: cx.outputs,
         reach: cx.reach,
+        acts: cx.acts,
+        uses: cx.uses,
         unresumable: cx.unresumable.or(settled.unresumable),
         unpositioned: cx.unpositioned,
         saves_every_item: settled.saves_every_item,
@@ -500,6 +506,7 @@ impl Checker<'_> {
                         name: act.clone(),
                     });
                 };
+                self.acts.insert(act.clone());
                 (spec, runner, act, with, keep, end, format!("{path}.with"))
             }
             _ => unreachable!("only operators and acts are units"),
@@ -953,6 +960,9 @@ impl Checker<'_> {
                     &other.saves_every_item,
                 ));
                 self.reach.extend(other.reach().iter().cloned());
+                self.acts.extend(other.acts().iter().cloned());
+                self.uses.insert(vine.clone());
+                self.uses.extend(other.uses().iter().cloned());
                 let (keep, at) = (keep.clone(), path.to_owned());
                 let t: Transform = Arc::new(move |items: Items, cx: Cx| {
                     let (other, with, keep, arms, at) = (
