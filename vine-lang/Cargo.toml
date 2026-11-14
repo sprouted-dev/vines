@@ -7,8 +7,8 @@ license = "MIT OR Apache-2.0"
 description = "Executable proof of the vine language: YAML vines run over Rust operators."
 publish = false
 
-# Standalone: not a member of the terra-vines crate at the repo root.
-[workspace]
+[lints]
+workspace = true
 
 [lib]
 name = "vine_lang"

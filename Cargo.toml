@@ -29,7 +29,7 @@ tokio = { version = "1.52.3", features = ["rt", "time", "sync", "macros", "test-
 # A workspace so every crate in this repo (vine-lang, when it joins) shares
 # one lint table. Join with `[lints] workspace = true` and a `members` entry.
 [workspace]
-members = ["."]
+members = [".", "vine-lang"]
 
 # Strict from the start: everything here is denied by `just clippy`
 # (`-D warnings`). Silence one site with
