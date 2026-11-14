@@ -10,7 +10,7 @@
 //!
 //! - `take` anywhere the call's items or outputs reach in the same run of
 //!   a pipe: it counts, and after a restart it would count from nothing.
-//! - `collect` where it could gather the items of more than one call, or
+//! - `bufferCount` where it could gather the items of more than one call, or
 //!   of the call and of something else: a batch must hold one call's
 //!   items to be rebuilt.
 //! - `retry` over the call: it drops what a failed attempt gave and runs
@@ -64,7 +64,7 @@ enum Batch {
 
 impl Feed {
     /// The feed as it comes out of the pipe it is in, into the pipe around
-    /// it: past a stage that runs a pipe per item, such as `each`, its
+    /// it: past a stage that runs a pipe per item, such as `concatMap`, its
     /// items may mix with others.
     pub(super) fn out_of_nested(mut self) -> Feed {
         if let Reaches::Values(_) = self.reaches {
@@ -188,12 +188,12 @@ impl CallSites {
         }
     }
 
-    /// A `collect` at `path` that these feeds reach.
-    pub(super) fn collect(&mut self, path: &str, feeds: &[Feed]) {
+    /// A `bufferCount` at `path` that these feeds reach.
+    pub(super) fn buffer_count(&mut self, path: &str, feeds: &[Feed]) {
         for feed in feeds {
             if let Reaches::Values(Batch::Mixed) = feed.reaches {
                 let why = format!(
-                    "{path} is a `collect` that could put what {} gives in one batch with items from another call or from elsewhere, and a restart could not rebuild that batch",
+                    "{path} is a `bufferCount` that could put what {} gives in one batch with items from another call or from elsewhere, and a restart could not rebuild that batch",
                     self.name(&feed.owner)
                 );
                 self.refuse(&feed.owner, why);

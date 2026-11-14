@@ -20,13 +20,13 @@
 //!
 //! # Groups
 //!
-//! In a saved run, each value that enters an `each` that merges starts a
+//! In a saved run, each value that enters a `mergeMap` starts a
 //! group: the work of that one value, numbered in the order the values
 //! enter. Its tag holds the tag of the value as it entered, and names the
-//! group in its scope, such as `pipe[1].each@3/`. The keys of acts run for
+//! group in its scope, such as `pipe[1].mergeMap@3/`. The keys of acts run for
 //! the group, and the outputs made from it, start with that scope, so they
 //! line up after a restart in whatever order the groups finish. Values that
-//! leave the `each` keep the group's tag, so the stages after it key their
+//! leave the `mergeMap` keep the group's tag, so the stages after it key their
 //! acts by group too, until `last` picks one value out of many groups and
 //! [lifts](Tag::lifted) it back out.
 //!
@@ -53,9 +53,9 @@ struct Hold {
     parts: Vec<Tag>,
     /// For an item a stream act call gave, or a batch of them: the call.
     call: Option<Arc<Key>>,
-    /// For the work of one value inside an `each` that merges: where that
-    /// `each` stands, with the scope of the vine it is in, such as
-    /// `pipe[1].each`.
+    /// For the work of one value inside a `mergeMap`: where that
+    /// `mergeMap` stands, with the scope of the vine it is in, such as
+    /// `pipe[1].mergeMap`.
     group: Option<Arc<str>>,
     /// Where the keys of acts run for this value start.
     scope: Arc<str>,
@@ -128,7 +128,7 @@ impl Tag {
         })))
     }
 
-    /// The tag of group `n` of the `each` at `site`, started by the value
+    /// The tag of group `n` of the `mergeMap` at `site`, started by the value
     /// with tag `up`.
     pub(super) fn group(site: &str, n: u64, up: &Tag) -> Tag {
         Tag(Some(Arc::new(Hold {
@@ -196,7 +196,7 @@ impl Tag {
         })))
     }
 
-    /// This value, lifted out of every group started by an `each` whose
+    /// This value, lifted out of every group started by a `mergeMap` whose
     /// site starts with `within`: it keeps its hold on what it came from,
     /// and its keys and outputs start where they did before the outermost
     /// of those groups.
@@ -255,8 +255,8 @@ impl Tag {
     /// Where the keys of acts run for this value start. Empty unless the
     /// value came from an item a stream act gives again, or from a group.
     /// For item 7 of a call it is that call's key and the number, such as
-    /// `pipe[1]#0@7/`. For group 3 of an `each` it is where the `each`
-    /// stands and the number, such as `pipe[1].each@3/`. Scopes nest, so
+    /// `pipe[1]#0@7/`. For group 3 of a `mergeMap` it is where the
+    /// `mergeMap` stands and the number, such as `pipe[1].mergeMap@3/`. Scopes nest, so
     /// the keys of a group or an item are the same whichever item a
     /// restart begins at and whatever order the groups finish in.
     pub(super) fn scope(&self) -> &str {
@@ -514,11 +514,14 @@ mod tests {
     fn a_group_holds_the_value_that_started_it_and_lifts_back_to_its_scope() {
         let l = ledger();
         let item = Tag::item(1, &l);
-        let group = Tag::group("pipe[1].each", 3, &item);
-        assert_eq!(group.scope(), "pipe[1].each@3/");
+        let group = Tag::group("pipe[1].mergeMap", 3, &item);
+        assert_eq!(group.scope(), "pipe[1].mergeMap@3/");
         assert_eq!(group.item_number(), 1);
-        let inner = Tag::group("pipe[1].each.do[0].each", 0, &group);
-        assert_eq!(inner.scope(), "pipe[1].each@3/pipe[1].each.do[0].each@0/");
+        let inner = Tag::group("pipe[1].mergeMap.do[0].mergeMap", 0, &group);
+        assert_eq!(
+            inner.scope(),
+            "pipe[1].mergeMap@3/pipe[1].mergeMap.do[0].mergeMap@0/"
+        );
         let lifted = inner.lifted("pipe[");
         assert_eq!(lifted.scope(), "");
         drop((item, group, inner));

@@ -30,6 +30,13 @@ pub enum LoadError {
     Malformed { path: String, problem: String },
     #[error("{path}: unknown key `{key}`")]
     UnknownKey { path: String, key: String },
+    /// A pipe key from before the stages took their RxJS names.
+    #[error("{path}: `{old}` is not a key any more; use {new}")]
+    Renamed {
+        path: String,
+        old: String,
+        new: String,
+    },
     #[error("{path}: `{key}` would pull in another vine or a piece of one; vines do not compose, reuse is by operators only")]
     Composition { path: String, key: String },
     #[error("{path}: unknown operator `{name}` (not registered)")]

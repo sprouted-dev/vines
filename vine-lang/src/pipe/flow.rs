@@ -27,7 +27,7 @@ pub(super) enum Flowing {
     Out(Output, Tag),
 }
 
-/// A failure on its way to a `catch` or to the end of the run. It carries
+/// A failure on its way to a `catchError` or to the end of the run. It carries
 /// the tag of the item that failed, so that item is not done while the
 /// failure is in flight.
 pub(super) enum Fault {

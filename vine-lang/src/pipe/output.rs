@@ -24,7 +24,7 @@ use serde_json::Value;
 pub struct OutputId(String);
 
 impl OutputId {
-    /// The id as text, such as `#2`, `pipe[1].each@3/#0` or
+    /// The id as text, such as `#2`, `pipe[1].mergeMap@3/#0` or
     /// `7:pipe[1]#0@2/#1`. Keep it as it is: its parts are not an API.
     pub fn as_str(&self) -> &str {
         &self.0

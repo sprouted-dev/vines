@@ -1,10 +1,10 @@
 //! What a replay can rely on about the order in which values reach a
 //! stage, and what the checker refuses because of it.
 //!
-//! An `each` that merges runs its values side by side. In a saved run each
+//! A `mergeMap` runs its values side by side. In a saved run each
 //! value that enters it starts a group, and the acts and outputs of a group
 //! are keyed by the group, so they replay in the group's own order whatever
-//! order the groups finish in. Values that leave the `each` keep their
+//! order the groups finish in. Values that leave the `mergeMap` keep their
 //! group, so the stages after it are keyed by group too, and replay.
 //!
 //! What does not replay is a stage whose result depends on the order in
@@ -13,7 +13,7 @@
 //!
 //! - `take` could let other values through, and an output the caller was
 //!   handed could be made no more. It is refused.
-//! - `collect` could put other values in a batch, and the caller would see
+//! - `bufferCount` could put other values in a batch, and the caller would see
 //!   one value twice and another never. It is refused, in a side pipe too.
 //! - `last` gives one value, and after a restart it can be another
 //!   group's, as it could be in a run that went at another pace. It is
@@ -21,14 +21,15 @@
 //!   made from it is matched the same whichever value it is. An act after
 //!   it is refused: its saved result was for the value picked before.
 //!
-//! A `catch` or `finalize` that covers an `each` that merges, at any depth,
+//! A `catchError` or `finalize` that covers a `mergeMap`, at any depth,
 //! drops the values still running at the first failure. How far they got
 //! depends on timing, and an output the caller was handed could be made no
-//! more after a restart, so a vine with one cannot be resumed. A `catch`
-//! inside the `each` covers one value's own work, and replays.
+//! more after a restart, so a vine with one cannot be resumed. A
+//! `catchError` inside the `mergeMap` covers one value's own work, and
+//! replays.
 
 use super::check::Stream;
-use super::{Overlap, Stage};
+use super::{Flatten, Stage};
 use crate::registry::Registry;
 
 /// What a pipe's stages see of the stream that reaches them.
@@ -94,8 +95,8 @@ impl View {
                 Stage::Take(_) => return Some(format!(
                     "{here} is a `take` after {from}, which runs items side by side: which items it lets through depends on which finish first, and after a restart others could"
                 )),
-                Stage::Collect { .. } => return Some(format!(
-                    "{here} is a `collect` after {from}, which runs items side by side: a batch holds the items that finished first, and after a restart it could hold others"
+                Stage::BufferCount { .. } => return Some(format!(
+                    "{here} is a `bufferCount` after {from}, which runs items side by side: a batch holds the items that finished first, and after a restart it could hold others"
                 )),
                 _ => {}
             }
@@ -103,7 +104,7 @@ impl View {
         let picked = self.picked.as_ref()?;
         let act = match stage {
             Stage::Call { act, .. } => Some(act.clone()),
-            Stage::Together(parts) => parts.iter().find_map(|p| match p {
+            Stage::ForkJoin(parts) => parts.iter().find_map(|p| match p {
                 Stage::Call { act, .. } => Some(act.clone()),
                 _ => None,
             }),
@@ -127,15 +128,15 @@ pub(super) fn mixes(reg: &Registry, stage: &Stage) -> bool {
     }
 }
 
-/// Whether these stages hold an `each` that merges, at any depth, in a
+/// Whether these stages hold a `mergeMap`, at any depth, in a
 /// side pipe or in a vine they run by `use`.
 pub(super) fn merges_anywhere(reg: &Registry, stages: &[Stage]) -> bool {
     stages.iter().any(|s| match s {
-        Stage::Each {
-            overlap: Overlap::Merge,
+        Stage::Mapped {
+            flatten: Flatten::Merge,
             ..
         } => true,
-        Stage::Each { pipe, .. } | Stage::Catch(pipe) | Stage::Finalize(pipe) => {
+        Stage::Mapped { pipe, .. } | Stage::CatchError(pipe) | Stage::Finalize(pipe) => {
             merges_anywhere(reg, pipe)
         }
         Stage::Fork(sides) => sides.iter().any(|p| merges_anywhere(reg, p)),

@@ -17,7 +17,7 @@ use super::flow::{
 use super::order::{merges_anywhere, View};
 use super::timer::{timed, Covered};
 use super::unit::{add_field, Runner, Unit};
-use super::{Keep, Overlap, Pipe, PipeDef, Stage};
+use super::{Flatten, Keep, Pipe, PipeDef, Stage};
 use crate::error::{LoadError, RunError};
 use crate::expr::{case_key, is_name, Cond, Ref, Template};
 use crate::registry::Registry;
@@ -33,7 +33,7 @@ pub(super) type Known = Option<Shape>;
 /// those values come from more than one input item.
 #[derive(Debug, Clone)]
 pub(super) enum Stream {
-    /// One input item's own work: inside `each`, `branch`, `catch`,
+    /// One input item's own work: inside a mapping stage, `branch`, `catchError`,
     /// `finalize` and the arms of `use`, and before a covering stage. A
     /// stage's state starts again for each item.
     PerItem,
@@ -132,9 +132,9 @@ pub(super) fn emits(stages: &[Stage]) -> bool {
         Stage::Take(_) | Stage::Finalize(_) | Stage::Retry { .. } | Stage::Timeout(_) => {
             emits(before)
         }
-        Stage::Catch(handler) => emits(before) && emits(handler),
+        Stage::CatchError(handler) => emits(before) && emits(handler),
         Stage::Emit { .. } => true,
-        Stage::Each { pipe, .. } => emits(pipe),
+        Stage::Mapped { pipe, .. } => emits(pipe),
         Stage::Use { on, .. } => on.iter().all(|(_, p)| emits(p)),
         Stage::Branch {
             cases, otherwise, ..
@@ -150,7 +150,7 @@ pub(super) fn follows_emit(stage: &Stage) -> bool {
     matches!(
         stage,
         Stage::Take(_)
-            | Stage::Catch(_)
+            | Stage::CatchError(_)
             | Stage::Finalize(_)
             | Stage::Retry { .. }
             | Stage::Timeout(_)
@@ -160,7 +160,7 @@ pub(super) fn follows_emit(stage: &Stage) -> bool {
 /// Whether a stage covers the stages before it, one item at a time.
 pub(super) fn covers(stage: &Stage) -> Option<&'static str> {
     match stage {
-        Stage::Catch(_) => Some("catch"),
+        Stage::CatchError(_) => Some("catchError"),
         Stage::Finalize(_) => Some("finalize"),
         Stage::Retry { .. } => Some("retry"),
         Stage::Timeout(_) => Some("timeout"),
@@ -169,12 +169,12 @@ pub(super) fn covers(stage: &Stage) -> Option<&'static str> {
 }
 
 /// Whether a stage works across the whole stream, not one item at a time,
-/// in a way a covering stage cannot hold. `last` and `collect` are not
+/// in a way a covering stage cannot hold. `last` and `bufferCount` are not
 /// here: before a covering stage they work on one item's own stream.
 pub(super) fn stream_wide(stage: &Stage) -> Option<&'static str> {
     match stage {
         Stage::Take(_) => Some("take"),
-        Stage::Each { overlap, .. } if *overlap != Overlap::Concat => Some("each"),
+        Stage::Mapped { flatten, .. } if *flatten != Flatten::Concat => Some(flatten.key()),
         _ => None,
     }
 }
@@ -183,7 +183,7 @@ pub(super) fn stream_wide(stage: &Stage) -> Option<&'static str> {
 pub(super) fn emits_anywhere(stages: &[Stage]) -> bool {
     stages.iter().any(|s| match s {
         Stage::Emit { .. } => true,
-        Stage::Each { pipe, .. } | Stage::Catch(pipe) | Stage::Finalize(pipe) => {
+        Stage::Mapped { pipe, .. } | Stage::CatchError(pipe) | Stage::Finalize(pipe) => {
             emits_anywhere(pipe)
         }
         Stage::Fork(sides) => sides.iter().any(|p| emits_anywhere(p)),
@@ -200,7 +200,7 @@ pub(super) fn emits_anywhere(stages: &[Stage]) -> bool {
 
 impl Checker<'_> {
     /// Check a pipe and build it. `single` says the stream reaching it is
-    /// one item, as inside `each`, `branch`, `catch`, `finalize` and the
+    /// one item, as inside a mapping stage, `branch`, `catchError`, `finalize` and the
     /// arms of `use`. `view` says what it sees of the stream: the whole
     /// input stream or one item's work, which matters for a run from a
     /// saved position, and the order values reach it in, which matters for
@@ -252,11 +252,11 @@ impl Checker<'_> {
                         ),
                     ));
                 }
-                if matches!(stage, Stage::Catch(_) | Stage::Finalize(_))
+                if matches!(stage, Stage::CatchError(_) | Stage::Finalize(_))
                     && merges_anywhere(self.reg, &stages[..i])
                 {
                     self.not_resumable(format!(
-                        "{here} is a `{word}` over an `each` that merges, and drops the items still running when one fails; how far they got depends on timing, so a restart could drop them elsewhere; put the `{word}` inside the `each`"
+                        "{here} is a `{word}` over a `mergeMap`, and drops the items still running when one fails; how far they got depends on timing, so a restart could drop them elsewhere; put the `{word}` inside the `mergeMap`"
                     ));
                 }
                 let body = chain(std::mem::take(&mut transforms));
@@ -282,14 +282,14 @@ impl Checker<'_> {
             if one_item {
                 let word = match stage {
                     Stage::Last => Some("last"),
-                    Stage::Collect { .. } => Some("collect"),
+                    Stage::BufferCount { .. } => Some("bufferCount"),
                     _ => None,
                 };
                 if let Some(word) = word {
                     return Err(malformed(
                         &format!("{here}.{word}"),
                         &format!(
-                            "`{word}` would only ever see one item here: the stages before a covering stage, and inside `each`, `branch`, `catch`, `finalize` and `use`, run once for each item; put a stage that makes many items from one, such as `split` or a stream act, before it"
+                            "`{word}` would only ever see one item here: the stages before a covering stage, and inside `concatMap`, `mergeMap`, `switchMap`, `exhaustMap`, `branch`, `catchError`, `finalize` and `use`, run once for each item; put a stage that makes many items from one, such as `split` or a stream act, before it"
                         ),
                     ));
                 }
@@ -333,7 +333,7 @@ impl Checker<'_> {
             (Stage::Take(_), Stream::Whole | Stream::Pieces(_)) => self.not_positioned(format!(
                 "{here} is a `take` over the whole stream: it counts items, and a run from a position would count from nothing again; a vine that ends itself has an end, so run it with `run_saved`"
             )),
-            (Stage::Collect { .. }, Stream::Pieces(by)) => self.not_positioned(format!(
+            (Stage::BufferCount { .. }, Stream::Pieces(by)) => self.not_positioned(format!(
                 "{here} gathers batches over the whole stream after {by}, which makes many items from one; a batch could end partway through an input item, and the position could not pass it"
             )),
             _ => {}
@@ -343,9 +343,10 @@ impl Checker<'_> {
     /// Whether a stage can turn one item into many.
     fn makes_many(&self, stage: &Stage) -> bool {
         match stage {
-            Stage::Split { .. } | Stage::Each { .. } | Stage::Use { .. } | Stage::Branch { .. } => {
-                true
-            }
+            Stage::Split { .. }
+            | Stage::Mapped { .. }
+            | Stage::Use { .. }
+            | Stage::Branch { .. } => true,
             Stage::Call { act, .. } => self.reg.get_stream_act(act).is_some(),
             _ => false,
         }
@@ -355,7 +356,7 @@ impl Checker<'_> {
     /// covering stage runs instead.
     fn makes_many_anywhere(&self, stage: &Stage) -> bool {
         match stage {
-            Stage::Catch(stages) => stages.iter().any(|s| self.makes_many(s)),
+            Stage::CatchError(stages) => stages.iter().any(|s| self.makes_many(s)),
             _ => self.makes_many(stage),
         }
     }
@@ -375,7 +376,7 @@ impl Checker<'_> {
     /// A stage that covers the stages before it, `body`, one item at a
     /// time.
     /// Gives what runs it, and the stream act calls whose items come out
-    /// of a `catch` handler.
+    /// of a `catchError` handler.
     fn cover(
         &mut self,
         stage: &Stage,
@@ -384,9 +385,9 @@ impl Checker<'_> {
         view: &View,
     ) -> Result<(Transform, Vec<Feed>), LoadError> {
         match stage {
-            Stage::Catch(stages) => {
+            Stage::CatchError(stages) => {
                 // The item as it was when it failed is not known here.
-                let at = format!("{path}.catch");
+                let at = format!("{path}.catchError");
                 let built = self.pipe(stages, &at, None, true, view.per_value(&at), Vec::new())?;
                 let handler = built.transform;
                 let t = per_item_stream(move |item, tag, cx| {
@@ -696,10 +697,13 @@ impl Checker<'_> {
                 });
                 Ok((t, known))
             }
-            Stage::Collect { size, into } => {
-                let here = format!("{path}.collect");
+            Stage::BufferCount { size, into } => {
+                let here = format!("{path}.bufferCount");
                 if *size == 0 {
-                    return Err(malformed(&here, "`collect` needs a `size` of at least 1"));
+                    return Err(malformed(
+                        &here,
+                        "`bufferCount` needs a `size` of at least 1",
+                    ));
                 }
                 if let Some(name) = into {
                     if !is_name(name) {
@@ -717,7 +721,7 @@ impl Checker<'_> {
                             .required("count", Ty::Int),
                     ),
                 };
-                self.sites.collect(path, feeds);
+                self.sites.buffer_count(path, feeds);
                 let size = usize::try_from(*size).unwrap_or(usize::MAX);
                 let (into, at) = (into.clone(), path.to_owned());
                 let t: Transform = Arc::new(move |items: Items, _cx: Cx| {
@@ -725,12 +729,12 @@ impl Checker<'_> {
                 });
                 Ok((t, next))
             }
-            Stage::Together(parts) => {
-                let here = format!("{path}.together");
+            Stage::ForkJoin(parts) => {
+                let here = format!("{path}.forkJoin");
                 if parts.len() < 2 {
                     return Err(malformed(
                         &here,
-                        "`together` runs two or more stages side by side",
+                        "`forkJoin` runs two or more stages side by side",
                     ));
                 }
                 let mut units = Vec::new();
@@ -749,7 +753,7 @@ impl Checker<'_> {
                         _ => {
                             return Err(malformed(
                                 &at,
-                                "each stage inside `together` is an operator or an act with `into`, so the results do not overwrite each other",
+                                "each stage inside `forkJoin` is an operator or an act with `into`, so the results do not overwrite each other",
                             ))
                         }
                     };
@@ -759,7 +763,7 @@ impl Checker<'_> {
                         return Err(malformed(
                             &at,
                             &format!(
-                                "`{}` gives a stream, and `together` waits for one result from each stage",
+                                "`{}` gives a stream, and `forkJoin` waits for one result from each stage",
                                 unit.spec.name
                             ),
                         ));
@@ -792,41 +796,38 @@ impl Checker<'_> {
                 });
                 Ok((t, next))
             }
-            Stage::Each {
-                overlap,
-                at_once,
+            Stage::Mapped {
+                flatten,
+                concurrent,
                 pipe,
             } => {
-                let here = format!("{path}.each");
-                if at_once.is_some() && *overlap != Overlap::Merge {
+                let key = flatten.key();
+                let here = format!("{path}.{key}");
+                if concurrent.is_some() && *flatten != Flatten::Merge {
                     return Err(malformed(
                         &here,
-                        "`at_once` limits side-by-side runs, so it goes with `overlap: merge`",
+                        "`concurrent` limits side-by-side runs, so only `mergeMap` takes it",
                     ));
                 }
-                if *at_once == Some(0) {
-                    return Err(malformed(&here, "`at_once` is at least 1"));
+                if *concurrent == Some(0) {
+                    return Err(malformed(&here, "`concurrent` is at least 1"));
                 }
-                if let Some(word) = match overlap {
-                    Overlap::Switch => Some("switch"),
-                    Overlap::Exhaust => Some("exhaust"),
-                    Overlap::Concat | Overlap::Merge => None,
-                } {
+                if matches!(flatten, Flatten::Switch | Flatten::Exhaust) {
                     self.not_resumable(format!(
-                        "{here} runs items with overlap `{word}`, which drops or skips work by when items arrive, and a replay cannot know when they did"
+                        "{here} is a `{key}`, which drops or skips work by when items arrive, and a replay cannot know when they did"
                     ));
                 }
                 let at = format!("{here}.do");
                 let built = self.pipe(pipe, &at, known, true, view.per_value(&at), Vec::new())?;
                 feeds.extend(built.feeds.into_iter().map(Feed::out_of_nested));
                 let inner = built.transform;
-                let (overlap, at_once) = (*overlap, *at_once);
+                let (flatten, concurrent) = (*flatten, *concurrent);
                 let t: Transform = Arc::new(move |items: Items, cx: Cx| {
                     let inner = inner.clone();
-                    match overlap {
-                        Overlap::Switch => latest_or_first(items, inner, true, cx),
-                        Overlap::Exhaust => latest_or_first(items, inner, false, cx),
-                        Overlap::Concat => items
+                    match flatten {
+                        Flatten::Switch => latest_or_first(items, inner, true, cx),
+                        Flatten::Exhaust => latest_or_first(items, inner, false, cx),
+                        Flatten::Concat => items
                             .map(move |flow| match flow {
                                 Ok(Flowing::Value(v, tag)) => {
                                     inner(one(Ok(Flowing::Value(v, tag))), cx.clone())
@@ -838,7 +839,7 @@ impl Checker<'_> {
                         // Each value starts a group of its own, numbered in
                         // the order the values enter, so its work replays
                         // in its own order whatever order the groups end.
-                        Overlap::Merge => {
+                        Flatten::Merge => {
                             let here = here.clone();
                             items
                                 .map(move |flow| match flow {
@@ -848,7 +849,7 @@ impl Checker<'_> {
                                     }
                                     other => one(other),
                                 })
-                                .flatten_unordered(at_once)
+                                .flatten_unordered(concurrent)
                                 .boxed()
                         }
                     }
@@ -880,7 +881,7 @@ impl Checker<'_> {
                     Arc::new(move |items: Items, cx: Cx| forked(items, built.clone(), cx));
                 Ok((t, known))
             }
-            Stage::Catch(_) | Stage::Finalize(_) | Stage::Retry { .. } | Stage::Timeout(_) => {
+            Stage::CatchError(_) | Stage::Finalize(_) | Stage::Retry { .. } | Stage::Timeout(_) => {
                 unreachable!("covering stages are handled where the pipe is put together")
             }
             Stage::Use {

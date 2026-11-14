@@ -41,7 +41,7 @@
 //! - [`Entry::Emitted`]: the caller was handed this output. On replay the
 //!   same output is made again, with the same [`OutputId`](crate::OutputId), and not handed
 //!   out twice. The outputs of one group of work are matched in order, so
-//!   an output made in a group of an `each` that merges names its group,
+//!   an output made in a group of a `mergeMap` names its group,
 //!   and the groups need not finish in the same order again.
 //! - [`Entry::Through`] and [`Entry::Stopped`]: for a stream act that gives
 //!   its items again, how far a call got, how many outputs made from the
@@ -88,21 +88,21 @@
 //!
 //! # Groups of work
 //!
-//! An `each` that merges runs its values side by side, so their acts and
+//! A `mergeMap` runs its values side by side, so their acts and
 //! outputs can interleave in another order after a restart. In a saved
 //! run each value that enters it starts a group, numbered in the order the
 //! values enter, and the keys of the acts run for it start with the
-//! group's scope, such as `pipe[1].each@3/pipe[1].each.do[0]#0`. Its
+//! group's scope, such as `pipe[1].mergeMap@3/pipe[1].mergeMap.do[0]#0`. Its
 //! outputs are saved with `within` set to the scope, such as
-//! `pipe[1].each@3/`. A replay matches each group's own acts and outputs in
-//! that group's own order. A vine with no such `each` saves exactly the
+//! `pipe[1].mergeMap@3/`. A replay matches each group's own acts and outputs in
+//! that group's own order. A vine with no `mergeMap` saves exactly the
 //! lines it did before groups existed.
 //!
 //! # Which input item a line belongs to
 //!
 //! Input items are numbered from 1, counted from the first item ever. A
 //! line belongs to the input item the act's value came from. A value made
-//! from several items, such as a batch from `collect`, belongs to the last
+//! from several items, such as a batch from `bufferCount`, belongs to the last
 //! of them. A batch ties its items together: the position never stops
 //! between them, so a restart feeds the whole batch again.
 //!
@@ -116,7 +116,7 @@
 //! position and crashed before it dropped them, is fine: a run ignores
 //! lines at or before the position.
 //!
-//! Items can finish out of order under an `each` that merges: item 5 can
+//! Items can finish out of order under a `mergeMap`: item 5 can
 //! be done while item 3 is still running. [`Progress::Done`] with 5 says
 //! so. The position stays at 2, and [`Bookmark::record`] keeps 5 as done
 //! and drops its lines. After a restart the caller feeds items from 3 on,
@@ -165,8 +165,8 @@ pub enum Entry {
     /// The caller was handed one output with this name. Its id is not
     /// saved: a replay makes it again from where the output stands.
     /// `within` names the group of work it was made in, such as
-    /// `pipe[1].each@3/`, when it was made in a group of an `each` that
-    /// merges. A replay matches the outputs of one group in order,
+    /// `pipe[1].mergeMap@3/`, when it was made in a group of a
+    /// `mergeMap`. A replay matches the outputs of one group in order,
     /// whatever order the groups finish in. `from` names the item of a
     /// stream act call the output was made from, such as `pipe[1]#0@7/`,
     /// when `last` picked that item out of groups: once the call's
@@ -226,7 +226,7 @@ pub enum Ending {
     Ended(Value),
     /// It failed this way.
     Failed { code: String, message: String },
-    /// The run stopped reading it partway, because a `catch` or `finalize`
+    /// The run stopped reading it partway, because a `catchError` or `finalize`
     /// took over the rest of the item's work.
     Abandoned,
 }
@@ -532,8 +532,8 @@ pub enum Progress {
     /// position, and drop every line at or before it.
     Through(u64),
     /// This input item, past the position, is fully done while an item
-    /// before it is not. Keep it as done, and drop its lines. Only an
-    /// `each` that merges finishes items out of order.
+    /// before it is not. Keep it as done, and drop its lines. Only a
+    /// `mergeMap` finishes items out of order.
     Done(u64),
 }
 

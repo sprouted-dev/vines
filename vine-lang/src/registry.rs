@@ -200,11 +200,15 @@ pub(crate) const EACH: &str = "each";
 /// The step that runs a named act: `call: git.worktree_add`.
 pub(crate) const CALL: &str = "call";
 
-/// The words of the pipe model. No operator may take one.
+/// The lower-case words of the pipe model. No operator may take one.
 ///
-/// `collect` is a word of the pipe too. It is not listed here because the
-/// core stream operator of the same name already holds it, so no operator
-/// can take it either way.
+/// The pipe's camelCase keys, such as `mergeMap` and `catchError`, need no
+/// entry: an operator name is lower snake_case, so it can never be one.
+/// `together` and `catch` are the old names of `forkJoin` and
+/// `catchError`. The pipe's YAML refuses them as stage keys, so an
+/// operator by either name could never run in a pipe, and they stay
+/// reserved. `each` and `collect`, the other two old names, are held by
+/// [`EACH`] and by the core stream operator `collect`.
 pub(crate) const PIPE_WORDS: &[&str] = &[
     "tap", "split", "filter", "take", "together", "catch", "finalize", "retry", "timeout",
     "branch", "emit", "with", "into", "on", "fork", "last", "end",
@@ -326,7 +330,7 @@ impl Registry {
     /// Register a stream act: an act whose result is a stream. One item in
     /// becomes one item per [`Part::Item`] it gives, and the stream may end
     /// with a [`Part::End`] that says how it ended. An `Err` is an ordinary
-    /// failure, which a `catch` can handle.
+    /// failure, which a `catchError` can handle.
     ///
     /// A run that is resumed calls the act again for the same input. The
     /// act reads [`OpContext::resume_from`] and gives only the items after

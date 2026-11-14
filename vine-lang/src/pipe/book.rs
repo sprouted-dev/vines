@@ -13,7 +13,7 @@
 //!
 //! The outputs a caller was handed are kept per input item and per group
 //! of work. A replay matches the outputs of one group in that group's own
-//! order, so groups of an `each` that merges can finish in another order
+//! order, so groups of a `mergeMap` can finish in another order
 //! after a restart.
 //!
 //! The book also counts the outputs made at each place of each input item,
@@ -479,8 +479,8 @@ impl Cx {
         Some(key)
     }
 
-    /// The tag for the work of one value that enters the `each` that
-    /// merges at `path`, or one run of a `timeout`: its group, numbered in
+    /// The tag for the work of one value that enters the `mergeMap` at
+    /// `path`, or one run of a `timeout`: its group, numbered in
     /// the order values with the same scope enter, when the run is saved.
     /// Unsaved, the value keeps its tag.
     pub(super) fn group(&self, path: &str, tag: &Tag) -> Tag {
@@ -502,7 +502,7 @@ impl Cx {
     /// with `tag`: the tag the covered stages run under, and where the
     /// decision is saved, when the run is saved. Each run is a scope of its
     /// own, numbered in the order values reach the `timeout`, as a group
-    /// of an `each` that merges is. So a replay that skips the covered
+    /// of a `mergeMap` is. So a replay that skips the covered
     /// stages of a run that timed out leaves the keys of every other run
     /// where they were. Unsaved, the value keeps its tag.
     pub(super) fn timed_run(&self, path: &str, tag: &Tag) -> (Tag, Option<Key>) {

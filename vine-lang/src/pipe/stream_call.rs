@@ -10,7 +10,7 @@
 //!   replay asks the act for the items after the position, so the stages
 //!   after it rebuild what they held the way they do for input items.
 //!
-//! A call that stops early because a `catch` or `finalize` took over the
+//! A call that stops early because a `catchError` or `finalize` took over the
 //! rest of the item's work saves that it was abandoned, so a replay does
 //! not read on past where the first run stopped.
 
@@ -174,7 +174,7 @@ pub(super) struct StreamRun {
 
 impl Drop for StreamRun {
     /// A call saved by position that is dropped before it stopped was
-    /// abandoned: a `catch` or `finalize` took over, or the caller stopped
+    /// abandoned: a `catchError` or `finalize` took over, or the caller stopped
     /// reading. In the second case nobody reads the line.
     fn drop(&mut self) {
         let Some(position) = &self.position else {

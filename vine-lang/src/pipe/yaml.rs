@@ -7,7 +7,7 @@ use std::time::Duration;
 use serde_json::{json, Value};
 
 use super::check::{assemble, malformed};
-use super::{Keep, Overlap, Pipe, PipeDef, Stage};
+use super::{Flatten, Keep, Pipe, PipeDef, Stage};
 use crate::error::LoadError;
 use crate::registry::Registry;
 use crate::shape::Shape;
@@ -63,6 +63,27 @@ pub(crate) fn load(reg: &Registry, yaml: &str) -> Result<Pipe, LoadError> {
     )
 }
 
+/// The four mapping stage keys, for a refusal that names them.
+const MAP_KEYS: &str = "`concatMap`, `mergeMap`, `switchMap` or `exhaustMap`";
+
+/// Stage keys from before the stages took their RxJS names, and what
+/// replaces each. A vine that still uses one is refused, not read as an
+/// operator of that name.
+const RENAMED_STAGES: &[(&str, &str)] = &[
+    ("each", MAP_KEYS),
+    ("collect", "`bufferCount`"),
+    ("together", "`forkJoin`"),
+    ("catch", "`catchError`"),
+];
+
+fn renamed(path: &str, old: &str, new: &str) -> LoadError {
+    LoadError::Renamed {
+        path: path.into(),
+        old: old.into(),
+        new: new.into(),
+    }
+}
+
 #[cfg(feature = "yaml")]
 fn read_pipe(v: &Value, path: &str) -> Result<Vec<Stage>, LoadError> {
     let Some(list) = v.as_array() else {
@@ -77,8 +98,26 @@ fn read_pipe(v: &Value, path: &str) -> Result<Vec<Stage>, LoadError> {
 #[cfg(feature = "yaml")]
 fn read_stage(v: &Value, path: &str) -> Result<Stage, LoadError> {
     const WORDS: &[&str] = &[
-        "call", "tap", "split", "filter", "take", "last", "collect", "together", "each", "fork",
-        "catch", "finalize", "retry", "timeout", "use", "branch", "emit",
+        "call",
+        "tap",
+        "split",
+        "filter",
+        "take",
+        "last",
+        "bufferCount",
+        "forkJoin",
+        "concatMap",
+        "mergeMap",
+        "switchMap",
+        "exhaustMap",
+        "fork",
+        "catchError",
+        "finalize",
+        "retry",
+        "timeout",
+        "use",
+        "branch",
+        "emit",
     ];
     if v.as_str() == Some("last") {
         return Ok(Stage::Last);
@@ -108,6 +147,9 @@ fn read_stage(v: &Value, path: &str) -> Result<Stage, LoadError> {
             ))
         }
     };
+    if let Some((old, new)) = RENAMED_STAGES.iter().find(|(old, _)| *old == key) {
+        return Err(renamed(path, old, new));
+    }
     let body = &map[key];
     let here = format!("{path}.{key}");
     let text = |v: &Value, what: &str| -> Result<String, LoadError> {
@@ -199,14 +241,14 @@ fn read_stage(v: &Value, path: &str) -> Result<Stage, LoadError> {
             }
             Stage::Last
         }
-        "collect" => {
+        "bufferCount" => {
             takes(false, true)?;
             let m = fields(&["size"])?;
             let size = m
                 .get("size")
                 .and_then(Value::as_u64)
-                .ok_or_else(|| malformed(&here, "`collect` needs `size`, a whole number"))?;
-            Stage::Collect { size, into }
+                .ok_or_else(|| malformed(&here, "`bufferCount` needs `size`, a whole number"))?;
+            Stage::BufferCount { size, into }
         }
         "fork" => {
             takes(false, false)?;
@@ -221,47 +263,60 @@ fn read_stage(v: &Value, path: &str) -> Result<Stage, LoadError> {
                     .collect::<Result<_, _>>()?,
             )
         }
-        "together" => {
+        "forkJoin" => {
             takes(false, false)?;
-            Stage::Together(read_pipe(body, &here)?)
+            Stage::ForkJoin(read_pipe(body, &here)?)
         }
-        "each" => {
+        "concatMap" | "mergeMap" | "switchMap" | "exhaustMap" => {
             takes(false, false)?;
-            let m = fields(&["do", "overlap", "at_once"])?;
-            let overlap = match m.get("overlap").map(|v| v.as_str()) {
-                None | Some(Some("concat")) => Overlap::Concat,
-                Some(Some("merge")) => Overlap::Merge,
-                Some(Some("switch")) => Overlap::Switch,
-                Some(Some("exhaust")) => Overlap::Exhaust,
-                _ => {
-                    return Err(malformed(
-                        &format!("{here}.overlap"),
-                        "overlap is `concat`, `merge`, `switch` or `exhaust`",
-                    ))
-                }
+            let flatten = match key {
+                "concatMap" => Flatten::Concat,
+                "mergeMap" => Flatten::Merge,
+                "switchMap" => Flatten::Switch,
+                _ => Flatten::Exhaust,
             };
-            let at_once = match m.get("at_once") {
+            let Some(m) = body.as_object() else {
+                return Err(malformed(&here, &format!("`{key}` takes a map")));
+            };
+            if m.contains_key("overlap") {
+                return Err(renamed(
+                    &here,
+                    "overlap",
+                    &format!("{MAP_KEYS} as the stage key"),
+                ));
+            }
+            if m.contains_key("at_once") {
+                return Err(renamed(&here, "at_once", "`concurrent`"));
+            }
+            let m = fields(&["do", "concurrent"])?;
+            let concurrent = match m.get("concurrent") {
                 None => None,
                 Some(v) => Some(
                     v.as_u64()
                         .and_then(|n| usize::try_from(n).ok())
                         .ok_or_else(|| {
-                            malformed(&format!("{here}.at_once"), "`at_once` is a whole number")
+                            malformed(
+                                &format!("{here}.concurrent"),
+                                "`concurrent` is a whole number",
+                            )
                         })?,
                 ),
             };
             let Some(body) = m.get("do") else {
-                return Err(malformed(&here, "`each` needs `do`, the pipe to run"));
+                return Err(malformed(
+                    &here,
+                    &format!("`{key}` needs `do`, the pipe to run"),
+                ));
             };
-            Stage::Each {
-                overlap,
-                at_once,
+            Stage::Mapped {
+                flatten,
+                concurrent,
                 pipe: read_pipe(body, &format!("{here}.do"))?,
             }
         }
-        "catch" => {
+        "catchError" => {
             takes(false, false)?;
-            Stage::Catch(read_pipe(body, &here)?)
+            Stage::CatchError(read_pipe(body, &here)?)
         }
         "finalize" => {
             takes(false, false)?;
