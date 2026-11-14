@@ -6,8 +6,8 @@
 //!   `done a.one @5` when it is done. A step set to fail fails with the
 //!   code `broke` instead of giving a result.
 //! - `work.lines { id, lines }` is a stream act that gives its items again:
-//!   `{ id, line }` for each line after `resume_from`, one a second, and
-//!   ends with `{ lines }`. It logs `lines a from 0` each time it is
+//!   `{ id, line }` for each line after `resume_from`, one a second unless
+//!   [`Desk::pace_lines`] says otherwise, and ends with `{ lines }`. It logs `lines a from 0` each time it is
 //!   called.
 //!
 //! The clock is tokio's, so a test that starts it paused gets exact times.
@@ -35,6 +35,8 @@ pub struct Desk {
     /// For each step called: how many steps had finished, and how many
     /// results the caller had been handed, when it was called.
     at_start: Mutex<Vec<(usize, usize)>>,
+    /// How many seconds each line of `work.lines` takes.
+    line_secs: Mutex<u64>,
 }
 
 impl Desk {
@@ -47,6 +49,7 @@ impl Desk {
             cut: Mutex::new(0),
             handed: Mutex::new(0),
             at_start: Mutex::new(Vec::new()),
+            line_secs: Mutex::new(1),
         })
     }
 
@@ -84,6 +87,12 @@ impl Desk {
     /// The most steps that were running at one time.
     pub fn most_at_once(&self) -> usize {
         self.running.lock().unwrap().1
+    }
+
+    /// Make each line of `work.lines` take `secs` seconds from now on, as
+    /// a host that has slowed down would.
+    pub fn pace_lines(&self, secs: u64) {
+        *self.line_secs.lock().unwrap() = secs;
     }
 
     /// Make `id.step` fail every time it is called.
@@ -213,10 +222,11 @@ fn desk_acts(desk: &Arc<Desk>) -> Registry {
             let (id, lines) = (text(&v, "id"), v["lines"].as_u64().unwrap_or(0));
             let from = cx.resume_from();
             d.note(format!("lines {id} from {from}"));
+            let pace = *d.line_secs.lock().unwrap();
             let items = (from + 1..=lines).map(move |n| (n, id.clone()));
             futures::stream::iter(items)
-                .then(|(n, id)| async move {
-                    sleep(Duration::from_secs(1)).await;
+                .then(move |(n, id)| async move {
+                    sleep(Duration::from_secs(pace)).await;
                     Ok(Part::Item(json!({ "id": id, "line": n })))
                 })
                 .chain(futures::stream::once(async move {
