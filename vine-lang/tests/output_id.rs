@@ -1,6 +1,6 @@
 //! Every output a pipe hands out has an id. The id is the same when the
 //! same output is handed out again after a restart, at any kill, from a
-//! journal or from a bookmark, inside a group of an `each` that merges and
+//! journal or from a bookmark, inside a group of a `mergeMap` and
 //! inside a vine run by `use`. Two outputs of one run never share an id,
 //! even with the same name and payload.
 //!
@@ -16,7 +16,8 @@ use std::sync::Arc;
 use acts::desk::{desk_registry, job, job_event, jobs, step, Desk};
 use futures::{stream, StreamExt};
 use vine_lang::pipe::{
-    call, each, emit_with, filter, fork, last, pipe, split, use_vine, Overlap, Pipe, PipeDef, Stage,
+    call, concat_map, emit_with, filter, fork, last, merge_map, pipe, split, use_vine, Pipe,
+    PipeDef, Stage,
 };
 use vine_lang::{
     json, Bookmark, Event, Journal, OutputId, PipeOutput, Progress, Registry, Shape, Ty, Value,
@@ -42,7 +43,7 @@ fn twice_work() -> Vec<Stage> {
 }
 
 fn merging(work: Vec<Stage>) -> Stage {
-    each(Overlap::Merge, work).at_once(2)
+    merge_map(work).concurrent(2)
 }
 
 /// One item that lists jobs; the jobs run side by side.
@@ -108,23 +109,20 @@ fn summaries() -> PipeDef {
         .output("all", Shape::new().required("group", Ty::List))
         .stages([
             split("$item.groups").into("group"),
-            each(
-                Overlap::Concat,
-                [
-                    split("$item.group").into("job"),
-                    merging(vec![
-                        call(
-                            "work.lines",
-                            json!({ "id": "$item.job.id", "lines": "$item.job.secs" }),
-                        )
-                        .into("line")
-                        .end("ended"),
-                        filter("$item.ended"),
-                    ]),
-                    last(),
-                    emit_with("all", json!({ "group": "$item.group" })),
-                ],
-            ),
+            concat_map([
+                split("$item.group").into("job"),
+                merging(vec![
+                    call(
+                        "work.lines",
+                        json!({ "id": "$item.job.id", "lines": "$item.job.secs" }),
+                    )
+                    .into("line")
+                    .end("ended"),
+                    filter("$item.ended"),
+                ]),
+                last(),
+                emit_with("all", json!({ "group": "$item.group" })),
+            ]),
         ])
 }
 
@@ -428,10 +426,10 @@ async fn a_journal_saved_before_outputs_had_ids_resumes_with_the_ids_of_a_fresh_
     // Written as the library wrote journals before ids: the first job's
     // first step and its note. Nothing in it names an id.
     let old = json!([
-        { "kind": "done", "at": "pipe[1].each@0/pipe[1].each.do[0]#0",
+        { "kind": "done", "at": "pipe[1].mergeMap@0/pipe[1].mergeMap.do[0]#0",
           "input": { "id": "a", "step": "one", "secs": 1 },
           "result": { "id": "a", "step": "one" } },
-        { "kind": "emitted", "output": "noted", "within": "pipe[1].each@0/" },
+        { "kind": "emitted", "output": "noted", "within": "pipe[1].mergeMap@0/" },
     ]);
     let input = vec![jobs(&[("a", 1)])];
     let clean = run(
@@ -462,7 +460,7 @@ async fn the_same_vine_as_yaml_gives_the_same_ids() {
         input: { jobs: list }\n\
         outputs: { noted: { id: text } }\n\
         pipe:\n  - split: $item.jobs\n    into: job\n  \
-        - each:\n      overlap: merge\n      at_once: 2\n      do:\n        \
+        - mergeMap:\n      concurrent: 2\n      do:\n        \
         - call: work.step\n          with: { id: $item.job.id, step: one, secs: $item.job.secs }\n          into: one\n        \
         - fork:\n            - - emit: { to: noted, with: { id: $item.job.id } }\n        \
         - call: work.step\n          with: { id: $item.job.id, step: two, secs: 1 }\n          into: two\n        \

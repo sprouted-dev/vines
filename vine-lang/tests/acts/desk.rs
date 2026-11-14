@@ -18,7 +18,7 @@ use std::time::Duration;
 
 use futures::StreamExt;
 use tokio::time::{sleep, Instant};
-use vine_lang::pipe::{call, catch, each, emit_with, fork, pipe, split, Overlap, PipeDef, Stage};
+use vine_lang::pipe::{call, catch_error, emit_with, fork, merge_map, pipe, split, PipeDef, Stage};
 use vine_lang::{json, OpError, OperatorSpec, Part, Registry, Shape, Ty, Value};
 
 /// What the timed acts did.
@@ -273,22 +273,22 @@ pub fn job_work() -> Vec<Stage> {
     ]
 }
 
-/// The same work, with a `catch` inside: a job whose step fails emits
+/// The same work, with a `catchError` inside: a job whose step fails emits
 /// `failed`, and the other jobs go on.
 pub fn job_work_caught() -> Vec<Stage> {
     let mut work = job_work();
-    work.push(catch([emit_with(
+    work.push(catch_error([emit_with(
         "failed",
         json!({ "id": "$item.job.id", "code": "$item.error.code" }),
     )]));
     work
 }
 
-/// An `each` with `overlap`, capped at `at_once`, over `work`.
-pub fn each_job(overlap: Overlap, at_once: Option<usize>, work: Vec<Stage>) -> Stage {
-    let stage = each(overlap, work);
-    match at_once {
-        Some(n) => stage.at_once(n),
+/// A `mergeMap` over `work`, capped at `concurrent` when given.
+pub fn merge_jobs(concurrent: Option<usize>, work: Vec<Stage>) -> Stage {
+    let stage = merge_map(work);
+    match concurrent {
+        Some(n) => stage.concurrent(n),
         None => stage,
     }
 }

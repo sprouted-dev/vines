@@ -16,5 +16,5 @@ pipe:
   - tap: git.worktree_remove
     with: { path: $item.tree }
   - emit: { to: torn_down, with: { tree: $item.tree } }
-  - catch:
+  - catchError:
       - emit: { to: failed, with: { reason: $item.error.message } }

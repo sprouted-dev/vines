@@ -438,7 +438,7 @@ pub fn with(mut base: Value, fields: Value) -> Value {
 
 /// `vines/pipe/job_launch.yaml`, built in Rust.
 pub fn job_launch_pipe() -> vine_lang::pipe::PipeDef {
-    use vine_lang::pipe::{branch, call, catch, emit_with, pipe, tap, timeout};
+    use vine_lang::pipe::{branch, call, catch_error, emit_with, pipe, tap, timeout};
     let job = || Shape::new().required("job", Ty::Id);
     pipe("job_launch")
         .input(
@@ -473,7 +473,7 @@ pub fn job_launch_pipe() -> vine_lang::pipe::PipeDef {
                 "started",
                 json!({ "job": "$item.job", "session": "$item.session.id", "tree": "$item.tree.path" }),
             ),
-            catch([
+            catch_error([
                 branch(
                     "$item.error.from",
                     [

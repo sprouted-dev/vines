@@ -29,9 +29,8 @@ outputs:
 pipe:
   - split: $item.jobs
     into: job
-  - each:
-      overlap: merge
-      at_once: 2
+  - mergeMap:
+      concurrent: 2
       do:
         - call: move.launch
           with: { request: $item.request, job: $item.job }
@@ -66,7 +65,7 @@ pipe:
                       - emit:
                           to: not_launched
                           with: { plan: $item.plan, job: $item.job, reason: $item.ended.reason }
-        # Only each job's end item leaves the `each`.
+        # Only each job's end item leaves the `mergeMap`.
         - filter: $item.ended
   # The last job to end says all are done. Which job that is can differ
   # after a restart; `done` carries only what every job shares.

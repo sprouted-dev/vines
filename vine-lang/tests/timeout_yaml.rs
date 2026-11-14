@@ -8,9 +8,9 @@ mod acts;
 use std::sync::Arc;
 use std::time::Duration;
 
-use acts::desk::{desk_registry, each_job, step, Desk};
+use acts::desk::{desk_registry, merge_jobs, step, Desk};
 use futures::{stream, StreamExt};
-use vine_lang::pipe::{catch, emit_with, fork, pipe, split, timeout, Overlap, Pipe, PipeDef};
+use vine_lang::pipe::{catch_error, emit_with, fork, pipe, split, timeout, Pipe, PipeDef};
 use vine_lang::{json, Event, Journal, Shape, Ty, Value};
 
 const YAML: &str = r#"
@@ -23,9 +23,8 @@ outputs:
 pipe:
   - split: $item.jobs
     into: job
-  - each:
-      overlap: merge
-      at_once: 2
+  - mergeMap:
+      concurrent: 2
       do:
         - call: work.step
           with: { id: $item.job.id, step: one, secs: $item.job.secs }
@@ -37,7 +36,7 @@ pipe:
           into: two
         - timeout: 3s
         - emit: { to: done, with: { id: $item.job.id } }
-        - catch:
+        - catchError:
             - emit: { to: failed, with: { id: $item.job.id, code: $item.error.code } }
 "#;
 
@@ -50,8 +49,7 @@ fn rust() -> PipeDef {
         .output("failed", id().required("code", Ty::Text))
         .stages([
             split("$item.jobs").into("job"),
-            each_job(
-                Overlap::Merge,
+            merge_jobs(
                 Some(2),
                 vec![
                     step("one", json!("$item.job.secs")),
@@ -62,7 +60,7 @@ fn rust() -> PipeDef {
                     step("two", json!("$item.job.two")),
                     timeout(Duration::from_secs(3)),
                     emit_with("done", json!({ "id": "$item.job.id" })),
-                    catch([emit_with(
+                    catch_error([emit_with(
                         "failed",
                         json!({ "id": "$item.job.id", "code": "$item.error.code" }),
                     )]),

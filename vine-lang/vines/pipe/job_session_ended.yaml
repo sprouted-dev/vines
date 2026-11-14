@@ -17,7 +17,7 @@ pipe:
           - emit: { to: implemented, with: { job: $item.job, commit: $item.commit.sha } }
       else:
         - emit: { to: stopped, with: { job: $item.job, reason: $item.status } }
-  - catch:
+  - catchError:
       - emit: { to: failed, with: { job: $item.job, reason: $item.error.message } }
   - finalize:
       - tap: git.worktree_remove

@@ -18,8 +18,8 @@ use acts::restart::{
 use acts::{register_stream_act, Gives, World};
 use futures::{stream, StreamExt};
 use vine_lang::pipe::{
-    call, catch, collect, each, emit, emit_with, filter, finalize, fork, last, pipe, retry, take,
-    tap, use_vine, Overlap, PipeDef, Stage,
+    buffer_count, call, catch_error, concat_map, emit, emit_with, filter, finalize, fork, last,
+    pipe, retry, take, tap, use_vine, PipeDef, Stage,
 };
 use vine_lang::{
     json, Bookmark, Ending, Entry, Event, Journal, Line, OpError, OperatorSpec, Part, Pipe,
@@ -452,10 +452,10 @@ async fn event_pages_by_position_keeps_a_bookmark_that_does_not_grow_with_the_pa
     assert!(sizes[2].1 > 50 * sizes[0].1, "{sizes:?}");
 }
 
-// ---------------------------------------- a call that a catch takes over
+// ----------------------------------- a call that a catchError takes over
 
 /// Like `job_run`, with an act run for each line that refuses line 70: the
-/// `catch` takes over, and the agent's stream is abandoned partway.
+/// `catchError` takes over, and the agent's stream is abandoned partway.
 fn checked_run(world: &Arc<World>, host: &Arc<Host>) -> Pipe {
     let mut reg = job_run_registry_again(world, host);
     let w = world.clone();
@@ -499,7 +499,7 @@ fn checked_run(world: &Arc<World>, host: &Arc<Host>) -> Pipe {
             tap("check.line", json!({ "seq": "$item.line.seq" })),
             last(),
             emit_with("done", json!({ "job": "$item.job" })),
-            catch([emit_with(
+            catch_error([emit_with(
                 "failed",
                 json!({ "job": "$item.job", "reason": "$item.error.message" }),
             )]),
@@ -508,7 +508,7 @@ fn checked_run(world: &Arc<World>, host: &Arc<Host>) -> Pipe {
 }
 
 #[tokio::test(start_paused = true)]
-async fn a_call_a_catch_took_over_is_not_read_past_where_the_first_run_stopped() {
+async fn a_call_a_catch_error_took_over_is_not_read_past_where_the_first_run_stopped() {
     let script = Script::new(120, "finished");
     let (want, want_log, events) = uninterrupted(checked_run, &script).await;
     assert_eq!(want.len(), 71, "70 lines and one failure: {want:?}");
@@ -718,8 +718,8 @@ fn the_checker_saves_a_call_item_by_item_where_a_later_item_could_not_rebuild_th
             "pipe[1] is a `take` that counts what `feed.pages` at pipe[0] gives",
         ),
         (
-            events_vine([each(Overlap::Concat, [fetch()]), take(3), emit("out")]),
-            "pipe[0].each.do[0]",
+            events_vine([concat_map([fetch()]), take(3), emit("out")]),
+            "pipe[0].concatMap.do[0]",
             "pipe[1] is a `take`",
         ),
         (
@@ -730,20 +730,20 @@ fn the_checker_saves_a_call_item_by_item_where_a_later_item_could_not_rebuild_th
         ),
         (
             // Over the whole stream, a batch holds the pages of many events.
-            events_vine([fetch(), fork([vec![collect(2), emit("out")]]), emit("out")]),
+            events_vine([fetch(), fork([vec![buffer_count(2), emit("out")]]), emit("out")]),
             "pipe[0]",
-            "pipe[1].fork[0][0] is a `collect` that could put what `feed.pages` at pipe[0] gives in one batch",
+            "pipe[1].fork[0][0] is a `bufferCount` that could put what `feed.pages` at pipe[0] gives in one batch",
         ),
         (
-            // Out of `each`, a batch may hold the pages of many events.
+            // Out of `concatMap`, a batch may hold the pages of many events.
             events_vine([
-                each(Overlap::Concat, [fetch()]),
-                collect(2),
+                concat_map([fetch()]),
+                buffer_count(2),
                 emit("out"),
                 finalize([tap("archive.put", json!({ "seq": 1, "body": "x" }))]),
             ]),
-            "pipe[0].each.do[0]",
-            "pipe[1] is a `collect`",
+            "pipe[0].concatMap.do[0]",
+            "pipe[1] is a `bufferCount`",
         ),
         (
             events_vine([fetch(), retry(2, std::time::Duration::from_secs(1)), emit("out")]),
@@ -760,15 +760,15 @@ fn the_checker_saves_a_call_item_by_item_where_a_later_item_could_not_rebuild_th
             "pipe[1] is a `retry`",
         ),
         (
-            // A batch after a catch that runs the act holds many items' calls.
+            // A batch after a `catchError` that runs the act holds many items' calls.
             events_vine([
                 call("archive.put", json!({ "seq": "$item.seq", "body": "x" })),
-                catch([fetch()]),
-                collect(2),
+                catch_error([fetch()]),
+                buffer_count(2),
                 emit("out"),
             ]),
-            "pipe[1].catch[0]",
-            "pipe[2] is a `collect`",
+            "pipe[1].catchError[0]",
+            "pipe[2] is a `bufferCount`",
         ),
     ];
     for (def, path, says) in cases {
@@ -787,33 +787,30 @@ fn the_checker_saves_a_call_by_position_where_every_stage_after_it_can_be_rebuil
     for def in [
         // `last` holds one item, and a restart gives it again.
         events_vine([fetch(), last(), emit("out")]),
-        // `take` inside `each` counts what one item of the call gives.
-        events_vine([fetch(), each(Overlap::Concat, [take(1), emit("out")])]),
+        // `take` inside `concatMap` counts what one item of the call gives.
+        events_vine([fetch(), concat_map([take(1), emit("out")])]),
         // A batch inside one item's own work holds one call's items.
-        events_vine([fetch(), collect(2), emit("out"), cleanup()]),
+        events_vine([fetch(), buffer_count(2), emit("out"), cleanup()]),
         events_vine([
             fetch(),
-            fork([vec![collect(2), emit("out")]]),
+            fork([vec![buffer_count(2), emit("out")]]),
             emit("out"),
             cleanup(),
         ]),
-        events_vine([each(Overlap::Concat, [fetch(), collect(2), emit("out")])]),
-        // `catch` and `finalize` over the call.
-        events_vine([fetch(), emit("out"), catch([emit("out")]), cleanup()]),
+        events_vine([concat_map([fetch(), buffer_count(2), emit("out")])]),
+        // `catchError` and `finalize` over the call.
+        events_vine([fetch(), emit("out"), catch_error([emit("out")]), cleanup()]),
         // `retry` over stages after the call, not over the call.
         events_vine([
             fetch(),
-            each(
-                Overlap::Concat,
-                [
-                    call("archive.put", json!({ "seq": 1, "body": "x" })),
-                    retry(2, std::time::Duration::from_secs(1)),
-                    emit("out"),
-                ],
-            ),
+            concat_map([
+                call("archive.put", json!({ "seq": 1, "body": "x" })),
+                retry(2, std::time::Duration::from_secs(1)),
+                emit("out"),
+            ]),
         ]),
         // A batch over the whole stream of events, before the call.
-        events_vine([collect(2), filter("$item.count"), emit("out")]),
+        events_vine([buffer_count(2), filter("$item.count"), emit("out")]),
     ] {
         let vine = reg.build_pipe(def).unwrap();
         assert_eq!(vine.saves_every_item(), [], "{vine:?}");
@@ -830,7 +827,7 @@ fn a_second_stream_act_in_a_row_feeds_a_batch_with_many_calls_and_only_it_saves_
             json!({ "seq": "$item.seq", "page": "$item.page.page" }),
         )
         .into("word"),
-        collect(2),
+        buffer_count(2),
         emit("out"),
         finalize([tap("archive.put", json!({ "seq": 1, "body": "x" }))]),
     ]);

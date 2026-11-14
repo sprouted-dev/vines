@@ -37,7 +37,7 @@ pipe:
         - emit: { to: log_line, with: { job: $item.job, seq: $item.line.seq, text: $item.line.text } }
       - - filter: $item.line
         # 50 lines at a time, and what is left when the agent ends.
-        - collect: { size: 50 }
+        - bufferCount: { size: 50 }
           into: batch
         - summarize: { items: $item.batch.items }
           into: summary
@@ -54,7 +54,7 @@ pipe:
           - emit: { to: implemented, with: { job: $item.job, commit: $item.commit.sha } }
       else:
         - emit: { to: stopped, with: { job: $item.job, reason: $item.ended.status } }
-  - catch:
+  - catchError:
       - emit: { to: failed, with: { job: $item.job, reason: $item.error.message } }
   # `finalize` sees the item as it arrived, before `tree` was added, so it
   # removes the working copy by the name it was made with.

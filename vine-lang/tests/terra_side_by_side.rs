@@ -33,16 +33,19 @@ use vine_lang::{json, Value};
 const MIXED: [(&str, &str); 3] = [("j-1", "ready"), ("j-2", "done"), ("j-3", "ready")];
 const READY: [(&str, &str); 3] = [("j-1", "ready"), ("j-2", "ready"), ("j-3", "ready")];
 
-fn plan_launch_all(at_once: &str) -> String {
+fn plan_launch_all(concurrent: &str) -> String {
     let text = match yaml("plan_launch_all") {
         VineSource::Yaml(text) => text,
         VineSource::Def(_) => unreachable!("read as YAML"),
     };
-    assert!(text.contains("at_once: 2"), "the vine launches two at once");
-    text.replace("at_once: 2", &format!("at_once: {at_once}"))
+    assert!(
+        text.contains("concurrent: 2"),
+        "the vine launches two at once"
+    );
+    text.replace("concurrent: 2", &format!("concurrent: {concurrent}"))
 }
 
-fn trellis(at_once: &str) -> Trellis {
+fn trellis(concurrent: &str) -> Trellis {
     let mut vines: Vec<VineSource> = [
         "job_teardown",
         "job_launch_undo",
@@ -52,7 +55,7 @@ fn trellis(at_once: &str) -> Trellis {
     .into_iter()
     .map(yaml)
     .collect();
-    vines.push(VineSource::Yaml(plan_launch_all(at_once)));
+    vines.push(VineSource::Yaml(plan_launch_all(concurrent)));
     Trellis {
         vines,
         moves: vec![
@@ -66,7 +69,7 @@ fn trellis(at_once: &str) -> Trellis {
 }
 
 /// A plan with these jobs. Starting an agent takes five seconds.
-fn setup(jobs: &[(&str, &str)], at_once: &str) -> (Arc<World>, Terra) {
+fn setup(jobs: &[(&str, &str)], concurrent: &str) -> (Arc<World>, Terra) {
     let world = World::new();
     world.slow("agent.start", Duration::from_secs(5));
     let terra = Terra::new(registry(&world));
@@ -81,7 +84,7 @@ fn setup(jobs: &[(&str, &str)], at_once: &str) -> (Arc<World>, Terra) {
             json!({ "state": state, "plan": "p-1", "waiting_on": 0, "brief": "work" }),
         );
     }
-    terra.install(trellis(at_once)).unwrap();
+    terra.install(trellis(concurrent)).unwrap();
     (world, terra)
 }
 
@@ -187,8 +190,8 @@ fn assert_same(
 #[tokio::test(start_paused = true)]
 async fn three_five_second_launches_take_ten_seconds_two_at_once_and_fifteen_one_at_a_time() {
     let mut took = Vec::new();
-    for at_once in ["2", "1"] {
-        let (_world, terra) = setup(&READY, at_once);
+    for concurrent in ["2", "1"] {
+        let (_world, terra) = setup(&READY, concurrent);
         let start = Instant::now();
         terra
             .press_as("r-1", "launch_all", launch_all())

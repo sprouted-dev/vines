@@ -1,4 +1,4 @@
-//! Stream acts, `fork`, `last`, `collect`, and saved runs, in Rust alone.
+//! Stream acts, `fork`, `last`, `bufferCount`, and saved runs, in Rust alone.
 //! This file passes with the YAML feature off:
 //!
 //!     cargo test --no-default-features --test pipe_streams
@@ -12,8 +12,9 @@ use acts::{registry, World};
 use futures::{stream, StreamExt};
 use tokio::time::{sleep, Instant};
 use vine_lang::pipe::{
-    branch, call, catch, collect, each, emit, emit_with, finalize, fork, last, op, pipe, split,
-    take, tap, timeout, together, use_vine, Overlap, Pipe, PipeDef, Stage,
+    branch, buffer_count, call, catch_error, concat_map, emit, emit_with, exhaust_map, finalize,
+    fork, fork_join, last, op, pipe, split, switch_map, take, tap, timeout, use_vine, Pipe,
+    PipeDef, Stage,
 };
 use vine_lang::{
     json, Entry, Event, Journal, LoadError, OpError, OperatorSpec, Part, Registry, RegistryError,
@@ -224,11 +225,11 @@ async fn a_stream_act_that_declares_no_end_may_just_stop_and_its_end_is_null() {
 }
 
 #[tokio::test]
-async fn a_stream_act_that_fails_partway_has_given_the_items_before_and_catch_handles_it() {
+async fn a_stream_act_that_fails_partway_has_given_the_items_before_and_catch_error_handles_it() {
     let vine = built([
         call("count.up", json!({ "to": 5, "fail_at": 3 })).into("count"),
         emit_with("out", json!({ "n": "$item.count.n" })),
-        catch([emit_with(
+        catch_error([emit_with(
             "failed",
             json!({ "n": "$item.n", "error": "$item.error" }),
         )]),
@@ -297,7 +298,7 @@ async fn an_item_that_breaks_the_declared_shape_is_a_run_error_after_the_items_b
     let vine = built([
         call("count.up", json!({ "to": 3, "bad_at": 2 })),
         emit("out"),
-        catch([emit("failed")]),
+        catch_error([emit("failed")]),
     ]);
     let (outs, err) = all(&vine, nums(&[1])).await;
     assert_eq!(values(&outs), nums(&[1]));
@@ -324,7 +325,7 @@ async fn an_end_that_breaks_its_declared_shape_or_never_comes_is_a_run_error() {
 }
 
 #[test]
-fn a_stream_act_cannot_be_tapped_or_run_in_together_and_end_needs_a_stream_act() {
+fn a_stream_act_cannot_be_tapped_or_run_in_fork_join_and_end_needs_a_stream_act() {
     let err = refused([tap("count.up", json!({ "to": 1 })), emit("out")]);
     assert!(
         matches!(err, LoadError::Malformed { ref path, ref problem }
@@ -332,14 +333,14 @@ fn a_stream_act_cannot_be_tapped_or_run_in_together_and_end_needs_a_stream_act()
         "{err}"
     );
     let err = refused([
-        together([
+        fork_join([
             count_to("$item.n").into("a"),
             call("store.put", json!({ "n": 1 })).into("b"),
         ]),
         emit("out"),
     ]);
     assert!(
-        matches!(err, LoadError::Malformed { ref path, .. } if path == "pipe[0].together[0]"),
+        matches!(err, LoadError::Malformed { ref path, .. } if path == "pipe[0].forkJoin[0]"),
         "{err}"
     );
     let err = refused([
@@ -486,10 +487,10 @@ async fn fork_keeps_the_main_pipe_in_order_when_a_side_pipe_takes_time() {
 }
 
 #[tokio::test]
-async fn a_side_pipe_sees_the_whole_stream_so_collect_and_last_work_in_it() {
+async fn a_side_pipe_sees_the_whole_stream_so_buffer_count_and_last_work_in_it() {
     let vine = built([
         fork([
-            vec![collect(2), emit("a")],
+            vec![buffer_count(2), emit("a")],
             vec![last(), emit_with("b", json!({ "last": "$item.n" }))],
         ]),
         emit_with("out", json!({ "n": "$item.n" })),
@@ -531,11 +532,11 @@ async fn a_side_pipe_that_ends_early_does_not_stop_the_main_pipe() {
 }
 
 #[tokio::test]
-async fn a_failure_in_a_side_pipe_fails_its_item_and_a_catch_after_the_fork_handles_it() {
+async fn a_failure_in_a_side_pipe_fails_its_item_and_a_catch_error_after_the_fork_handles_it() {
     let vine = built([
         fork([vec![tap("store.put", json!({ "n": "$item.n" }))]]),
         emit("out"),
-        catch([emit_with(
+        catch_error([emit_with(
             "failed",
             json!({ "n": "$item.n", "from": "$item.error.from" }),
         )]),
@@ -659,8 +660,8 @@ async fn last_of_an_empty_stream_gives_nothing() {
 }
 
 #[tokio::test]
-async fn collect_gives_batches_and_what_is_left_when_the_stream_ends() {
-    let vine = built([collect(2), emit("out")]);
+async fn buffer_count_gives_batches_and_what_is_left_when_the_stream_ends() {
+    let vine = built([buffer_count(2), emit("out")]);
     let (outs, _) = all(&vine, nums(&[1, 2, 3, 4, 5])).await;
     assert_eq!(
         values(&outs),
@@ -673,15 +674,15 @@ async fn collect_gives_batches_and_what_is_left_when_the_stream_ends() {
 }
 
 #[tokio::test]
-async fn collect_never_gives_an_empty_batch() {
-    let vine = built([collect(2), emit("out")]);
+async fn buffer_count_never_gives_an_empty_batch() {
+    let vine = built([buffer_count(2), emit("out")]);
     assert_eq!(all(&vine, nums(&[1, 2, 3, 4])).await.0.len(), 2);
     assert_eq!(all(&vine, vec![]).await, (vec![], None));
 }
 
 #[tokio::test]
-async fn collect_with_into_keeps_the_last_item_of_the_batch() {
-    let vine = built([collect(2).into("batch"), emit("out")]);
+async fn buffer_count_with_into_keeps_the_last_item_of_the_batch() {
+    let vine = built([buffer_count(2).into("batch"), emit("out")]);
     let (outs, _) = all(&vine, nums(&[1, 2, 3])).await;
     assert_eq!(
         values(&outs),
@@ -693,19 +694,19 @@ async fn collect_with_into_keeps_the_last_item_of_the_batch() {
 }
 
 #[test]
-fn collect_of_size_zero_and_a_bad_into_are_refused() {
-    let err = refused([collect(0), emit("out")]);
+fn buffer_count_of_size_zero_and_a_bad_into_are_refused() {
+    let err = refused([buffer_count(0), emit("out")]);
     assert!(
-        matches!(err, LoadError::Malformed { ref path, .. } if path == "pipe[0].collect"),
+        matches!(err, LoadError::Malformed { ref path, .. } if path == "pipe[0].bufferCount"),
         "{err}"
     );
-    let err = refused([collect(2).into("Batch"), emit("out")]);
+    let err = refused([buffer_count(2).into("Batch"), emit("out")]);
     assert!(
         matches!(err, LoadError::Malformed { ref path, .. } if path == "pipe[0].into"),
         "{err}"
     );
     // The checker knows a batch's fields.
-    let err = refused([collect(2), emit_with("out", json!({ "x": "$item.n" }))]);
+    let err = refused([buffer_count(2), emit_with("out", json!({ "x": "$item.n" }))]);
     assert!(
         matches!(err, LoadError::UnknownField { ref field, .. } if field == "n"),
         "{err}"
@@ -713,12 +714,12 @@ fn collect_of_size_zero_and_a_bad_into_are_refused() {
 }
 
 #[tokio::test]
-async fn before_a_covering_stage_last_and_collect_see_the_end_of_each_items_own_stream() {
+async fn before_a_covering_stage_last_and_buffer_count_see_the_end_of_each_items_own_stream() {
     let vine = built([
         count_to("$item.n").into("count"),
         last(),
         emit_with("out", json!({ "n": "$item.n", "last": "$item.count.n" })),
-        catch([emit("failed")]),
+        catch_error([emit("failed")]),
     ]);
     let (outs, _) = all(&vine, nums(&[2, 3])).await;
     assert_eq!(
@@ -726,7 +727,7 @@ async fn before_a_covering_stage_last_and_collect_see_the_end_of_each_items_own_
         [json!({ "n": 2, "last": 2 }), json!({ "n": 3, "last": 3 })]
     );
 
-    // `split` makes many items from one, and `collect` sees each item's
+    // `split` makes many items from one, and `bufferCount` sees each item's
     // own list.
     let reg = counting().1;
     let vine = reg
@@ -736,7 +737,7 @@ async fn before_a_covering_stage_last_and_collect_see_the_end_of_each_items_own_
                 .output("out", Shape::open())
                 .stages([
                     split("$item.ns"),
-                    collect(2),
+                    buffer_count(2),
                     emit_with("out", json!({ "count": "$item.count" })),
                     finalize([op("set", json!({}))]),
                 ]),
@@ -758,32 +759,32 @@ async fn before_a_covering_stage_last_and_collect_see_the_end_of_each_items_own_
 }
 
 #[test]
-fn last_and_collect_where_they_could_only_see_one_item_are_refused() {
+fn last_and_buffer_count_where_they_could_only_see_one_item_are_refused() {
     let cases: Vec<(Vec<Stage>, &str)> = vec![
         (
-            vec![last(), emit("out"), catch([emit("failed")])],
+            vec![last(), emit("out"), catch_error([emit("failed")])],
             "pipe[0].last",
         ),
         (
             vec![
                 op("set", json!({ "n": "$item.n" })),
-                collect(2),
+                buffer_count(2),
                 emit("out"),
                 finalize([op("set", json!({}))]),
             ],
-            "pipe[1].collect",
+            "pipe[1].bufferCount",
         ),
         (
-            vec![each(Overlap::Concat, [last(), emit("out")])],
-            "pipe[0].each.do[0].last",
+            vec![concat_map([last(), emit("out")])],
+            "pipe[0].concatMap.do[0].last",
         ),
         (
             vec![
                 count_to("$item.n"),
                 emit("out"),
-                catch([collect(2), emit("failed")]),
+                catch_error([buffer_count(2), emit("failed")]),
             ],
-            "pipe[2].catch[0].collect",
+            "pipe[2].catchError[0].bufferCount",
         ),
         (
             vec![branch(
@@ -797,11 +798,11 @@ fn last_and_collect_where_they_could_only_see_one_item_are_refused() {
         // own stream, so it needs the stream act too.
         (
             vec![
-                fork([vec![collect(2), emit("a")]]),
+                fork([vec![buffer_count(2), emit("a")]]),
                 emit("out"),
-                catch([emit("failed")]),
+                catch_error([emit("failed")]),
             ],
-            "pipe[0].fork[0][0].collect",
+            "pipe[0].fork[0][0].bufferCount",
         ),
     ];
     for (stages, path) in cases {
@@ -817,17 +818,17 @@ fn last_and_collect_where_they_could_only_see_one_item_are_refused() {
         .1
         .build_pipe(numbers([
             count_to("$item.n").into("count"),
-            fork([vec![collect(2), emit("a")]]),
+            fork([vec![buffer_count(2), emit("a")]]),
             last(),
             emit("out"),
-            catch([emit("failed")]),
+            catch_error([emit("failed")]),
         ]))
         .unwrap();
 }
 
 #[test]
-fn last_and_collect_after_an_emit_can_never_run() {
-    for stage in [last(), collect(2)] {
+fn last_and_buffer_count_after_an_emit_can_never_run() {
+    for stage in [last(), buffer_count(2)] {
         assert_eq!(
             refused([emit("out"), stage]),
             LoadError::Unreachable {
@@ -846,7 +847,8 @@ fn no_operator_can_take_a_new_word_of_the_pipe() {
             .unwrap_err();
         assert_eq!(err, RegistryError::Reserved(word.into()));
     }
-    // The core stream operator already holds `collect`.
+    // `collect`, the old name of `bufferCount`, is held by the `Vine`
+    // runner's core stream operator.
     let mut reg = Registry::new();
     let err = reg
         .register(OperatorSpec::new("collect"), |_v, _cx| async {
@@ -946,14 +948,14 @@ fn a_journal_that_is_not_a_list_of_known_entries_is_refused() {
 async fn run_saved_refuses_a_vine_that_cannot_replay_in_one_order() {
     let mut reg = counting().1;
     let exhausted = reg
-        .build_pipe(numbers([each(Overlap::Exhaust, [emit("out")])]))
+        .build_pipe(numbers([exhaust_map([emit("out")])]))
         .unwrap();
     let inner = reg
         .build_pipe(
             pipe("inner")
                 .input(Shape::new().required("n", Ty::Int))
                 .output("out", Shape::open())
-                .stages([each(Overlap::Switch, [emit("out")])]),
+                .stages([switch_map([emit("out")])]),
         )
         .unwrap();
     reg.add_vine(inner).unwrap();
@@ -961,7 +963,7 @@ async fn run_saved_refuses_a_vine_that_cannot_replay_in_one_order() {
         .build_pipe(numbers([use_vine("inner", None).on("out", [emit("out")])]))
         .unwrap();
     for (vine, says) in [
-        (exhausted, "overlap `exhaust`"),
+        (exhausted, "pipe[0].exhaustMap drops or skips work"),
         (using, "uses vine `inner`"),
     ] {
         assert!(!vine.resumable());
@@ -1043,7 +1045,7 @@ async fn a_saved_failure_is_replayed_as_a_failure() {
                         json!({ "name": "$item.branch", "from": "main" }),
                     ),
                     emit("out"),
-                    catch([emit_with("failed", json!({ "why": "$item.error.code" }))]),
+                    catch_error([emit_with("failed", json!({ "why": "$item.error.code" }))]),
                 ]),
         )
         .unwrap();
@@ -1068,7 +1070,7 @@ async fn a_stream_act_is_told_where_to_resume_and_its_saved_items_flow_again() {
         .build_pipe(numbers([
             count_to("$item.n").into("count"),
             fork([vec![
-                collect(3),
+                buffer_count(3),
                 emit_with("a", json!({ "count": "$item.count" })),
             ]]),
             emit_with("out", json!({ "n": "$item.count.n" })),

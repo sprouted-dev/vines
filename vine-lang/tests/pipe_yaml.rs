@@ -455,44 +455,155 @@ fn with_and_into_go_only_where_they_mean_something() {
 }
 
 #[test]
-fn each_reads_its_overlap_rule_and_refuses_one_it_does_not_know() {
-    let err = bad("  - each: { overlap: sideways, do: [ { emit: out } ] }\n");
-    assert!(
-        matches!(err, LoadError::Malformed { ref path, .. } if path == "pipe[0].each.overlap"),
-        "{err}"
-    );
-    let err = bad("  - each: { overlap: merge }\n");
-    assert!(
-        matches!(err, LoadError::Malformed { ref path, .. } if path == "pipe[0].each"),
-        "{err}"
-    );
-    let err = bad("  - each: { do: [ { emit: out } ], limit: 2 }\n");
-    assert_eq!(
-        err,
-        LoadError::UnknownKey {
-            path: "pipe[0].each".into(),
-            key: "limit".into()
-        }
-    );
-    for overlap in ["concat", "merge", "switch", "exhaust"] {
+fn the_four_map_stages_need_do_and_refuse_keys_they_do_not_take() {
+    const MAPS: [&str; 4] = ["concatMap", "mergeMap", "switchMap", "exhaustMap"];
+    for key in MAPS {
+        let err = bad(&format!("  - {key}: {{}}\n"));
+        assert!(
+            matches!(err, LoadError::Malformed { ref path, .. } if *path == format!("pipe[0].{key}")),
+            "{key}: {err}"
+        );
+        let err = bad(&format!(
+            "  - {key}: {{ do: [ {{ emit: out }} ], limit: 2 }}\n"
+        ));
+        assert_eq!(
+            err,
+            LoadError::UnknownKey {
+                path: format!("pipe[0].{key}"),
+                key: "limit".into()
+            }
+        );
+    }
+    for key in MAPS {
         let world = World::new();
         let doc = format!(
-            "vine: v\ninput: {{ n: int }}\noutputs: {{ out: {{ n: int }} }}\npipe:\n  - each: {{ overlap: {overlap}, do: [ {{ emit: out }} ] }}\n"
+            "vine: v\ninput: {{ n: int }}\noutputs: {{ out: {{ n: int }} }}\npipe:\n  - {key}: {{ do: [ {{ emit: out }} ] }}\n"
         );
         registry(&world).load_pipe(&doc).unwrap();
     }
 }
 
 #[test]
-fn branch_needs_its_cases_and_catch_and_finalize_take_a_list() {
+fn concurrent_is_taken_by_merge_map_and_refused_on_the_other_three() {
+    let world = World::new();
+    let doc = "vine: v\ninput: { n: int }\noutputs: { out: { n: int } }\npipe:\n  - mergeMap: { concurrent: 2, do: [ { emit: out } ] }\n";
+    registry(&world).load_pipe(doc).unwrap();
+    for key in ["concatMap", "switchMap", "exhaustMap"] {
+        let err = bad(&format!(
+            "  - {key}: {{ concurrent: 2, do: [ {{ emit: out }} ] }}\n"
+        ));
+        assert!(
+            matches!(err, LoadError::Malformed { ref path, ref problem }
+                if *path == format!("pipe[0].{key}") && problem.contains("only `mergeMap`")),
+            "{key}: {err}"
+        );
+    }
+    let err = bad("  - mergeMap: { concurrent: two, do: [ { emit: out } ] }\n");
+    assert!(
+        matches!(err, LoadError::Malformed { ref path, .. } if path == "pipe[0].mergeMap.concurrent"),
+        "{err}"
+    );
+    let err = bad("  - mergeMap: { concurrent: 0, do: [ { emit: out } ] }\n");
+    assert!(
+        matches!(err, LoadError::Malformed { ref path, .. } if path == "pipe[0].mergeMap"),
+        "{err}"
+    );
+}
+
+// --------------------------------------------- keys from before the RxJS names
+
+fn renamed(path: &str, old: &str, new: &str) -> LoadError {
+    LoadError::Renamed {
+        path: path.into(),
+        old: old.into(),
+        new: new.into(),
+    }
+}
+
+const MAP_KEYS: &str = "`concatMap`, `mergeMap`, `switchMap` or `exhaustMap`";
+
+#[test]
+fn each_is_refused_and_the_error_names_the_four_map_stages() {
+    let err = bad("  - each: { overlap: merge, do: [ { emit: out } ] }\n");
+    assert_eq!(err, renamed("pipe[0]", "each", MAP_KEYS));
+}
+
+#[test]
+fn collect_is_refused_and_the_error_names_buffer_count() {
+    let err = bad("  - collect: { size: 2 }\n  - emit: out\n");
+    assert_eq!(err, renamed("pipe[0]", "collect", "`bufferCount`"));
+}
+
+#[test]
+fn together_is_refused_and_the_error_names_fork_join() {
+    let err = bad("  - together: [ { call: git.commit, into: c } ]\n  - emit: out\n");
+    assert_eq!(err, renamed("pipe[0]", "together", "`forkJoin`"));
+}
+
+#[test]
+fn catch_is_refused_and_the_error_names_catch_error() {
+    let err = bad("  - emit: out\n  - catch: [ { emit: out } ]\n");
+    assert_eq!(err, renamed("pipe[1]", "catch", "`catchError`"));
+}
+
+#[test]
+fn overlap_is_refused_on_every_map_stage_and_the_error_names_the_stage_keys() {
+    for key in ["concatMap", "mergeMap", "switchMap", "exhaustMap"] {
+        let err = bad(&format!(
+            "  - {key}: {{ overlap: merge, do: [ {{ emit: out }} ] }}\n"
+        ));
+        assert_eq!(
+            err,
+            renamed(
+                &format!("pipe[0].{key}"),
+                "overlap",
+                &format!("{MAP_KEYS} as the stage key")
+            )
+        );
+    }
+}
+
+#[test]
+fn at_once_is_refused_and_the_error_names_concurrent() {
+    let err = bad("  - mergeMap: { at_once: 2, do: [ { emit: out } ] }\n");
+    assert_eq!(err, renamed("pipe[0].mergeMap", "at_once", "`concurrent`"));
+}
+
+#[test]
+fn an_old_key_is_refused_where_it_stands_inside_another_stage() {
+    let err =
+        bad("  - fork:\n      - - collect: { size: 2 }\n        - emit: out\n  - emit: out\n");
+    assert_eq!(
+        err,
+        renamed("pipe[0].fork[0][0]", "collect", "`bufferCount`")
+    );
+    let err =
+        bad("  - concatMap:\n      do:\n        - emit: out\n        - catch: [ { emit: out } ]\n");
+    assert_eq!(
+        err,
+        renamed("pipe[0].concatMap.do[1]", "catch", "`catchError`")
+    );
+}
+
+#[test]
+fn the_refusal_of_an_old_key_says_which_key_to_use() {
+    let err = bad("  - collect: { size: 2 }\n  - emit: out\n");
+    assert_eq!(
+        err.to_string(),
+        "pipe[0]: `collect` is not a key any more; use `bufferCount`"
+    );
+}
+
+#[test]
+fn branch_needs_its_cases_and_catch_error_and_finalize_take_a_list() {
     let err = bad("  - branch: { on: $item.n }\n  - emit: out\n");
     assert!(
         matches!(err, LoadError::Malformed { ref path, .. } if path == "pipe[0].branch"),
         "{err}"
     );
-    let err = bad("  - emit: out\n  - catch: out\n");
+    let err = bad("  - emit: out\n  - catchError: out\n");
     assert!(
-        matches!(err, LoadError::Malformed { ref path, .. } if path == "pipe[1].catch"),
+        matches!(err, LoadError::Malformed { ref path, .. } if path == "pipe[1].catchError"),
         "{err}"
     );
     let err = bad("  - emit: out\n  - finalize: { tap: git.commit }\n");

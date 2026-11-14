@@ -1,5 +1,5 @@
 //! `job_run` written in YAML is the same vine as `job_run` built in Rust,
-//! and the YAML forms of `fork`, `last`, `collect` and `end`.
+//! and the YAML forms of `fork`, `last`, `bufferCount` and `end`.
 #![cfg(feature = "yaml")]
 
 mod acts;
@@ -9,7 +9,9 @@ use std::sync::Arc;
 use acts::agent::{job, job_run_pipe, job_run_registry, Host, Script};
 use acts::World;
 use futures::{stream, StreamExt};
-use vine_lang::pipe::{call, catch, collect, emit, fork, last, pipe, tap, Pipe, PipeDef, Stage};
+use vine_lang::pipe::{
+    buffer_count, call, catch_error, emit, fork, last, pipe, tap, Pipe, PipeDef, Stage,
+};
 use vine_lang::{json, Entry, Event, Journal, LoadError, PipeOutput, RunError, Shape, Ty, Value};
 
 fn text() -> String {
@@ -185,12 +187,12 @@ fn the_same_mistake_with_a_new_stage_is_refused_with_the_same_error() {
             "  - fork: []\n  - emit: out\n".into(),
         ),
         (
-            vec![collect(0), emit("out")],
-            "  - collect: { size: 0 }\n  - emit: out\n".into(),
+            vec![buffer_count(0), emit("out")],
+            "  - bufferCount: { size: 0 }\n  - emit: out\n".into(),
         ),
         (
-            vec![last(), emit("out"), catch([emit("out")])],
-            "  - last\n  - emit: out\n  - catch: [ { emit: out } ]\n".into(),
+            vec![last(), emit("out"), catch_error([emit("out")])],
+            "  - last\n  - emit: out\n  - catchError: [ { emit: out } ]\n".into(),
         ),
         (
             vec![fork([vec![emit("nowhere")]]), emit("out")],
@@ -251,26 +253,26 @@ fn last_is_one_word_and_takes_nothing() {
 }
 
 #[test]
-fn collect_takes_a_size_and_an_into() {
-    let err = bad("  - collect: 5\n  - emit: out\n");
+fn buffer_count_takes_a_size_and_an_into() {
+    let err = bad("  - bufferCount: 5\n  - emit: out\n");
     assert!(
-        matches!(err, LoadError::Malformed { ref path, .. } if path == "pipe[0].collect"),
+        matches!(err, LoadError::Malformed { ref path, .. } if path == "pipe[0].bufferCount"),
         "{err}"
     );
-    let err = bad("  - collect: {}\n  - emit: out\n");
+    let err = bad("  - bufferCount: {}\n  - emit: out\n");
     assert!(
-        matches!(err, LoadError::Malformed { ref path, .. } if path == "pipe[0].collect"),
+        matches!(err, LoadError::Malformed { ref path, .. } if path == "pipe[0].bufferCount"),
         "{err}"
     );
-    let err = bad("  - collect: { size: 2, every: 5s }\n  - emit: out\n");
+    let err = bad("  - bufferCount: { size: 2, every: 5s }\n  - emit: out\n");
     assert_eq!(
         err,
         LoadError::UnknownKey {
-            path: "pipe[0].collect".into(),
+            path: "pipe[0].bufferCount".into(),
             key: "every".into()
         }
     );
-    let err = bad("  - collect: { size: 2 }\n    with: {}\n  - emit: out\n");
+    let err = bad("  - bufferCount: { size: 2 }\n    with: {}\n  - emit: out\n");
     assert_eq!(
         err,
         LoadError::UnknownKey {

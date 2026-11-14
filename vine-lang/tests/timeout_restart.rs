@@ -21,11 +21,11 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use acts::desk::{desk_registry, each_job, jobs_vine, step, Desk};
+use acts::desk::{desk_registry, jobs_vine, merge_jobs, step, Desk};
 use futures::{stream, StreamExt};
 use tokio::time::Instant;
 use vine_lang::pipe::{
-    branch, call, catch, emit_with, fork, pipe, retry, timeout, use_vine, Overlap, Pipe, PipeDef,
+    branch, call, catch_error, emit_with, fork, pipe, retry, timeout, use_vine, Pipe, PipeDef,
     Stage,
 };
 use vine_lang::{
@@ -68,7 +68,7 @@ fn failed() -> Stage {
 }
 
 /// One job's work: step `one`, a `stepped` note, step `two`, all under a
-/// three second timeout, then `done`. A `catch` turns a timeout into
+/// three second timeout, then `done`. A `catchError` turns a timeout into
 /// `failed`. The note is made inside the timeout, so it is held until the
 /// work is done, and dropped if the timeout fires.
 fn timed_work() -> Vec<Stage> {
@@ -81,18 +81,18 @@ fn timed_work() -> Vec<Stage> {
         step("two", json!("$item.job.two")),
         timeout(LIMIT),
         done(),
-        catch([failed()]),
+        catch_error([failed()]),
     ]
 }
 
 /// The jobs side by side, two at once, over one input item that lists them.
 fn timed_jobs() -> PipeDef {
-    jobs_vine([each_job(Overlap::Merge, Some(2), timed_work())])
+    jobs_vine([merge_jobs(Some(2), timed_work())])
 }
 
 /// The same work over an endless stream of jobs, two at once.
 fn timed_stream() -> PipeDef {
-    over_a_stream(vec![each_job(Overlap::Merge, Some(2), timed_work())])
+    over_a_stream(vec![merge_jobs(Some(2), timed_work())])
 }
 
 /// A vine over a stream of jobs, one per input item `{ job }`, with the
@@ -380,7 +380,7 @@ async fn a_clean_run_saves_each_decision_before_what_depends_on_it() {
             _ => None,
         })
         .collect();
-    let scope = |n: u32| format!("pipe[1].each@{n}/pipe[1].each.do[3].timeout@0");
+    let scope = |n: u32| format!("pipe[1].mergeMap@{n}/pipe[1].mergeMap.do[3].timeout@0");
     assert_eq!(
         timings,
         [
@@ -400,7 +400,7 @@ async fn a_clean_run_saves_each_decision_before_what_depends_on_it() {
     assert!(seen
         .iter()
         .any(|s| matches!(s, Seen::Entry(Entry::Done { at, .. })
-        if *at == format!("{}/pipe[1].each.do[0]#0", scope(1)))));
+        if *at == format!("{}/pipe[1].mergeMap.do[0]#0", scope(1)))));
 }
 
 #[tokio::test(start_paused = true)]
@@ -436,7 +436,7 @@ async fn a_timeout_that_fired_fires_again_at_once_and_runs_none_of_its_work() {
 
 // ------------------------------------------------ the rule before deciding
 
-/// `[one, two, timeout(3s), done, catch failed]` over one job, saved: the
+/// `[one, two, timeout(3s), done, catchError failed]` over one job, saved: the
 /// events, the time each came, and the steps called.
 fn one_job(secs: u64, two: u64) -> (impl Fn(&Arc<Desk>) -> Pipe, Vec<Value>) {
     let vine = |desk: &Arc<Desk>| built(desk, timed_jobs());
@@ -511,8 +511,7 @@ async fn work_saved_before_a_restart_does_not_count_against_the_wait() {
 /// Each job's lines from a stream act saved by position, under the
 /// timeout, two jobs at once. A job that times out is `failed`.
 fn timed_lines_stages() -> Vec<Stage> {
-    vec![each_job(
-        Overlap::Merge,
+    vec![merge_jobs(
         Some(2),
         vec![
             call(
@@ -525,7 +524,7 @@ fn timed_lines_stages() -> Vec<Stage> {
                 json!({ "id": "$item.job.id", "line": "$item.line.line" }),
             ),
             timeout(LIMIT),
-            catch([failed()]),
+            catch_error([failed()]),
         ],
     )]
 }
@@ -684,13 +683,12 @@ fn timed_lines_stream() -> PipeDef {
     over_a_stream(timed_lines_stages())
 }
 
-// ------------------------------------------- with `use`, `catch`, `retry`
+// ------------------------------------------- with `use`, `catchError`, `retry`
 
 /// `timed_job` run by `use` for each job, two at once.
 fn used_stages() -> Vec<Stage> {
     let id = json!({ "id": "$item.id" });
-    vec![each_job(
-        Overlap::Merge,
+    vec![merge_jobs(
         Some(2),
         vec![use_vine("timed_job", Some(json!({ "job": "$item.job" })))
             .on(
@@ -732,18 +730,17 @@ async fn a_timeout_inside_a_used_vine_survives_a_kill_at_every_event() {
     }
 }
 
-/// A `catch` after the timeout that branches on what failed: a timeout
+/// A `catchError` after the timeout that branches on what failed: a timeout
 /// runs an undo step first.
 fn caught_by_branch() -> PipeDef {
-    jobs_vine([each_job(
-        Overlap::Merge,
+    jobs_vine([merge_jobs(
         Some(2),
         vec![
             step("one", json!("$item.job.secs")),
             step("two", json!("$item.job.two")),
             timeout(LIMIT),
             done(),
-            catch([
+            catch_error([
                 branch(
                     "$item.error.from",
                     [("timeout", [step("undo", json!(1))])],
@@ -775,15 +772,14 @@ async fn a_caught_timeout_replays_down_the_same_branch_at_every_kill() {
 
 /// `retry` covers the timeout: each try gets its own three seconds.
 fn retried_timeout() -> PipeDef {
-    jobs_vine([each_job(
-        Overlap::Merge,
+    jobs_vine([merge_jobs(
         Some(2),
         vec![
             step("one", json!("$item.job.secs")),
             timeout(LIMIT),
             retry(1, Duration::from_secs(1)),
             done(),
-            catch([failed()]),
+            catch_error([failed()]),
         ],
     )])
 }
@@ -804,24 +800,23 @@ async fn a_retry_over_a_timeout_survives_a_kill_at_every_event() {
 }
 
 /// The timeout covers a `retry` of a step that always fails, and a
-/// `catch` that mends a failed step slowly.
-fn timeout_over_retry_and_catch() -> PipeDef {
-    jobs_vine([each_job(
-        Overlap::Merge,
+/// `catchError` that mends a failed step slowly.
+fn timeout_over_retry_and_catch_error() -> PipeDef {
+    jobs_vine([merge_jobs(
         Some(2),
         vec![
             step("one", json!("$item.job.secs")),
             retry(2, Duration::from_secs(1)),
-            catch([step("mend", json!("$item.job.two"))]),
+            catch_error([step("mend", json!("$item.job.two"))]),
             timeout(Duration::from_secs(2)),
             done(),
-            catch([failed()]),
+            catch_error([failed()]),
         ],
     )])
 }
 
 #[tokio::test(start_paused = true)]
-async fn a_timeout_over_a_retry_and_a_catch_survives_a_kill_at_every_event() {
+async fn a_timeout_over_a_retry_and_a_catch_error_survives_a_kill_at_every_event() {
     // `x`'s step fails a second in, and each try after it waits a second
     // first, so its two seconds run out during the tries however a
     // restart cuts them, and its mend is never reached. `z` is fine at
@@ -829,7 +824,7 @@ async fn a_timeout_over_a_retry_and_a_catch_survives_a_kill_at_every_event() {
     let input = jobs_input(&[job("x", 1, 10), job("z", 1, 0)]);
     let setup = |desk: &Desk| desk.fail("x", "one");
     let sweep = Sweep {
-        def: &timeout_over_retry_and_catch,
+        def: &timeout_over_retry_and_catch_error,
         input: &input,
         mode: Mode::Journal,
         setup: &setup,
@@ -861,9 +856,9 @@ async fn a_bookmark_keeps_one_line_more_per_item_in_flight_and_drops_it_as_the_p
     let untimed = || {
         let work: Vec<Stage> = timed_work()
             .into_iter()
-            .filter(|s| !matches!(s, Stage::Timeout(_) | Stage::Catch(_)))
+            .filter(|s| !matches!(s, Stage::Timeout(_) | Stage::CatchError(_)))
             .collect();
-        over_a_stream(vec![each_job(Overlap::Merge, Some(2), work)])
+        over_a_stream(vec![merge_jobs(Some(2), work)])
     };
     let mut without = Caller::new(Mode::Position);
     without
@@ -894,15 +889,15 @@ async fn a_journal_saved_before_timeouts_were_saved_resumes_as_it_did() {
     let untimed = || {
         let work: Vec<Stage> = timed_work()
             .into_iter()
-            .filter(|s| !matches!(s, Stage::Timeout(_) | Stage::Catch(_)))
+            .filter(|s| !matches!(s, Stage::Timeout(_) | Stage::CatchError(_)))
             .collect();
-        jobs_vine([each_job(Overlap::Merge, Some(2), work)])
+        jobs_vine([merge_jobs(Some(2), work)])
     };
     let saved = json!([
-        { "kind": "done", "at": "pipe[1].each@0/pipe[1].each.do[0]#0",
+        { "kind": "done", "at": "pipe[1].mergeMap@0/pipe[1].mergeMap.do[0]#0",
           "input": { "id": "b", "step": "one", "secs": 1 },
           "result": { "id": "b", "step": "one" } },
-        { "kind": "emitted", "output": "stepped", "within": "pipe[1].each@0/" },
+        { "kind": "emitted", "output": "stepped", "within": "pipe[1].mergeMap@0/" },
     ]);
     let input = jobs_input(&[job("b", 1, 1)]);
     let mut clean = Caller::new(Mode::Journal);
@@ -926,20 +921,20 @@ async fn a_journal_or_bookmark_saved_before_a_timeout_was_added_is_refused_befor
     let untimed_work = || -> Vec<Stage> {
         timed_work()
             .into_iter()
-            .filter(|s| !matches!(s, Stage::Timeout(_) | Stage::Catch(_)))
+            .filter(|s| !matches!(s, Stage::Timeout(_) | Stage::CatchError(_)))
             .collect()
     };
     // Saved partway through by the vine without its timeout.
     let jobs = jobs_input(&three());
     let mut journal = Caller::new(Mode::Journal);
-    let before = jobs_vine([each_job(Overlap::Merge, Some(2), untimed_work())]);
+    let before = jobs_vine([merge_jobs(Some(2), untimed_work())]);
     journal
         .run(&built(&Desk::new(), before), &jobs, Some(3))
         .await
         .unwrap();
     let events = job_events(&three());
     let mut bookmark = Caller::new(Mode::Position);
-    let before = over_a_stream(vec![each_job(Overlap::Merge, Some(2), untimed_work())]);
+    let before = over_a_stream(vec![merge_jobs(Some(2), untimed_work())]);
     bookmark
         .run(&built(&Desk::new(), before), &events, Some(3))
         .await

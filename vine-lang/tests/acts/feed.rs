@@ -18,7 +18,9 @@
 use std::sync::Arc;
 
 use futures::stream;
-use vine_lang::pipe::{call, catch, collect, emit_with, filter, fork, pipe, PipeDef, Stage};
+use vine_lang::pipe::{
+    buffer_count, call, catch_error, emit_with, filter, fork, pipe, PipeDef, Stage,
+};
 use vine_lang::{json, OpError, OperatorSpec, Part, Registry, Shape, Ty, Value};
 
 use super::{register_stream_act, Gives, World};
@@ -163,12 +165,12 @@ pub fn event_relay_pipe() -> PipeDef {
         .stages(relay_stages())
 }
 
-/// `event_relay` with a `catch`: an event the archive refuses becomes one
+/// `event_relay` with a `catchError`: an event the archive refuses becomes one
 /// `refused` output, and the stream goes on. The act keeps its path,
 /// `pipe[0]`, so a bookmark saved by `event_relay` fits it.
 pub fn event_relay_caught_pipe() -> PipeDef {
     let mut stages = relay_stages();
-    stages.push(catch([emit_with(
+    stages.push(catch_error([emit_with(
         "refused",
         json!({ "seq": "$item.seq", "reason": "$item.error.message" }),
     )]));
@@ -197,7 +199,7 @@ pub fn event_backup_pipe() -> PipeDef {
                 .required("count", Ty::Int),
         )
         .stages([
-            collect(5),
+            buffer_count(5),
             call("backup.store", json!({ "items": "$item.items" })).into("stored"),
             emit_with(
                 "stored",

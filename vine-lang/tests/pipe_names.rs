@@ -8,7 +8,7 @@ mod acts;
 
 use acts::{job_launch_pipe, registry, World};
 use vine_lang::pipe::{
-    branch, call, catch, emit, emit_with, finalize, fork, op, pipe, tap, together, use_vine,
+    branch, call, catch_error, emit, emit_with, finalize, fork, fork_join, op, pipe, tap, use_vine,
     PipeDef,
 };
 use vine_lang::{json, OperatorSpec, Registry, Shape, Ty};
@@ -54,7 +54,7 @@ fn a_vine_lists_the_acts_of_every_stage_that_runs_one_and_no_operator() {
         .output("done", Shape::open())
         .output("failed", Shape::open())
         .stages([
-            together([
+            fork_join([
                 call("git.commit", json!({ "dir": "$item.dir", "message": "m" })).into("c"),
                 op("tidy", json!({})).into("t"),
             ]),
@@ -71,7 +71,7 @@ fn a_vine_lists_the_acts_of_every_stage_that_runs_one_and_no_operator() {
                 None,
             ),
             emit("done"),
-            catch([emit_with("failed", json!({}))]),
+            catch_error([emit_with("failed", json!({}))]),
             finalize([tap("git.worktree_remove", json!({ "path": "$item.dir" }))]),
         ]);
     let vine = reg.build_pipe(def).unwrap();

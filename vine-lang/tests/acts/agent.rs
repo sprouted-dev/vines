@@ -16,7 +16,8 @@ use std::time::Duration;
 use futures::stream;
 use tokio::sync::watch;
 use vine_lang::pipe::{
-    branch, call, catch, collect, emit_with, filter, finalize, fork, last, op, pipe, tap, PipeDef,
+    branch, buffer_count, call, catch_error, emit_with, filter, finalize, fork, last, op, pipe,
+    tap, PipeDef,
 };
 use vine_lang::{json, OpError, OperatorSpec, Part, Registry, Shape, Ty, Value};
 
@@ -265,7 +266,7 @@ pub fn job_run_pipe() -> PipeDef {
                 ],
                 vec![
                     filter("$item.line"),
-                    collect(50).into("batch"),
+                    buffer_count(50).into("batch"),
                     op("summarize", json!({ "items": "$item.batch.items" })).into("summary"),
                     emit_with(
                         "summary",
@@ -295,7 +296,7 @@ pub fn job_run_pipe() -> PipeDef {
                     json!({ "job": "$item.job", "reason": "$item.ended.status" }),
                 )]),
             ),
-            catch([emit_with(
+            catch_error([emit_with(
                 "failed",
                 json!({ "job": "$item.job", "reason": "$item.error.message" }),
             )]),

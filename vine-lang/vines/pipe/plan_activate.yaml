@@ -15,5 +15,5 @@ pipe:
   - emit:
       to: activated
       with: { plan: $item.plan, branch: $item.branch.name, lane: $item.lane.path }
-  - catch:
+  - catchError:
       - emit: { to: failed, with: { plan: $item.plan, reason: $item.error.message } }

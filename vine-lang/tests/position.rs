@@ -17,8 +17,8 @@ use acts::restart::{assert_forward, events_in, run, run_with_kills, started, Cal
 use acts::World;
 use futures::{stream, StreamExt};
 use vine_lang::pipe::{
-    call, collect, each, emit, emit_with, finalize, fork, last, pipe, split, take, tap, timeout,
-    use_vine, Overlap, Pipe, PipeDef, Stage,
+    buffer_count, call, concat_map, emit, emit_with, exhaust_map, finalize, fork, last, pipe,
+    split, switch_map, take, tap, timeout, use_vine, Pipe, PipeDef, Stage,
 };
 use vine_lang::{
     json, Bookmark, Entry, Event, Journal, Line, OperatorSpec, Progress, RunError, Shape, Ty, Value,
@@ -59,7 +59,7 @@ fn archive_and_batch(world: &Arc<World>) -> Pipe {
         .output("stored", Shape::open())
         .stages([
             fork([vec![
-                collect(3),
+                buffer_count(3),
                 call("backup.store", json!({ "items": "$item.items" })).into("stored"),
                 emit_with("stored", json!({ "last": "$item.stored.last" })),
             ]]),
@@ -186,7 +186,7 @@ async fn each_output_comes_before_its_line_and_its_line_before_the_position() {
 }
 
 #[tokio::test]
-async fn collect_keeps_the_position_before_the_events_it_holds() {
+async fn buffer_count_keeps_the_position_before_the_events_it_holds() {
     let (caller, log, _) = uninterrupted(backup, &events(1, 12)).await;
     // Two full batches, then what is left when the input ends.
     assert_eq!(caller.throughs, [5, 10, 12]);
@@ -224,7 +224,7 @@ async fn the_position_waits_for_a_stream_act_to_end_and_never_passes_an_item_sti
             ),
             Progress::Through(n) => position = n,
             Progress::Done(n) => {
-                panic!("item {n} finished out of order with no `each` that merges")
+                panic!("item {n} finished out of order with no `mergeMap`")
             }
             Progress::Save(_) => {}
         }
@@ -398,7 +398,7 @@ async fn a_restart_with_a_vine_that_catches_the_failure_carries_on_past_it() {
     let input = with_bad(4);
     let mut caller = Caller::new();
     run(&relay(&world), &input, &mut caller, None).await;
-    // The vine gains a `catch`. Its act keeps its path, so the saved
+    // The vine gains a `catchError`. Its act keeps its path, so the saved
     // failure fits it and is handled without asking the act again.
     let end = run(&relay_caught(&world), &input, &mut caller, None).await;
     assert!(matches!(end, End::Ended), "{end:?}");
@@ -743,7 +743,7 @@ async fn the_checker_refuses_a_vine_a_restart_from_a_position_cannot_rebuild() {
             pipe("switching")
                 .input(Shape::open())
                 .output("out", Shape::open())
-                .stages([each(Overlap::Switch, [emit("out")])]),
+                .stages([switch_map([emit("out")])]),
         )
         .unwrap();
     reg.add_vine(switching).unwrap();
@@ -757,24 +757,28 @@ async fn the_checker_refuses_a_vine_a_restart_from_a_position_cannot_rebuild() {
             "pipe[0].fork[0][0] is a `take` over the whole stream",
         ),
         (
-            events_vine([split("$item.body").into("part"), collect(2), emit("out")]),
+            events_vine([
+                split("$item.body").into("part"),
+                buffer_count(2),
+                emit("out"),
+            ]),
             "pipe[1] gathers batches over the whole stream after pipe[0]",
         ),
         (
             events_vine([
                 call("feed.pages", json!({ "seq": "$item.seq", "pages": 2 })),
-                fork([vec![collect(2), emit("out")]]),
+                fork([vec![buffer_count(2), emit("out")]]),
                 emit("out"),
             ]),
             "pipe[1].fork[0][0] gathers batches over the whole stream after pipe[0]",
         ),
         (
-            events_vine([each(Overlap::Switch, [emit("out")])]),
-            "overlap `switch`",
+            events_vine([switch_map([emit("out")])]),
+            "pipe[0].switchMap drops or skips work",
         ),
         (
-            events_vine([each(Overlap::Exhaust, [emit("out")])]),
-            "overlap `exhaust`",
+            events_vine([exhaust_map([emit("out")])]),
+            "pipe[0].exhaustMap drops or skips work",
         ),
         (
             events_vine([use_vine("switching", None).on("out", [emit("out")])]),
@@ -800,29 +804,23 @@ fn stages_that_start_again_for_each_item_can_run_from_a_position() {
     let world = World::new();
     let reg = feed_registry(&world);
     for def in [
-        // `take` inside `each` counts one item's own stream.
-        events_vine([each(
-            Overlap::Concat,
-            [
-                call("feed.pages", json!({ "seq": "$item.seq", "pages": 3 })),
-                take(1),
-                emit("out"),
-            ],
-        )]),
+        // `take` inside `concatMap` counts one item's own stream.
+        events_vine([concat_map([
+            call("feed.pages", json!({ "seq": "$item.seq", "pages": 3 })),
+            take(1),
+            emit("out"),
+        ])]),
         // `last` holds the newest item, and a restart feeds it again.
         events_vine([last(), emit("out")]),
-        // `collect` over whole items, in the main pipe or a side pipe.
-        events_vine([collect(2), emit("out")]),
-        events_vine([fork([vec![collect(2), emit("out")]]), emit("out")]),
-        // `collect` after a stream act, inside one item's work.
-        events_vine([each(
-            Overlap::Concat,
-            [
-                call("feed.pages", json!({ "seq": "$item.seq", "pages": 3 })),
-                collect(2),
-                emit("out"),
-            ],
-        )]),
+        // `bufferCount` over whole items, in the main pipe or a side pipe.
+        events_vine([buffer_count(2), emit("out")]),
+        events_vine([fork([vec![buffer_count(2), emit("out")]]), emit("out")]),
+        // `bufferCount` after a stream act, inside one item's work.
+        events_vine([concat_map([
+            call("feed.pages", json!({ "seq": "$item.seq", "pages": 3 })),
+            buffer_count(2),
+            emit("out"),
+        ])]),
         // A `timeout` saves what the clock decided for each item.
         events_vine([archive(), timeout(Duration::from_secs(1)), emit("out")]),
     ] {

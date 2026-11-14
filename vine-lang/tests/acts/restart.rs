@@ -100,7 +100,7 @@ pub async fn run(vine: &Pipe, input: &[Value], caller: &mut Caller, kill: Option
 pub enum Repeat {
     /// First: the run makes its outputs in one order.
     First,
-    /// Somewhere after the restart: under an `each` that merges, other
+    /// Somewhere after the restart: under a `mergeMap`, other
     /// items can hand out new outputs before the one whose line was lost
     /// is made again.
     Later,

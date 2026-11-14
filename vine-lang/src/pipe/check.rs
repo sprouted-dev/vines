@@ -814,7 +814,7 @@ impl Checker<'_> {
                 }
                 if matches!(flatten, Flatten::Switch | Flatten::Exhaust) {
                     self.not_resumable(format!(
-                        "{here} is a `{key}`, which drops or skips work by when items arrive, and a replay cannot know when they did"
+                        "{here} drops or skips work by when items arrive, and a replay cannot know when they did"
                     ));
                 }
                 let at = format!("{here}.do");

@@ -12,8 +12,9 @@ use acts::{job_launch_pipe, ready_job, registry, World};
 use futures::{stream, StreamExt};
 use tokio::time::{sleep, Instant};
 use vine_lang::pipe::{
-    branch, call, catch, each, emit, emit_with, filter, finalize, op, pipe, retry, split, take,
-    tap, timeout, together, use_vine, Overlap, Pipe, PipeDef, Stage,
+    branch, call, catch_error, concat_map, emit, emit_with, exhaust_map, filter, finalize,
+    fork_join, merge_map, op, pipe, retry, split, switch_map, take, tap, timeout, use_vine, Pipe,
+    PipeDef, Stage,
 };
 use vine_lang::{json, LoadError, OpError, OperatorSpec, Registry, RunError, Shape, Ty, Value};
 
@@ -321,11 +322,11 @@ fn timed(start: Instant) -> (Arc<Clock>, Registry) {
 }
 
 #[tokio::test(start_paused = true)]
-async fn together_runs_side_by_side_and_goes_on_when_all_are_done() {
+async fn fork_join_runs_side_by_side_and_goes_on_when_all_are_done() {
     let start = Instant::now();
     let (clock, reg) = timed(start);
     let def = numbers([
-        together([
+        fork_join([
             call("work.slow", json!({ "id": "a", "secs": 10 })).into("a"),
             call("work.slow", json!({ "id": "b", "secs": 4 })).into("b"),
             call("work.slow", json!({ "id": "c", "secs": 7 })).into("c"),
@@ -351,10 +352,10 @@ async fn together_runs_side_by_side_and_goes_on_when_all_are_done() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn together_fails_when_one_of_them_fails_and_attempt_can_handle_it() {
+async fn fork_join_fails_when_one_of_them_fails_and_attempt_can_handle_it() {
     let (_clock, reg) = timed(Instant::now());
     let both = || {
-        together([
+        fork_join([
             call("work.slow", json!({ "id": "a", "secs": 1 })).into("a"),
             call("work.slow", json!({ "id": "b", "secs": 1, "fail": true })).into("b"),
         ])
@@ -370,7 +371,7 @@ async fn together_fails_when_one_of_them_fails_and_attempt_can_handle_it() {
         .build_pipe(numbers([
             both(),
             emit("out"),
-            catch([emit_with("out", json!({ "failed": "$item.error.from" }))]),
+            catch_error([emit_with("out", json!({ "failed": "$item.error.from" }))]),
         ]))
         .unwrap();
     let out = handled.run_one(json!({ "n": 1 })).await.unwrap();
@@ -378,24 +379,24 @@ async fn together_fails_when_one_of_them_fails_and_attempt_can_handle_it() {
 }
 
 #[test]
-fn together_needs_two_or_more_stages_each_with_its_own_into() {
+fn fork_join_needs_two_or_more_stages_each_with_its_own_into() {
     let (_clock, reg) = timed(Instant::now());
     let slow = |id: &str| call("work.slow", json!({ "id": id, "secs": 1 }));
-    let one = numbers([together([slow("a").into("a")]), emit("out")]);
+    let one = numbers([fork_join([slow("a").into("a")]), emit("out")]);
     assert!(matches!(
         reg.build_pipe(one).unwrap_err(),
         LoadError::Malformed { .. }
     ));
 
-    let no_into = numbers([together([slow("a").into("a"), slow("b")]), emit("out")]);
+    let no_into = numbers([fork_join([slow("a").into("a"), slow("b")]), emit("out")]);
     let err = reg.build_pipe(no_into).unwrap_err();
     assert!(
-        matches!(err, LoadError::Malformed { ref path, .. } if path == "pipe[0].together[1]"),
+        matches!(err, LoadError::Malformed { ref path, .. } if path == "pipe[0].forkJoin[1]"),
         "{err}"
     );
 
     let same = numbers([
-        together([slow("a").into("x"), slow("b").into("x")]),
+        fork_join([slow("a").into("x"), slow("b").into("x")]),
         emit("out"),
     ]);
     let err = reg.build_pipe(same).unwrap_err();
@@ -404,7 +405,7 @@ fn together_needs_two_or_more_stages_each_with_its_own_into() {
         "{err}"
     );
 
-    let not_a_unit = numbers([together([slow("a").into("a"), take(1)]), emit("out")]);
+    let not_a_unit = numbers([fork_join([slow("a").into("a"), take(1)]), emit("out")]);
     assert!(matches!(
         reg.build_pipe(not_a_unit).unwrap_err(),
         LoadError::Malformed { .. }
@@ -421,19 +422,19 @@ fn arriving() -> impl futures::Stream<Item = Value> + Send {
     })
 }
 
-/// Each item takes five seconds of work, under the given overlap rule.
-async fn overlapping(overlap: Overlap, at_once: Option<usize>) -> (Vec<Value>, Vec<String>, u64) {
+/// Each item takes five seconds of work, inside the given mapping stage.
+async fn slow_items_in(
+    map: fn(Vec<Stage>) -> Stage,
+    concurrent: Option<usize>,
+) -> (Vec<Value>, Vec<String>, u64) {
     let start = Instant::now();
     let (clock, reg) = timed(start);
-    let mut stage = each(
-        overlap,
-        [
-            call("work.slow", json!({ "id": "$item.n", "secs": 5 })),
-            emit("out"),
-        ],
-    );
-    if let Some(limit) = at_once {
-        stage = stage.at_once(limit);
+    let mut stage = map(vec![
+        call("work.slow", json!({ "id": "$item.n", "secs": 5 })),
+        emit("out"),
+    ]);
+    if let Some(limit) = concurrent {
+        stage = stage.concurrent(limit);
     }
     let vine = reg.build_pipe(numbers([stage])).unwrap();
     let outs: Vec<Value> = vine
@@ -445,8 +446,8 @@ async fn overlapping(overlap: Overlap, at_once: Option<usize>) -> (Vec<Value>, V
 }
 
 #[tokio::test(start_paused = true)]
-async fn concat_runs_one_at_a_time_in_order() {
-    let (outs, log, secs) = overlapping(Overlap::Concat, None).await;
+async fn concat_map_runs_one_at_a_time_in_order() {
+    let (outs, log, secs) = slow_items_in(concat_map, None).await;
     assert_eq!(outs, [json!(1), json!(2), json!(3)]);
     assert_eq!(
         log,
@@ -463,16 +464,16 @@ async fn concat_runs_one_at_a_time_in_order() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn merge_runs_side_by_side() {
-    let (outs, log, secs) = overlapping(Overlap::Merge, None).await;
+async fn merge_map_runs_side_by_side() {
+    let (outs, log, secs) = slow_items_in(merge_map, None).await;
     assert_eq!(outs, [json!(1), json!(2), json!(3)]);
     assert_eq!(&log[..3], ["start 1 @0", "start 2 @1", "start 3 @2"]);
     assert_eq!(secs, 7);
 }
 
 #[tokio::test(start_paused = true)]
-async fn merge_with_at_once_holds_the_rest_back() {
-    let (outs, log, secs) = overlapping(Overlap::Merge, Some(2)).await;
+async fn merge_map_with_concurrent_holds_the_rest_back() {
+    let (outs, log, secs) = slow_items_in(merge_map, Some(2)).await;
     assert_eq!(outs, [json!(1), json!(2), json!(3)]);
     // With two running, the third item is not even asked for. It is asked
     // for when the first is done at 5, arrives a second later, and starts.
@@ -491,34 +492,41 @@ async fn merge_with_at_once_holds_the_rest_back() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn switch_drops_the_run_in_flight_for_the_new_item() {
-    let (outs, log, secs) = overlapping(Overlap::Switch, None).await;
+async fn switch_map_drops_the_run_in_flight_for_the_new_item() {
+    let (outs, log, secs) = slow_items_in(switch_map, None).await;
     assert_eq!(outs, [json!(3)]);
     assert_eq!(log, ["start 1 @0", "start 2 @1", "start 3 @2", "done 3 @7"]);
     assert_eq!(secs, 7);
 }
 
 #[tokio::test(start_paused = true)]
-async fn exhaust_ignores_new_items_while_a_run_is_going() {
-    let (outs, log, secs) = overlapping(Overlap::Exhaust, None).await;
+async fn exhaust_map_ignores_new_items_while_a_run_is_going() {
+    let (outs, log, secs) = slow_items_in(exhaust_map, None).await;
     assert_eq!(outs, [json!(1)]);
     assert_eq!(log, ["start 1 @0", "done 1 @5"]);
     assert_eq!(secs, 5);
 }
 
 #[test]
-fn at_once_goes_with_merge_only_and_is_at_least_one() {
-    let inner = || [emit("out")];
-    let err = refused(numbers([each(Overlap::Concat, inner()).at_once(2)]));
-    assert!(
-        matches!(err, LoadError::Malformed { ref path, .. } if path == "pipe[0].each"),
-        "{err}"
-    );
-    let err = refused(numbers([each(Overlap::Merge, inner()).at_once(0)]));
+fn concurrent_goes_with_merge_map_only_and_is_at_least_one() {
+    let inner = || vec![emit("out")];
+    let others: [(fn(Vec<Stage>) -> Stage, &str); 3] = [
+        (concat_map, "concatMap"),
+        (switch_map, "switchMap"),
+        (exhaust_map, "exhaustMap"),
+    ];
+    for (map, key) in others {
+        let err = refused(numbers([map(inner()).concurrent(2)]));
+        assert!(
+            matches!(err, LoadError::Malformed { ref path, .. } if *path == format!("pipe[0].{key}")),
+            "{key}: {err}"
+        );
+    }
+    let err = refused(numbers([merge_map(inner()).concurrent(0)]));
     assert!(matches!(err, LoadError::Malformed { .. }), "{err}");
 }
 
-// ------------------------------------------------------------------- catch
+// -------------------------------------------------------------- catchError
 
 fn failing(code: &'static str) -> Registry {
     let mut reg = Registry::new();
@@ -537,11 +545,11 @@ fn failing(code: &'static str) -> Registry {
 }
 
 #[tokio::test]
-async fn catch_gets_the_failure_as_part_of_the_item() {
+async fn catch_error_gets_the_failure_as_part_of_the_item() {
     let def = numbers([
         call("store.put", json!({})),
         emit("out"),
-        catch([emit_with(
+        catch_error([emit_with(
             "out",
             json!({ "n": "$item.n", "error": "$item.error" }),
         )]),
@@ -559,7 +567,7 @@ async fn catch_gets_the_failure_as_part_of_the_item() {
 }
 
 #[tokio::test]
-async fn catch_sees_the_item_as_it_was_when_the_stage_failed() {
+async fn catch_error_sees_the_item_as_it_was_when_the_stage_failed() {
     let reg = {
         let mut reg = failing("full");
         reg.register(
@@ -573,7 +581,7 @@ async fn catch_sees_the_item_as_it_was_when_the_stage_failed() {
         op("mark", json!({ "step": "one" })).into("progress"),
         call("store.put", json!({})),
         emit("out"),
-        catch([emit_with("out", json!({ "got_to": "$item.progress.step" }))]),
+        catch_error([emit_with("out", json!({ "got_to": "$item.progress.step" }))]),
     ]);
     let out = reg
         .build_pipe(def)
@@ -608,7 +616,7 @@ async fn one_item_failing_does_not_stop_the_items_after_it() {
     let def = numbers([
         call("store.put", json!({ "n": "$item.n" })),
         emit("out"),
-        catch([emit_with("out", json!({ "skipped": "$item.n" }))]),
+        catch_error([emit_with("out", json!({ "skipped": "$item.n" }))]),
     ]);
     let (outs, err) = all(&fails_on_two().build_pipe(def).unwrap(), nums(&[1, 2, 3])).await;
     assert!(err.is_none());
@@ -636,11 +644,11 @@ async fn a_failure_nothing_catches_ends_the_stream_with_a_run_error() {
 }
 
 #[tokio::test]
-async fn catch_does_not_swallow_cancellation() {
+async fn catch_error_does_not_swallow_cancellation() {
     let def = numbers([
         call("store.put", json!({})),
         emit("out"),
-        catch([emit("out")]),
+        catch_error([emit("out")]),
     ]);
     let err = failing("cancelled")
         .build_pipe(def)
@@ -652,11 +660,11 @@ async fn catch_does_not_swallow_cancellation() {
 }
 
 #[tokio::test]
-async fn a_failure_inside_catch_is_a_run_error() {
+async fn a_failure_inside_catch_error_is_a_run_error() {
     let def = numbers([
         call("store.put", json!({})),
         emit("out"),
-        catch([call("store.put", json!({})), emit("out")]),
+        catch_error([call("store.put", json!({})), emit("out")]),
     ]);
     let err = failing("full")
         .build_pipe(def)
@@ -665,17 +673,17 @@ async fn a_failure_inside_catch_is_a_run_error() {
         .await
         .unwrap_err();
     assert!(
-        matches!(err, RunError::Unhandled { ref path, .. } if path.contains("catch")),
+        matches!(err, RunError::Unhandled { ref path, .. } if path.contains("catchError")),
         "{err}"
     );
 }
 
 #[tokio::test]
-async fn catch_covers_only_the_stages_before_it() {
-    // The failing act stands after the catch, so nothing catches it.
+async fn catch_error_covers_only_the_stages_before_it() {
+    // The failing act stands after the `catchError`, so nothing catches it.
     let def = numbers([
         op("set", json!({ "n": "$item.n" })),
-        catch([emit("out")]),
+        catch_error([emit("out")]),
         call("store.put", json!({})),
         emit("out"),
     ]);
@@ -691,7 +699,7 @@ async fn catch_covers_only_the_stages_before_it() {
 #[test]
 fn a_covering_stage_needs_stages_before_it_and_none_that_span_the_stream() {
     for stage in [
-        catch([emit("out")]),
+        catch_error([emit("out")]),
         finalize([op("set", json!({}))]),
         retry(1, Duration::ZERO),
         timeout(Duration::from_secs(1)),
@@ -707,9 +715,9 @@ fn a_covering_stage_needs_stages_before_it_and_none_that_span_the_stream() {
                 if path == "pipe[2]" && problem.contains("`take`")),
             "{after_take}"
         );
-        let after_merge = refused(numbers([each(Overlap::Merge, [emit("out")]), stage]));
+        let after_merge = refused(numbers([merge_map([emit("out")]), stage]));
         assert!(
-            matches!(after_merge, LoadError::Malformed { ref problem, .. } if problem.contains("`each`")),
+            matches!(after_merge, LoadError::Malformed { ref problem, .. } if problem.contains("`mergeMap`")),
             "{after_merge}"
         );
     }
@@ -822,7 +830,7 @@ fn retried(times: u32) -> PipeDef {
         call("store.put", json!({})),
         retry(times, Duration::from_secs(5)),
         emit("out"),
-        catch([emit_with("out", json!({ "gave_up": "$item.error.code" }))]),
+        catch_error([emit_with("out", json!({ "gave_up": "$item.error.code" }))]),
     ])
 }
 
@@ -883,7 +891,7 @@ async fn timeout_fails_an_item_whose_work_takes_too_long() {
         call("work.slow", json!({ "id": "$item.n", "secs": "$item.n" })),
         timeout(Duration::from_secs(5)),
         emit("out"),
-        catch([emit_with(
+        catch_error([emit_with(
             "out",
             json!({ "n": "$item.n", "why": "$item.error.code" }),
         )]),
@@ -1063,7 +1071,7 @@ async fn a_failure_the_other_vine_does_not_catch_can_be_caught_by_the_outer_one(
     reg.add_vine(inner).unwrap();
     let def = numbers([
         use_vine("store_it", None).on("stored", [emit("out")]),
-        catch([emit_with("out", json!({ "failed_in": "$item.error.from" }))]),
+        catch_error([emit_with("out", json!({ "failed_in": "$item.error.from" }))]),
     ]);
     let out = reg
         .build_pipe(def)
@@ -1239,6 +1247,8 @@ fn an_act_handed_input_that_does_not_fit_is_refused_before_it_runs() {
 
 #[test]
 fn no_operator_can_take_a_word_of_the_pipe() {
+    // `together` and `catch` are the old names of `forkJoin` and
+    // `catchError`, and stay reserved.
     for word in [
         "tap", "split", "filter", "take", "together", "catch", "finalize", "retry", "timeout",
         "use", "branch", "emit", "with", "into", "on",

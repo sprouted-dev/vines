@@ -27,7 +27,7 @@ pipe:
   - emit:
       to: started
       with: { job: $item.job, session: $item.session.id, tree: $item.tree.path }
-  - catch:
+  - catchError:
       # The item is as it was when the stage failed. If the agent failed
       # to start, the working copy exists and nothing will ever report
       # the agent's end, so remove it here. A timeout gives the item as

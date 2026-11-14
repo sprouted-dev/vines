@@ -1,4 +1,4 @@
-//! An `each` that merges survives a restart, in `run_saved` and in
+//! A `mergeMap` survives a restart, in `run_saved` and in
 //! `run_from`. Each value that enters it starts a group of work keyed by
 //! the order values enter, so a replay matches each group's acts and
 //! outputs in that group's own order, whatever order the groups finish in.
@@ -14,8 +14,8 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use acts::desk::{
-    desk_registry, each_job, job_event, job_stream_vine, job_work, job_work_caught, jobs,
-    jobs_vine, step, Desk,
+    desk_registry, job_event, job_stream_vine, job_work, job_work_caught, jobs, jobs_vine,
+    merge_jobs, step, Desk,
 };
 use acts::restart::{
     events_in, events_saved, run_saved_with_kills_where, run_with_kills_where, Caller, Keeper,
@@ -23,7 +23,9 @@ use acts::restart::{
 };
 use futures::{stream, StreamExt};
 use tokio::time::Instant;
-use vine_lang::pipe::{call, emit_with, fork, last, together, use_vine, Overlap, Pipe, PipeDef};
+use vine_lang::pipe::{
+    call, concat_map, emit_with, fork, fork_join, last, use_vine, Pipe, PipeDef,
+};
 use vine_lang::{json, Bookmark, Entry, Event, Journal, Progress, RunError, Value};
 
 fn built(desk: &Arc<Desk>, def: PipeDef) -> Pipe {
@@ -36,8 +38,8 @@ fn three() -> Vec<Value> {
     vec![jobs(&[("a", 5), ("b", 1), ("c", 3)])]
 }
 
-fn merging(at_once: Option<usize>) -> PipeDef {
-    jobs_vine([each_job(Overlap::Merge, at_once, job_work())])
+fn merging(concurrent: Option<usize>) -> PipeDef {
+    jobs_vine([merge_jobs(concurrent, job_work())])
 }
 
 type Outs = Vec<(String, Value)>;
@@ -142,17 +144,17 @@ async fn each_groups_acts_and_outputs_are_keyed_by_the_order_jobs_go_in() {
         })
         .collect();
     // `b` went in second, so it is group 1, though it finished first.
-    let b = "pipe[1].each@1/";
+    let b = "pipe[1].mergeMap@1/";
     assert_eq!(
         keys[..4],
         [
             (
-                format!("{b}pipe[1].each.do[0]#0"),
+                format!("{b}pipe[1].mergeMap.do[0]#0"),
                 json!({ "id": "b", "step": "one" }).to_string()
             ),
             (b.into(), "stepped".into()),
             (
-                format!("{b}pipe[1].each.do[2]#0"),
+                format!("{b}pipe[1].mergeMap.do[2]#0"),
                 json!({ "id": "b", "step": "two" }).to_string()
             ),
             (b.into(), "done".into()),
@@ -180,8 +182,7 @@ async fn with_items_side_by_side_no_act_starts_before_every_result_so_far_was_ha
         let input = vec![jobs(&[("a", secs), ("b", secs), ("c", secs), ("d", secs)])];
         // No output between the two steps, so nothing else stops a job's
         // second step from starting as soon as its first is done.
-        let def = jobs_vine([each_job(
-            Overlap::Merge,
+        let def = jobs_vine([merge_jobs(
             Some(3),
             vec![
                 step("one", json!("$item.job.secs")),
@@ -366,8 +367,8 @@ async fn a_failure_nothing_catches_ends_the_run_and_a_restart_stops_at_it_again(
 }
 
 #[tokio::test(start_paused = true)]
-async fn a_catch_inside_the_each_keeps_the_others_going_through_every_kill() {
-    let def = || jobs_vine([each_job(Overlap::Merge, Some(2), job_work_caught())]);
+async fn a_catch_error_inside_the_merge_map_keeps_the_others_going_through_every_kill() {
+    let def = || jobs_vine([merge_jobs(Some(2), job_work_caught())]);
     // `a` fails at 6, after `b` and `c` are done.
     let input = vec![jobs(&[("a", 6), ("b", 1), ("c", 2)])];
     let desk = Desk::new();
@@ -402,10 +403,9 @@ async fn a_catch_inside_the_each_keeps_the_others_going_through_every_kill() {
 
 // --------------------------------------------- stream acts inside a merge
 
-fn lines_inside(at_once: usize) -> PipeDef {
-    jobs_vine([each_job(
-        Overlap::Merge,
-        Some(at_once),
+fn lines_inside(concurrent: usize) -> PipeDef {
+    jobs_vine([merge_jobs(
+        Some(concurrent),
         vec![
             call(
                 "work.lines",
@@ -478,29 +478,24 @@ async fn a_stream_act_inside_a_merge_resumes_from_its_position_at_every_kill() {
 
 #[tokio::test(start_paused = true)]
 async fn a_merge_after_a_stream_act_saved_by_position_stays_small_and_resumes() {
-    // The lines of one call go side by side into the `each`. Each output
+    // The lines of one call go side by side into the `mergeMap`. Each output
     // names its group, and the position drops the outputs of lines it
     // passed.
     let def = || {
-        jobs_vine([each_job(
-            Overlap::Concat,
-            None,
-            vec![
-                call(
-                    "work.lines",
-                    json!({ "id": "$item.job.id", "lines": "$item.job.secs" }),
-                )
-                .into("line"),
-                each_job(
-                    Overlap::Merge,
-                    Some(2),
-                    vec![emit_with(
-                        "line",
-                        json!({ "id": "$item.job.id", "line": "$item.line.line" }),
-                    )],
-                ),
-            ],
-        )])
+        jobs_vine([concat_map(vec![
+            call(
+                "work.lines",
+                json!({ "id": "$item.job.id", "lines": "$item.job.secs" }),
+            )
+            .into("line"),
+            merge_jobs(
+                Some(2),
+                vec![emit_with(
+                    "line",
+                    json!({ "id": "$item.job.id", "line": "$item.line.line" }),
+                )],
+            ),
+        ])])
     };
     let input = vec![jobs(&[("a", 30), ("b", 20)])];
     let desk = Desk::new();
@@ -533,8 +528,7 @@ async fn a_merge_after_a_stream_act_saved_by_position_stays_small_and_resumes() 
 
 fn summed() -> PipeDef {
     jobs_vine([
-        each_job(
-            Overlap::Merge,
+        merge_jobs(
             Some(2),
             vec![
                 step("one", json!("$item.job.secs")),
@@ -578,8 +572,7 @@ async fn last_after_a_merge_of_stream_acts_saved_by_position_gives_one_summary_a
     // record of the summary made from it must go with it.
     let def = || {
         jobs_vine([
-            each_job(
-                Overlap::Merge,
+            merge_jobs(
                 Some(2),
                 vec![
                     call(
@@ -631,8 +624,8 @@ async fn last_after_a_merge_of_stream_acts_saved_by_position_gives_one_summary_a
 
 // ------------------------------------------------- a saved position
 
-fn stream_vine(at_once: usize) -> PipeDef {
-    job_stream_vine([each_job(Overlap::Merge, Some(at_once), job_work())])
+fn stream_vine(concurrent: usize) -> PipeDef {
+    job_stream_vine([merge_jobs(Some(concurrent), job_work())])
 }
 
 /// Job events `1..`: the first takes `slow` seconds, the rest one each.
@@ -763,8 +756,7 @@ async fn a_kill_at_every_point_of_a_run_from_a_position_ends_as_an_uninterrupted
 #[tokio::test(start_paused = true)]
 async fn a_used_vine_inside_the_merge_replays_at_every_kill() {
     let def = || {
-        jobs_vine([each_job(
-            Overlap::Merge,
+        jobs_vine([merge_jobs(
             Some(2),
             vec![use_vine("job_steps", Some(json!({ "job": "$item.job" })))
                 .on("done", [emit_with("done", json!({ "id": "$item.id" }))])],
@@ -775,13 +767,12 @@ async fn a_used_vine_inside_the_merge_replays_at_every_kill() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn together_inside_the_merge_replays_at_every_kill() {
+async fn fork_join_inside_the_merge_map_replays_at_every_kill() {
     let def = || {
-        jobs_vine([each_job(
-            Overlap::Merge,
+        jobs_vine([merge_jobs(
             Some(2),
             vec![
-                together([
+                fork_join([
                     call(
                         "work.step",
                         json!({ "id": "$item.job.id", "step": "x", "secs": "$item.job.secs" }),
@@ -805,8 +796,7 @@ async fn together_inside_the_merge_replays_at_every_kill() {
 #[tokio::test(start_paused = true)]
 async fn a_merge_inside_a_merge_replays_at_every_kill() {
     let def = || {
-        jobs_vine([each_job(
-            Overlap::Merge,
+        jobs_vine([merge_jobs(
             Some(2),
             vec![
                 call(
@@ -814,8 +804,7 @@ async fn a_merge_inside_a_merge_replays_at_every_kill() {
                     json!({ "id": "$item.job.id", "lines": "$item.job.secs" }),
                 )
                 .into("line"),
-                each_job(
-                    Overlap::Merge,
+                merge_jobs(
                     Some(2),
                     vec![
                         step("one", json!(1)),

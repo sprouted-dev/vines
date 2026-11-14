@@ -13,7 +13,9 @@ mod terra;
 
 use acts::desk::{desk_registry, step, Desk};
 use terra::{Answer, Event, Lands, Move, Terra, Trellis, VineSource};
-use vine_lang::pipe::{each, emit_with, fork, last, pipe, split, Overlap, PipeDef, Stage};
+use vine_lang::pipe::{
+    concat_map, emit_with, fork, last, merge_map, pipe, split, Flatten, PipeDef, Stage,
+};
 use vine_lang::{json, Shape, Ty, Value};
 
 /// Note the same thing twice for each job: after its first step, and
@@ -30,10 +32,11 @@ fn twice_work() -> Vec<Stage> {
 }
 
 /// The jobs one after another, or side by side, two at once.
-fn twice_vine(overlap: Overlap) -> PipeDef {
-    let work = match overlap {
-        Overlap::Merge => each(Overlap::Merge, twice_work()).at_once(2),
-        other => each(other, twice_work()),
+fn twice_vine(flatten: Flatten) -> PipeDef {
+    let work = match flatten {
+        Flatten::Merge => merge_map(twice_work()).concurrent(2),
+        Flatten::Concat => concat_map(twice_work()),
+        other => unreachable!("only concatMap and mergeMap resume, not {other:?}"),
     };
     pipe("note_twice")
         .input(
@@ -57,7 +60,7 @@ fn last_vine() -> PipeDef {
         .output("finished", Shape::new().required("job", Ty::Text))
         .stages([
             split("$item.jobs").into("job"),
-            each(Overlap::Merge, [step("one", json!("$item.job.secs"))]).at_once(2),
+            merge_map([step("one", json!("$item.job.secs"))]).concurrent(2),
             last(),
             emit_with("finished", json!({ "job": "$item.job.id" })),
         ])
@@ -89,9 +92,9 @@ fn setup(vine: VineSource, name: &'static str, lands: Lands) -> Terra {
     terra
 }
 
-fn twice(overlap: Overlap) -> Terra {
+fn twice(flatten: Flatten) -> Terra {
     setup(
-        VineSource::Def(twice_vine(overlap)),
+        VineSource::Def(twice_vine(flatten)),
         "note_twice",
         Lands::new("noted", "note.noted"),
     )
@@ -124,25 +127,25 @@ async fn crash_then_press(terra: &Terra, k: u64) -> (Option<Answer>, String) {
 
 #[tokio::test(start_paused = true)]
 async fn the_same_output_emitted_twice_lands_as_two_events() {
-    for overlap in [Overlap::Concat, Overlap::Merge] {
-        let terra = twice(overlap);
+    for flatten in [Flatten::Concat, Flatten::Merge] {
+        let terra = twice(flatten);
         terra.press_as("r-1", "note", payload()).await.unwrap();
-        assert_eq!(terra.events(), noted(4), "{overlap:?}");
+        assert_eq!(terra.events(), noted(4), "{flatten:?}");
     }
 }
 
 #[tokio::test(start_paused = true)]
 async fn a_crash_between_two_equal_outputs_still_ends_with_both() {
-    for overlap in [Overlap::Concat, Overlap::Merge] {
-        let clean = twice(overlap);
+    for flatten in [Flatten::Concat, Flatten::Merge] {
+        let clean = twice(flatten);
         let want = clean.press_as("r-1", "note", payload()).await;
         let points = clean.ticks();
         assert!(points > 10, "{points} points");
         for k in 1..=points {
-            let terra = twice(overlap);
+            let terra = twice(flatten);
             let (got, point) = crash_then_press(&terra, k).await;
-            assert_eq!(terra.events(), noted(4), "{overlap:?}, crash at {point}");
-            assert_eq!(got, want, "{overlap:?}, crash at {point}");
+            assert_eq!(terra.events(), noted(4), "{flatten:?}, crash at {point}");
+            assert_eq!(got, want, "{flatten:?}, crash at {point}");
         }
     }
 }
@@ -150,7 +153,7 @@ async fn a_crash_between_two_equal_outputs_still_ends_with_both() {
 #[tokio::test(start_paused = true)]
 async fn many_crashes_between_equal_outputs_still_end_with_each_once() {
     for every in [2, 3, 5] {
-        let terra = twice(Overlap::Merge);
+        let terra = twice(Flatten::Merge);
         let mut crashes = 0;
         loop {
             terra.crash_at(every);
@@ -213,7 +216,7 @@ async fn the_same_vine_as_yaml_lands_the_same_events_at_every_crash() {
         input: { note: id, jobs: list }\n\
         outputs: { noted: { note: id } }\n\
         pipe:\n  - split: $item.jobs\n    into: job\n  \
-        - each:\n      overlap: merge\n      at_once: 2\n      do:\n        \
+        - mergeMap:\n      concurrent: 2\n      do:\n        \
         - call: work.step\n          with: { id: $item.job.id, step: one, secs: $item.job.secs }\n          into: one\n        \
         - fork:\n            - - emit: { to: noted, with: { note: $item.note } }\n        \
         - call: work.step\n          with: { id: $item.job.id, step: two, secs: 1 }\n          into: two\n        \
@@ -225,7 +228,7 @@ async fn the_same_vine_as_yaml_lands_the_same_events_at_every_crash() {
             Lands::new("noted", "note.noted"),
         )
     };
-    let rust = twice(Overlap::Merge);
+    let rust = twice(Flatten::Merge);
     let want = rust.press_as("r-1", "note", payload()).await;
     let yaml = make();
     assert_eq!(yaml.press_as("r-1", "note", payload()).await, want);

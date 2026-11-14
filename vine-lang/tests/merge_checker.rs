@@ -1,5 +1,5 @@
 //! What the checker says, before a vine runs, about resuming a vine with
-//! an `each` that merges: what replays, what does not, and why. Nothing
+//! a `mergeMap`: what replays, what does not, and why. Nothing
 //! here uses YAML:
 //!
 //!     cargo test --no-default-features --test merge_checker
@@ -8,11 +8,11 @@ mod acts;
 
 use std::time::Duration;
 
-use acts::desk::{desk_registry, each_job, jobs, jobs_vine, step, Desk};
+use acts::desk::{desk_registry, jobs, jobs_vine, merge_jobs, step, Desk};
 use futures::{stream, StreamExt};
 use vine_lang::pipe::{
-    call, catch, collect, each, emit_with, filter, finalize, fork, last, pipe, retry, take,
-    timeout, together, use_vine, Overlap, Pipe, PipeDef, Stage,
+    buffer_count, call, catch_error, concat_map, emit_with, exhaust_map, filter, finalize, fork,
+    fork_join, last, pipe, retry, switch_map, take, timeout, use_vine, Pipe, PipeDef, Stage,
 };
 use vine_lang::{json, Bookmark, Journal, Registry, RunError, Shape, Ty};
 
@@ -24,8 +24,7 @@ fn registry() -> Registry {
         .output("done", Shape::new().required("id", Ty::Text))
         .stages([
             vine_lang::pipe::split("$item.jobs").into("job"),
-            each_job(
-                Overlap::Merge,
+            merge_jobs(
                 Some(2),
                 vec![
                     step("one", json!(0)),
@@ -53,7 +52,7 @@ fn build(def: PipeDef) -> Pipe {
 }
 
 fn merge(work: Vec<Stage>) -> Stage {
-    each_job(Overlap::Merge, Some(2), work)
+    merge_jobs(Some(2), work)
 }
 
 fn one() -> Stage {
@@ -98,19 +97,23 @@ async fn a_take_after_a_merge_is_refused_for_it_lets_through_whichever_finish_fi
 }
 
 #[tokio::test]
-async fn a_collect_after_a_merge_is_refused_in_the_pipe_or_a_side_pipe() {
+async fn a_buffer_count_after_a_merge_map_is_refused_in_the_pipe_or_a_side_pipe() {
     refused(
-        jobs_vine([merge(vec![one()]), collect(2), emit_with("all", json!({}))]),
-        "pipe[2] is a `collect` after pipe[1]",
+        jobs_vine([
+            merge(vec![one()]),
+            buffer_count(2),
+            emit_with("all", json!({})),
+        ]),
+        "pipe[2] is a `bufferCount` after pipe[1]",
     )
     .await;
     refused(
         jobs_vine([
             merge(vec![one()]),
-            fork([vec![collect(2), emit_with("all", json!({}))]]),
+            fork([vec![buffer_count(2), emit_with("all", json!({}))]]),
             done(),
         ]),
-        "pipe[2].fork[0][0] is a `collect` after pipe[1]",
+        "pipe[2].fork[0][0] is a `bufferCount` after pipe[1]",
     )
     .await;
 }
@@ -141,7 +144,8 @@ async fn side_by_side_work_inside_a_branch_or_a_used_vine_counts_as_a_merge() {
 }
 
 #[tokio::test]
-async fn a_catch_or_finalize_over_a_merge_is_refused_for_it_drops_the_items_still_running() {
+async fn a_catch_error_or_finalize_over_a_merge_map_is_refused_for_it_drops_the_items_still_running(
+) {
     let outer = |cover: Stage| {
         pipe("outer")
             .input(Shape::new().required("jobs", Ty::List))
@@ -152,13 +156,13 @@ async fn a_catch_or_finalize_over_a_merge_is_refused_for_it_drops_the_items_stil
             ])
     };
     refused(
-        outer(catch([emit_with("done", json!({}))])),
-        "pipe[1] is a `catch` over an `each` that merges",
+        outer(catch_error([emit_with("done", json!({}))])),
+        "pipe[1] is a `catchError` over a `mergeMap`",
     )
     .await;
     refused(
         outer(finalize([filter("$item.jobs")])),
-        "pipe[1] is a `finalize` over an `each` that merges",
+        "pipe[1] is a `finalize` over a `mergeMap`",
     )
     .await;
 }
@@ -185,19 +189,21 @@ async fn an_act_on_the_value_last_picked_after_a_merge_is_refused() {
         jobs_vine([
             merge(vec![one()]),
             last(),
-            each(Overlap::Concat, [step("two", json!(1)), done()]),
+            concat_map([step("two", json!(1)), done()]),
         ]),
-        "pipe[3].each.do[0] runs `work.step`",
+        "pipe[3].concatMap.do[0] runs `work.step`",
     )
     .await;
 }
 
 #[tokio::test]
-async fn switch_and_exhaust_still_cannot_be_resumed() {
-    for (overlap, word) in [(Overlap::Switch, "switch"), (Overlap::Exhaust, "exhaust")] {
+async fn switch_map_and_exhaust_map_still_cannot_be_resumed() {
+    let maps: [(fn(Vec<Stage>) -> Stage, &str); 2] =
+        [(switch_map, "switchMap"), (exhaust_map, "exhaustMap")];
+    for (map, word) in maps {
         refused(
-            jobs_vine([each(overlap, [one(), done()])]),
-            &format!("overlap `{word}`"),
+            jobs_vine([map(vec![one(), done()])]),
+            &format!("pipe[1].{word} drops or skips work"),
         )
         .await;
     }
@@ -232,11 +238,11 @@ fn what_works_one_value_at_a_time_after_or_inside_a_merge_can_be_resumed() {
             jobs_vine([merge(vec![one(), take(1), done()])]),
         ),
         (
-            "`catch` inside the merge",
+            "`catchError` inside the merge",
             jobs_vine([merge(vec![
                 one(),
                 done(),
-                catch([emit_with(
+                catch_error([emit_with(
                     "failed",
                     json!({ "id": "x", "code": "$item.error.code" }),
                 )]),
@@ -259,9 +265,9 @@ fn what_works_one_value_at_a_time_after_or_inside_a_merge_can_be_resumed() {
             .on("done", [emit_with("done", json!({ "id": "$item.id" }))])])]),
         ),
         (
-            "`together` inside the merge",
+            "`forkJoin` inside the merge",
             jobs_vine([merge(vec![
-                together([
+                fork_join([
                     call(
                         "work.step",
                         json!({ "id": "$item.job.id", "step": "x", "secs": 1 }),
