@@ -21,10 +21,12 @@
 #
 # Knobs (environment):
 #   MUTANTS_STRICT=0|1       as --warn / --strict. Default 1.
-#   MUTANTS_MAX_MUTANTS=N    refuse to start above N mutants (default 400;
-#                            the whole crate has about 380). The message
-#                            names the count; narrow the diff or raise N.
-#   MUTANTS_MAX_SECONDS=N    stop the run after N seconds (default 1800) and
+#   MUTANTS_MAX_MUTANTS=N    refuse to start above N mutants (default 1300;
+#                            the workspace's two crates have about 1,220).
+#                            The message names the count; narrow the diff or
+#                            raise N.
+#   MUTANTS_MAX_SECONDS=N    stop the run after N seconds (default 3600; a
+#                            whole-workspace run takes about 37 minutes) and
 #                            report what finished.
 #   MUTANTS_JOBS=N           mutants built and tested at once (default 4).
 #   MUTANTS_TIMEOUT=N        per-mutant test timeout in seconds. Default:
@@ -72,8 +74,8 @@ if [ "$scope" = all ] && [ "${#paths[@]}" != 0 ]; then
   exit "$EXIT_USAGE"
 fi
 [ "${#paths[@]}" != 0 ] || paths=(.)
-max_mutants="${MUTANTS_MAX_MUTANTS:-400}"
-max_seconds="${MUTANTS_MAX_SECONDS:-1800}"
+max_mutants="${MUTANTS_MAX_MUTANTS:-1300}"
+max_seconds="${MUTANTS_MAX_SECONDS:-3600}"
 jobs="${MUTANTS_JOBS:-4}"
 for knob in "MUTANTS_MAX_MUTANTS=$max_mutants" "MUTANTS_MAX_SECONDS=$max_seconds" "MUTANTS_JOBS=$jobs" "MUTANTS_TIMEOUT=${MUTANTS_TIMEOUT:-1}"; do
   case "${knob#*=}" in
