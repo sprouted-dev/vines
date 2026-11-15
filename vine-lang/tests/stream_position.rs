@@ -669,6 +669,8 @@ async fn a_call_a_catch_error_took_over_is_saved_as_abandoned_and_replays_to_not
     run_saved(&checked_run(&world, &host), &[job()], &mut again, None).await;
     assert!(again.outs.is_empty(), "{:?}", again.outs);
     assert_eq!(world.log(), log);
+    // And saves nothing more: the call's stop is saved once.
+    assert_eq!(again.journal(), keeper.journal());
 }
 
 // ------------------------------------- an operator that does not keep its word
@@ -709,6 +711,58 @@ async fn an_operator_that_gives_fewer_items_again_than_it_gave_before_it_stopped
         other => panic!("{other:?}"),
     }
     assert_eq!(world.count("git.commit"), 0);
+}
+
+/// `bad.pages { seq }` gives `{ page }` 1, then a page that breaks the
+/// shape it declares, and can give them again.
+fn bad_pages(world: &Arc<World>) -> Pipe {
+    let mut reg = feed_registry_again(world);
+    let w = world.clone();
+    register_stream(
+        &mut reg,
+        Gives::Again,
+        OperatorSpec::new("bad.pages")
+            .settings(Shape::new().required("seq", Ty::Int))
+            .returns(Shape::new().required("page", Ty::Int))
+            .touches(["feed"]),
+        move |v, cx| {
+            w.note(format!("bad.pages {} from {}", v["seq"], cx.resume_from()));
+            let pages = [json!({ "page": 1 }), json!({ "page": "two" })];
+            let from = usize::try_from(cx.resume_from()).unwrap();
+            stream::iter(pages.into_iter().skip(from).map(|p| Ok(Part::Item(p))))
+        },
+    );
+    let def = pipe("bad")
+        .input(Shape::new().required("seq", Ty::Int))
+        .output("page", Shape::open())
+        .operators([
+            call("bad.pages", json!({ "seq": "$item.seq" })).into("page"),
+            emit_with("page", json!({ "page": "$item.page.page" })),
+        ]);
+    reg.build_pipe(def).unwrap()
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_result_that_breaks_its_shape_fails_the_run_again_after_a_restart() {
+    let world = World::new();
+    let input = [json!({ "seq": 1 })];
+    let mut keeper = Keeper::new();
+    for run in ["first", "restart"] {
+        let end = run_saved(&bad_pages(&world), &input, &mut keeper, None).await;
+        assert!(
+            matches!(end, End::Failed(RunError::ResultMisfit { ref operator, .. }) if operator == "bad.pages"),
+            "{run}: {end:?}"
+        );
+    }
+    assert!(
+        !keeper
+            .journal()
+            .entries()
+            .iter()
+            .any(|e| matches!(e, Entry::Stopped { .. })),
+        "{:?}",
+        keeper.journal()
+    );
 }
 
 // ------------------------------------------------ two stream operators in a row

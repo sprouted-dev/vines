@@ -338,12 +338,14 @@ impl StreamRun {
     }
 
     /// For a replay of a call saved by position that stopped: the run
-    /// error to give when the operator stopped before it gave again every item
-    /// it gave the first time.
+    /// error to give when the operator stopped again. It stopped before it
+    /// gave again every item it gave the first time, since once it has,
+    /// [`StreamRun::at_saved_stop`] gives the saved stop and the operator
+    /// is not read again.
     fn gave_fewer_again(&self, how: &str) -> Option<RunError> {
         let (items, _) = self.position.as_ref()?.stopped.as_ref()?;
         let key = self.key.as_ref()?;
-        (self.given < *items).then(|| RunError::ReplayMisfit {
+        Some(RunError::ReplayMisfit {
             problem: format!(
                 "`{key}` gave {items} items before it stopped, and asked again it {how} after {}; an operator that gives its items again must give the same ones",
                 self.given
@@ -377,26 +379,27 @@ impl StreamRun {
         self.cx.save(at, entry);
     }
 
+    /// The operator ended its stream with `value`. A call saved by position
+    /// reaches here only with no stop saved: a replay of one that stopped
+    /// gives the saved stop once the operator has given its items again,
+    /// and fails if the operator ends sooner.
     pub(super) fn ended(mut self, value: Value) -> Option<(Flow, StreamRun)> {
         if let Some(at) = &self.key {
             let entry = match &mut self.position {
-                None => Some(Entry::Ended {
+                None => Entry::Ended {
                     at: at.at.clone(),
                     value: value.clone(),
-                }),
-                Some(position) if !position.stop_saved => {
+                },
+                Some(position) => {
                     position.stop_saved = true;
-                    Some(Entry::Stopped {
+                    Entry::Stopped {
                         at: at.at.clone(),
                         items: self.given,
                         how: Ending::Ended(value.clone()),
-                    })
+                    }
                 }
-                Some(_) => None,
             };
-            if let Some(entry) = entry {
-                self.cx.save(at, entry);
-            }
+            self.cx.save(at, entry);
         }
         self.live = None;
         self.finish(Ok(value))
