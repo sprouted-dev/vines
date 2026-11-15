@@ -14,8 +14,8 @@ use futures::{stream, StreamExt};
 use tokio::time::{sleep, Instant};
 use vine_lang::pipe::{
     branch, buffer_count, call, catch_error, concat_map, emit, emit_with, exhaust_map, finalize,
-    fork, fork_join, last, op, pipe, split, switch_map, take, tap, timeout, use_vine, Operator,
-    Pipe, PipeDef,
+    fork, fork_join, last, merge_map, op, pipe, split, switch_map, take, tap, timeout, use_vine,
+    Operator, Pipe, PipeDef,
 };
 use vine_lang::{
     json, Entry, Event, Journal, LoadError, OpError, OperatorSpec, Part, Registry, RegistryError,
@@ -758,6 +758,31 @@ async fn before_catch_error_or_retry_last_and_buffer_count_see_the_end_of_each_i
             json!({ "count": 1 })
         ]
     );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_side_pipe_that_starts_with_a_merge_map_gets_every_item() {
+    let vine = Registry::new()
+        .build_pipe(numbers([
+            fork([vec![merge_map([emit_with("a", json!({ "n": "$item.n" }))])]]),
+            emit("out"),
+        ]))
+        .unwrap();
+    let items: Vec<Value> = (1..=3).map(|n| json!({ "n": n })).collect();
+    let (outs, err) = tokio::time::timeout(Duration::from_mins(1), all(&vine, items))
+        .await
+        .expect("the side pipe stalled");
+    assert!(err.is_none(), "{err:?}");
+    let side: Vec<&Value> = outs
+        .iter()
+        .filter(|(n, _)| n == "a")
+        .map(|(_, v)| v)
+        .collect();
+    assert_eq!(
+        side,
+        [&json!({ "n": 1 }), &json!({ "n": 2 }), &json!({ "n": 3 })]
+    );
+    assert_eq!(outs.len(), 6);
 }
 
 #[test]

@@ -360,10 +360,8 @@ pub(super) fn forked(mut upstream: Items, sides: &[Transform], cx: &Cx) -> Items
                 // A value that reaches the end of a side pipe is dropped.
                 Poll::Ready(Some(Ok(Flowing::Value(..)))) => {}
                 Poll::Ready(Some(other)) => ready_out.push_back(other),
-                Poll::Ready(None) => {
-                    outs[i] = None;
-                    draining = Some(i + 1);
-                }
+                // The next round moves past the side pipe that ended.
+                Poll::Ready(None) => outs[i] = None,
                 Poll::Pending => {
                     let idle = {
                         let s = lock(&inputs[i]);
