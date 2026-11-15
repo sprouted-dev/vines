@@ -306,7 +306,8 @@ impl Shape {
                         ty: field.ty,
                     });
                 }
-                Some(Value::Null) if !field.required => {}
+                // A null past the arm above is optional, or of type `any`.
+                Some(Value::Null) => {}
                 Some(value) if !field.ty.fits(value) => {
                     return Err(Misfit::WrongType {
                         name: name.clone(),
@@ -401,8 +402,8 @@ impl Shape {
                         ty: field.ty,
                     });
                 }
-                None | Some(Template::Ref(_)) => {}
-                Some(Template::Lit(Value::Null)) if !field.required => {}
+                // A null past the arm above is optional, or of type `any`.
+                None | Some(Template::Ref(_) | Template::Lit(Value::Null)) => {}
                 Some(Template::Lit(v)) => {
                     if !field.ty.fits(v) {
                         return Err(wrong(describe(v)));
