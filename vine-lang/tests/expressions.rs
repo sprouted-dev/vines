@@ -90,6 +90,40 @@ async fn one_value_alone_holds_unless_it_is_false_or_null() {
 }
 
 #[tokio::test]
+async fn filter_compares_with_true_false_null_and_integers_as_written() {
+    let kept = |when: &'static str, item: Value| async move {
+        !emitted(over([filter(when), emit("out")]), item)
+            .await
+            .is_empty()
+    };
+    assert!(kept("$item.flag == true", json!({ "kind": "a", "flag": true })).await);
+    assert!(!kept("$item.flag == true", json!({ "kind": "a", "flag": false })).await);
+    assert!(kept("$item.flag == false", json!({ "kind": "a", "flag": false })).await);
+    assert!(kept("$item.n == null", json!({ "kind": "a" })).await);
+    assert!(!kept("$item.n == null", json!({ "kind": "a", "n": 0 })).await);
+    assert!(kept("$item.n==3", json!({ "kind": "a", "n": 3 })).await);
+    assert!(kept("$item.n != 3", json!({ "kind": "a", "n": 4 })).await);
+    assert!(!kept("$item.n != 3", json!({ "kind": "a", "n": 3 })).await);
+}
+
+#[tokio::test]
+async fn a_condition_written_as_a_bool_keeps_every_item_or_none() {
+    let with = |when: bool| over([Operator::Filter { when: json!(when) }, emit("out")]);
+    let item = || json!({ "kind": "a" });
+    assert_eq!(emitted(with(true), item()).await.len(), 1);
+    assert!(emitted(with(false), item()).await.is_empty());
+}
+
+#[test]
+fn a_condition_that_is_neither_text_nor_a_bool_is_refused() {
+    let err = refused(over([Operator::Filter { when: json!(3) }, emit("out")]));
+    assert!(
+        matches!(err, LoadError::Malformed { ref path, .. } if path == "pipe[0].filter"),
+        "{err:?}"
+    );
+}
+
+#[tokio::test]
 async fn a_branch_case_matches_an_integer_as_written_and_an_absent_value_matches_none() {
     let def = || {
         over([
@@ -158,6 +192,22 @@ fn a_condition_is_one_value_or_two_joined_by_equals_or_not_equals() {
         assert!(
             matches!(err, LoadError::Malformed { ref path, .. } if path == "pipe[0].filter"),
             "for {when}: {err:?}"
+        );
+    }
+}
+
+#[test]
+fn a_quote_ends_the_word_before_it() {
+    for when in ["$item.tag'open'", "$item.tag\"open\""] {
+        let err = refused(over([filter(when), emit("out")]));
+        assert_eq!(
+            err,
+            LoadError::Malformed {
+                path: "pipe[0].filter".into(),
+                problem: format!(
+                    "`{when}`: a condition is one value, or two values joined by == or != (no and/or)"
+                ),
+            }
         );
     }
 }

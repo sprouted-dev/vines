@@ -1203,12 +1203,14 @@ async fn a_payload_that_does_not_fit_its_output_at_run_time_is_a_run_error() {
 fn item_is_the_only_name_and_a_field_it_never_has_is_refused() {
     let err = refused(numbers([emit_with("out", json!({ "x": "$in.n" }))]));
     assert!(
-        matches!(err, LoadError::UnboundReference { ref name, .. } if name == "in"),
+        matches!(err, LoadError::UnboundReference { ref name, ref reference, .. }
+            if name == "in" && reference == "$in.n"),
         "{err}"
     );
     let err = refused(numbers([filter("$item.nope == 1"), emit("out")]));
     assert!(
-        matches!(err, LoadError::UnknownField { ref field, .. } if field == "nope"),
+        matches!(err, LoadError::UnknownField { ref field, ref reference, .. }
+            if field == "nope" && reference == "$item.nope"),
         "{err}"
     );
 }
