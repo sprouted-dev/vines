@@ -956,8 +956,10 @@ fn operators_that_start_again_for_each_item_can_run_from_a_position() {
         ])]),
         // `last` holds the newest item, and a restart feeds it again.
         events_vine([last(), emit("out")]),
-        // `bufferCount` over whole items, in the main pipe or a side pipe.
+        // `bufferCount` over whole items, in the main pipe or a side pipe,
+        // or after an operator that gives one value for each.
         events_vine([buffer_count(2), emit("out")]),
+        events_vine([archive(), buffer_count(2), emit("out")]),
         events_vine([fork([vec![buffer_count(2), emit("out")]]), emit("out")]),
         // `bufferCount` after a stream operator, inside one item's work.
         events_vine([concat_map([

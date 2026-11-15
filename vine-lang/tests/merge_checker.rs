@@ -145,6 +145,24 @@ async fn side_by_side_work_inside_a_branch_or_a_used_vine_counts_as_a_merge() {
 }
 
 #[tokio::test]
+async fn a_merge_inside_another_operator_counts_as_a_merge() {
+    refused(
+        jobs_vine([concat_map([merge(vec![one()])]), take(1), done()]),
+        "pipe[2] is a `take` after pipe[1]",
+    )
+    .await;
+    refused(
+        jobs_vine([
+            fork([vec![merge(vec![one()]), done()]]),
+            done(),
+            catch_error([emit_with("all", json!({}))]),
+        ]),
+        "pipe[3] is a `catchError` over a `mergeMap`",
+    )
+    .await;
+}
+
+#[tokio::test]
 async fn a_catch_error_or_finalize_over_a_merge_map_is_refused_for_it_drops_the_items_still_running(
 ) {
     let outer = |applied: Operator| {
@@ -181,6 +199,17 @@ async fn an_operator_on_the_value_last_picked_after_a_merge_is_refused() {
             last(),
             use_vine("steps", Some(json!({ "job": "$item.job" })))
                 .on("done", [emit_with("done", json!({ "id": "$item.id" }))]),
+        ]),
+        "pipe[3] runs `work.step` on the value the `last` at pipe[2] picked",
+    )
+    .await;
+    // In a `forkJoin`.
+    refused(
+        jobs_vine([
+            merge(vec![one()]),
+            last(),
+            fork_join([step("two", json!(1)), step("three", json!(1))]),
+            done(),
         ]),
         "pipe[3] runs `work.step` on the value the `last` at pipe[2] picked",
     )
@@ -227,6 +256,15 @@ fn what_works_one_value_at_a_time_after_or_inside_a_merge_can_be_resumed() {
             jobs_vine([
                 merge(vec![one()]),
                 merge(vec![step("two", json!(1))]),
+                done(),
+            ]),
+        ),
+        (
+            "a fork whose side pipe merges, then `last` and a step in the main pipe",
+            jobs_vine([
+                fork([vec![merge(vec![one()]), done()]]),
+                last(),
+                step("two", json!(1)),
                 done(),
             ]),
         ),

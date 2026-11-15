@@ -135,6 +135,31 @@ async fn a_result_that_breaks_its_declared_shape_is_a_run_error() {
     );
 }
 
+#[test]
+fn a_call_with_no_into_is_its_result_so_a_field_the_result_never_has_is_refused() {
+    let mut reg = Registry::new();
+    reg.register(
+        OperatorSpec::new("git.head")
+            .returns(Shape::new().required("sha", Ty::Text))
+            .touches(["git"]),
+        |_v, _cx| async { Ok(json!({ "sha": "abc" })) },
+    )
+    .unwrap();
+    let def = pipe("v")
+        .input(Shape::new().required("job", Ty::Id))
+        .output("done", Shape::open())
+        .operators([
+            call("git.head", json!({})),
+            emit_with("done", json!({ "job": "$item.job" })),
+        ]);
+    let err = reg.build_pipe(def).unwrap_err();
+    assert!(
+        matches!(err, LoadError::UnknownField { ref field, ref path, .. }
+            if field == "job" && path == "pipe[1].emit.with"),
+        "{err}"
+    );
+}
+
 #[tokio::test]
 async fn a_vine_of_only_core_operators_reaches_nothing() {
     let def = pipe("echo")

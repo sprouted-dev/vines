@@ -780,6 +780,16 @@ fn last_and_buffer_count_where_they_could_only_see_one_item_are_refused() {
             vec![concat_map([last(), emit("out")])],
             "pipe[0].concatMap.do[0].last",
         ),
+        // Past a `catchError` inside one item's work, still one item.
+        (
+            vec![concat_map([
+                op("set", json!({ "n": "$item.n" })),
+                catch_error([op("set", json!({ "n": 0 }))]),
+                last(),
+                emit("out"),
+            ])],
+            "pipe[0].concatMap.do[2].last",
+        ),
         (
             vec![
                 count_to("$item.n"),

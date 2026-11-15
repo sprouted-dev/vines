@@ -223,9 +223,7 @@ impl Checker<'_> {
             if self.makes_many(op) {
                 many = true;
                 one_item = false;
-            }
-            if maker.is_none() && self.makes_many_anywhere(op) {
-                maker = Some(here.clone());
+                maker.get_or_insert_with(|| here.clone());
             }
         }
         Ok(Built {
@@ -292,15 +290,6 @@ impl Checker<'_> {
             | Operator::Branch { .. } => true,
             Operator::Call { name, .. } => self.reg.stream_gives(name).is_some(),
             _ => false,
-        }
-    }
-
-    /// Whether an operator can turn one item into many, counting the
-    /// operators a `catchError` runs instead.
-    fn makes_many_anywhere(&self, op: &Operator) -> bool {
-        match op {
-            Operator::CatchError(ops) => ops.iter().any(|s| self.makes_many(s)),
-            _ => self.makes_many(op),
         }
     }
 

@@ -248,6 +248,8 @@ fn ids(outs: &[PipeOutput]) -> Vec<OutputId> {
     outs.iter().map(|o| o.id.clone()).collect()
 }
 
+/// No two outputs share an id, compared as ids or as the text a caller
+/// stores.
 fn assert_unique(outs: &[PipeOutput], why: &str) {
     let set: BTreeSet<OutputId> = ids(outs).into_iter().collect();
     assert_eq!(
@@ -256,6 +258,8 @@ fn assert_unique(outs: &[PipeOutput], why: &str) {
         "{why}: ids repeat in {:?}",
         ids(outs)
     );
+    let texts: BTreeSet<&str> = outs.iter().map(|o| o.id.as_str()).collect();
+    assert_eq!(texts.len(), outs.len(), "{why}: ids repeat as text");
 }
 
 /// Each id with the output it names.

@@ -21,4 +21,10 @@ exclude_re = [
   # contiguous, and mutants that make the guard true change nothing. The
   # mutants that make it false are caught.
   '(match guard .*|&& with \|\|) in State<P>::extend_tail_gap',
+  # vine-lang's checker asks whether an operator at index i stands before
+  # the last catchError, finalize, retry or timeout of its pipe (index c)
+  # with `i < c`. The operator at c is one of those four, and the loop
+  # handles it and moves on before this test, so i is never c there, and
+  # `i <= c` decides the same for every pipe.
+  "replace < with <= in Checker<'_>::pipe",
 ]
