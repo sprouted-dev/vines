@@ -5,6 +5,7 @@
 #![cfg(test)]
 
 mod fake;
+mod sweep;
 
 use std::sync::Arc;
 
@@ -18,6 +19,7 @@ use fake::restart::{
 };
 use fake::{register_stream, Gives, World};
 use futures::{stream, StreamExt};
+use sweep::{singles_then_pairs, sweep_tests, Shard};
 use vine_lang::pipe::{
     buffer_count, call, catch_error, concat_map, emit, emit_with, filter, finalize, fork, last,
     pipe, retry, take, tap, use_vine, Operator, PipeDef,
@@ -66,44 +68,60 @@ async fn uninterrupted(
     (keeper.outs, world.log(), events)
 }
 
-/// Kill one job's `run_saved` after each count of events in `kills`, then
-/// run it to the end, and check it did what an uninterrupted run does.
-/// Gives what the caller kept.
-async fn check_kills(build: Build, script: &Script, kills: &[usize]) -> Keeper {
-    let (want, want_log, _) = uninterrupted(build, script).await;
-    let (world, host) = (World::new(), Host::new());
-    host.script("job-1", script.clone());
-    let mut keeper = Keeper::new();
-    let repeats = run_saved_with_kills(|| build(&world, &host), &[job()], &mut keeper, kills).await;
-    assert_eq!(keeper.outs, want, "kills {kills:?}");
-    assert_eq!(
-        calls_done(world.log()),
-        calls_done(want_log),
-        "kills {kills:?}"
-    );
-    assert_eq!(world.count("agent.start"), 1, "kills {kills:?}");
-    assert!(world.trees().is_empty(), "kills {kills:?}");
-    assert!(repeats <= kills.len());
-    keeper
+/// One job's vine, its agent's script, and what an uninterrupted run of it
+/// gives, which every killed run must match.
+struct Baseline {
+    build: Build,
+    script: Script,
+    want: Vec<(String, Value)>,
+    want_log: Vec<String>,
+    events: usize,
 }
 
-/// Every single kill point, and pairs of kill points in a row on a grid.
-async fn check_every_kill(build: Build, script: &Script, bound: usize) {
-    let (_, _, events) = uninterrupted(build, script).await;
-    for k in 1..=events {
-        let keeper = check_kills(build, script, &[k]).await;
-        assert!(
-            keeper.largest <= bound,
-            "kill {k}: {} bytes",
-            keeper.largest
-        );
+impl Baseline {
+    async fn of(build: Build, script: Script) -> Baseline {
+        let (want, want_log, events) = uninterrupted(build, &script).await;
+        Baseline {
+            build,
+            script,
+            want,
+            want_log,
+            events,
+        }
     }
-    for k1 in (1..events).step_by(13) {
-        for k2 in (1..events).step_by(17) {
-            let keeper = check_kills(build, script, &[k1, k2]).await;
+
+    /// Kill the job's `run_saved` after each count of events in `kills`,
+    /// then run it to the end, and check it did what the uninterrupted run
+    /// did. Gives what the caller kept.
+    async fn check(&self, kills: &[usize]) -> Keeper {
+        let (world, host) = (World::new(), Host::new());
+        host.script("job-1", self.script.clone());
+        let mut keeper = Keeper::new();
+        let build = || (self.build)(&world, &host);
+        let repeats = run_saved_with_kills(build, &[job()], &mut keeper, kills).await;
+        assert_eq!(keeper.outs, self.want, "kills {kills:?}");
+        assert_eq!(
+            calls_done(world.log()),
+            calls_done(self.want_log.clone()),
+            "kills {kills:?}"
+        );
+        assert_eq!(world.count("agent.start"), 1, "kills {kills:?}");
+        assert!(world.trees().is_empty(), "kills {kills:?}");
+        assert!(repeats <= kills.len());
+        keeper
+    }
+
+    /// Check `shard` of every single kill point and of pairs of kill points
+    /// in a row on a grid, each keeping a journal of at most `bound` bytes.
+    async fn check_every_kill(&self, shard: Shard, bound: usize) {
+        let events = self.events;
+        let plans =
+            singles_then_pairs(1..=events, (1..events).step_by(13), (1..events).step_by(17));
+        for kills in shard.take(plans) {
+            let keeper = self.check(&kills).await;
             assert!(
                 keeper.largest <= bound,
-                "kills {k1}, {k2}: {} bytes",
+                "kills {kills:?}: {} bytes",
                 keeper.largest
             );
         }
@@ -170,21 +188,52 @@ async fn job_run_by_position_saves_how_far_the_agent_got_and_not_its_lines() {
     );
 }
 
-#[tokio::test(start_paused = true)]
-async fn job_run_by_position_killed_anywhere_once_or_twice_gives_what_an_uninterrupted_run_gives() {
-    check_every_kill(job_run, &Script::new(120, "finished"), JOB_RUN_BOUND).await;
+async fn job_run_sweep(shard: Shard) {
+    Baseline::of(job_run, Script::new(120, "finished"))
+        .await
+        .check_every_kill(shard, JOB_RUN_BOUND)
+        .await;
 }
 
-#[tokio::test(start_paused = true)]
-async fn job_run_by_position_killed_anywhere_after_the_agent_host_is_lost_still_fails_once() {
+sweep_tests!(
+    job_run_by_position_killed_anywhere_once_or_twice_gives_what_an_uninterrupted_run_gives: job_run_sweep,
+    shard_0 = 0,
+    shard_1 = 1,
+    shard_2 = 2,
+    shard_3 = 3,
+    shard_4 = 4,
+    shard_5 = 5,
+    shard_6 = 6,
+    shard_7 = 7,
+    shard_8 = 8,
+    shard_9 = 9,
+    shard_10 = 10,
+    shard_11 = 11,
+    shard_12 = 12,
+    shard_13 = 13,
+    shard_14 = 14,
+    shard_15 = 15,
+);
+
+async fn lost_host_sweep(shard: Shard) {
     let script = Script {
         lost_after: Some(70),
         ..Script::new(120, "finished")
     };
-    let (want, _, _) = uninterrupted(job_run, &script).await;
-    assert_eq!(want.last().unwrap().0, "failed");
-    check_every_kill(job_run, &script, JOB_RUN_BOUND).await;
+    let base = Baseline::of(job_run, script).await;
+    assert_eq!(base.want.last().unwrap().0, "failed");
+    base.check_every_kill(shard, JOB_RUN_BOUND).await;
 }
+
+sweep_tests!(
+    job_run_by_position_killed_anywhere_after_the_agent_host_is_lost_still_fails_once: lost_host_sweep,
+    shard_0 = 0,
+    shard_1 = 1,
+    shard_2 = 2,
+    shard_3 = 3,
+    shard_4 = 4,
+    shard_5 = 5,
+);
 
 #[tokio::test(start_paused = true)]
 async fn job_run_by_position_killed_anywhere_with_a_commit_that_fails_removes_the_copy_once() {
@@ -264,51 +313,71 @@ async fn a_restart_mid_batch_attaches_from_the_last_whole_batch_and_rebuilds_the
     );
 }
 
-/// The largest journal of one job of `lines` lines killed at ten points,
-/// saved by position, and the size of the journal of the same job saved
-/// item by item when it ends.
-async fn journal_sizes(lines: u64) -> (usize, usize) {
-    let script = Script {
+fn script_of(lines: u64) -> Script {
+    Script {
         every: std::time::Duration::from_millis(10),
         ..Script::new(lines, "finished")
-    };
+    }
+}
+
+/// The largest journal of one job of `lines` lines killed at ten points,
+/// saved by position, in bytes of JSON.
+async fn journal_by_position(lines: u64) -> usize {
     let probe = Host::new();
-    probe.script("job-1", script.clone());
+    probe.script("job-1", script_of(lines));
     let events = events_saved(&job_run(&World::new(), &probe), &[job()]).await;
     let kills: Vec<usize> = (1..=10).map(|i| i * events / 11).collect();
     let (world, host) = (World::new(), Host::new());
-    host.script("job-1", script.clone());
+    host.script("job-1", script_of(lines));
     let mut keeper = Keeper::new();
     run_saved_with_kills(|| job_run(&world, &host), &[job()], &mut keeper, &kills).await;
     assert_eq!(keeper.outs, expected(lines, "finished"), "{lines} lines");
     assert_eq!(world.count("agent.start"), 1);
+    assert!(
+        keeper.largest <= JOB_RUN_BOUND,
+        "{lines} lines: {} bytes",
+        keeper.largest
+    );
+    keeper.largest
+}
 
+/// The size of the journal of one job of `lines` lines saved item by item
+/// when it ends, in bytes of JSON.
+async fn journal_item_by_item(lines: u64) -> usize {
     let host = Host::new();
-    host.script("job-1", script);
+    host.script("job-1", script_of(lines));
     let mut journal = Journal::new();
     let mut run =
         job_run_every_item(&World::new(), &host).run_saved(stream::iter([job()]), Journal::new());
     while let Some(event) = run.next().await {
         journal.record(&event.unwrap());
     }
-    (keeper.largest, journal.to_json().to_string().len())
+    journal.to_json().to_string().len()
 }
 
 #[tokio::test(start_paused = true)]
 async fn what_the_caller_keeps_for_one_job_does_not_grow_with_the_lines_its_agent_writes() {
-    let mut largest = Vec::new();
-    for lines in [100, 1_000, 10_000] {
-        let (by_position, every_item) = journal_sizes(lines).await;
-        eprintln!("{lines} lines: by position at most {by_position} bytes, item by item {every_item} bytes");
-        assert!(
-            by_position <= JOB_RUN_BOUND,
-            "{lines} lines: {by_position} bytes"
-        );
-        largest.push((by_position, every_item));
-    }
-    // Item by item grows with the lines; by position it does not.
-    assert!(largest[2].1 > 50 * largest[0].1);
-    assert!(largest[2].0 < largest[0].0 + 50, "{largest:?}");
+    let (few, many) = (
+        journal_by_position(100).await,
+        journal_by_position(10_000).await,
+    );
+    eprintln!("by position at most {few} bytes for 100 lines, {many} for 10000");
+    assert!(many < few + 50, "{few} then {many} bytes");
+}
+
+#[tokio::test(start_paused = true)]
+async fn what_the_caller_keeps_for_one_job_of_a_thousand_lines_stays_within_the_bound() {
+    journal_by_position(1_000).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_job_saved_item_by_item_keeps_a_journal_that_grows_with_the_lines_its_agent_writes() {
+    let (few, many) = (
+        journal_item_by_item(100).await,
+        journal_item_by_item(10_000).await,
+    );
+    eprintln!("item by item {few} bytes for 100 lines, {many} for 10000");
+    assert!(many > 50 * few, "{few} then {many} bytes");
 }
 
 // ------------------------------------------------- job_run from a position
@@ -319,8 +388,7 @@ fn jobs(n: u64) -> Vec<Value> {
         .collect()
 }
 
-#[tokio::test(start_paused = true)]
-async fn job_run_by_position_over_a_stream_of_jobs_keeps_a_small_bookmark_at_every_kill() {
+async fn job_stream_sweep(shard: Shard) {
     let input = jobs(2);
     let script_all = |host: &Arc<Host>| {
         for j in ["job-1", "job-2"] {
@@ -337,32 +405,35 @@ async fn job_run_by_position_over_a_stream_of_jobs_keeps_a_small_bookmark_at_eve
         let events = events_in(&job_run(&World::new(), &probe), &input).await;
         (caller.outs, world.log(), events)
     };
-    for k in (1..events).step_by(3) {
+    let plans = (1..events).step_by(3).map(|k| vec![k, k / 2 + 1]).collect();
+    for kills in shard.take(plans) {
         let (world, host) = (World::new(), Host::new());
         script_all(&host);
         let mut caller = Caller::new();
-        run_with_kills(
-            || job_run(&world, &host),
-            &input,
-            &mut caller,
-            &[k, k / 2 + 1],
-        )
-        .await;
-        assert_eq!(caller.outs, want, "kill {k}");
+        run_with_kills(|| job_run(&world, &host), &input, &mut caller, &kills).await;
+        assert_eq!(caller.outs, want, "kills {kills:?}");
         assert_eq!(
             calls_done(world.log()),
             calls_done(want_log.clone()),
-            "kill {k}"
+            "kills {kills:?}"
         );
         assert_eq!(caller.position(), 2);
         assert!(caller.bookmark().is_empty());
         assert!(
             caller.largest <= JOB_RUN_BOUND,
-            "kill {k}: {} bytes",
+            "kills {kills:?}: {} bytes",
             caller.largest
         );
     }
 }
+
+sweep_tests!(
+    job_run_by_position_over_a_stream_of_jobs_keeps_a_small_bookmark_at_every_kill: job_stream_sweep,
+    shard_0 = 0,
+    shard_1 = 1,
+    shard_2 = 2,
+    shard_3 = 3,
+);
 
 // ----------------------------------------------------------- event_pages
 
@@ -376,18 +447,27 @@ fn pages_every_item(world: &Arc<World>) -> Pipe {
     feed_registry(world).build_pipe(event_pages_pipe()).unwrap()
 }
 
+/// What an uninterrupted run of `event_pages` over `input` hands out, and
+/// how many events it gives.
+async fn pages_want(input: &[Value]) -> (Vec<(String, Value)>, usize) {
+    let mut run = pages(&World::new()).run_from(stream::iter(input.to_vec()), Bookmark::new());
+    let (mut outs, mut events) = (Vec::new(), 0);
+    while let Some(progress) = run.next().await {
+        if let Progress::Output(o) = progress.unwrap() {
+            outs.push((o.name, o.payload));
+        }
+        events += 1;
+    }
+    (outs, events)
+}
+
 /// Run `event_pages` killed after each count in `kills`, and check it gave
-/// what an uninterrupted run gives, fetched each event's pages once, and
-/// kept a bookmark of at most `bound` bytes. Gives the largest bookmark.
-async fn check_pages(build: fn(&Arc<World>) -> Pipe, input: &[Value], kills: &[usize]) -> usize {
-    let want = {
-        let mut caller = Caller::new();
-        run(&build(&World::new()), input, &mut caller, None).await;
-        caller.outs
-    };
+/// `want`, what an uninterrupted run gives, and fetched each event's pages
+/// once. Gives the largest bookmark it kept, in bytes of JSON.
+async fn check_pages(input: &[Value], want: &[(String, Value)], kills: &[usize]) -> usize {
     let world = World::new();
     let mut caller = Caller::new();
-    run_with_kills(|| build(&world), input, &mut caller, kills).await;
+    run_with_kills(|| pages(&world), input, &mut caller, kills).await;
     assert_eq!(caller.outs, want, "kills {kills:?}");
     for event in input {
         let first = format!("feed.pages {} from 0", event["seq"]);
@@ -397,22 +477,28 @@ async fn check_pages(build: fn(&Arc<World>) -> Pipe, input: &[Value], kills: &[u
     caller.largest
 }
 
-#[tokio::test]
-async fn event_pages_by_position_killed_anywhere_once_or_twice_gives_each_page_once() {
+async fn pages_sweep(shard: Shard) {
     let input: Vec<Value> = (1..=4)
         .zip([3, 0, 7, 2])
         .map(|(n, pages)| json!({ "seq": n, "pages": pages }))
         .collect();
-    let events = events_in(&pages(&World::new()), &input).await;
-    for k in 1..=events {
-        assert!(check_pages(pages, &input, &[k]).await <= 600, "kill {k}");
-    }
-    for k1 in 1..events {
-        for k2 in (1..events).step_by(3) {
-            check_pages(pages, &input, &[k1, k2]).await;
+    let (want, events) = pages_want(&input).await;
+    let plans = singles_then_pairs(1..=events, 1..events, (1..events).step_by(3));
+    for kills in shard.take(plans) {
+        let largest = check_pages(&input, &want, &kills).await;
+        if let [k] = kills[..] {
+            assert!(largest <= 600, "kill {k}");
         }
     }
 }
+
+sweep_tests!(
+    event_pages_by_position_killed_anywhere_once_or_twice_gives_each_page_once: pages_sweep,
+    shard_0 = 0,
+    shard_1 = 1,
+    shard_2 = 2,
+    shard_3 = 3,
+);
 
 /// The largest bookmark an uninterrupted run keeps, in bytes of JSON. It
 /// measures only when the bookmark grew, so a bookmark that only grows
@@ -433,24 +519,46 @@ async fn largest_bookmark(vine: &Pipe, input: &[Value]) -> usize {
     largest
 }
 
+/// One event of `count` pages between two short ones.
+fn long_event(count: u64) -> Vec<Value> {
+    vec![
+        json!({ "seq": 1, "pages": 2 }),
+        json!({ "seq": 2, "pages": count }),
+        json!({ "seq": 3, "pages": 1 }),
+    ]
+}
+
+/// Run `event_pages` over an event of `count` pages killed at eight
+/// points, and check the bookmark kept stayed within 600 bytes.
+async fn check_long_event_by_position(count: u64) {
+    let input = long_event(count);
+    let (want, events) = pages_want(&input).await;
+    let kills: Vec<usize> = (1..=8).map(|i| i * events / 9).collect();
+    let by_position = check_pages(&input, &want, &kills).await;
+    eprintln!("{count} pages: by position at most {by_position} bytes");
+    assert!(by_position <= 600, "{count} pages: {by_position} bytes");
+}
+
 #[tokio::test]
-async fn event_pages_by_position_keeps_a_bookmark_that_does_not_grow_with_the_pages_of_an_event() {
-    let mut sizes = Vec::new();
-    for count in [100, 1_000, 10_000] {
-        let input = vec![
-            json!({ "seq": 1, "pages": 2 }),
-            json!({ "seq": 2, "pages": count }),
-            json!({ "seq": 3, "pages": 1 }),
-        ];
-        let events = events_in(&pages(&World::new()), &input).await;
-        let kills: Vec<usize> = (1..=8).map(|i| i * events / 9).collect();
-        let by_position = check_pages(pages, &input, &kills).await;
-        let every_item = largest_bookmark(&pages_every_item(&World::new()), &input).await;
-        eprintln!("{count} pages: by position at most {by_position} bytes, item by item {every_item} bytes");
-        assert!(by_position <= 600, "{count} pages: {by_position} bytes");
-        sizes.push((by_position, every_item));
-    }
-    assert!(sizes[2].1 > 50 * sizes[0].1, "{sizes:?}");
+async fn event_pages_by_position_keeps_a_small_bookmark_for_an_event_of_a_hundred_or_a_thousand_pages(
+) {
+    check_long_event_by_position(100).await;
+    check_long_event_by_position(1_000).await;
+}
+
+#[tokio::test]
+async fn event_pages_by_position_keeps_a_small_bookmark_for_an_event_of_ten_thousand_pages() {
+    check_long_event_by_position(10_000).await;
+}
+
+#[tokio::test]
+async fn event_pages_item_by_item_keeps_a_bookmark_that_grows_with_the_pages_of_an_event() {
+    let every_item = |count| async move {
+        largest_bookmark(&pages_every_item(&World::new()), &long_event(count)).await
+    };
+    let (few, many) = (every_item(100).await, every_item(10_000).await);
+    eprintln!("item by item {few} bytes for 100 pages, {many} for 10000");
+    assert!(many > 50 * few, "{few} then {many} bytes");
 }
 
 // ----------------------------------- a call that a catchError takes over
@@ -508,30 +616,41 @@ fn checked_run(world: &Arc<World>, host: &Arc<Host>) -> Pipe {
     reg.build_pipe(def).unwrap()
 }
 
-#[tokio::test(start_paused = true)]
-async fn a_call_a_catch_error_took_over_is_not_read_past_where_the_first_run_stopped() {
+async fn checked_run_sweep(shard: Shard) {
     let script = Script::new(120, "finished");
     let (want, want_log, events) = uninterrupted(checked_run, &script).await;
     assert_eq!(want.len(), 71, "70 lines and one failure: {want:?}");
     assert_eq!(want[70].0, "failed");
-    for k in 1..=events {
+    for kills in shard.take(singles_then_pairs(1..=events, [], [])) {
         let (world, host) = (World::new(), Host::new());
         host.script("job-1", script.clone());
         let mut keeper = Keeper::new();
-        run_saved_with_kills(|| checked_run(&world, &host), &[job()], &mut keeper, &[k]).await;
-        assert_eq!(keeper.outs, want, "kill {k}");
+        run_saved_with_kills(|| checked_run(&world, &host), &[job()], &mut keeper, &kills).await;
+        assert_eq!(keeper.outs, want, "kills {kills:?}");
         // Each line was checked once, so every operator ran once.
         assert_eq!(
             calls_done(world.log()),
             calls_done(want_log.clone()),
-            "kill {k}"
+            "kills {kills:?}"
         );
         assert!(
             keeper.largest <= JOB_RUN_BOUND,
-            "kill {k}: {} bytes",
+            "kills {kills:?}: {} bytes",
             keeper.largest
         );
     }
+}
+
+sweep_tests!(
+    a_call_a_catch_error_took_over_is_not_read_past_where_the_first_run_stopped: checked_run_sweep,
+    shard_0 = 0,
+    shard_1 = 1,
+    shard_2 = 2,
+    shard_3 = 3,
+);
+
+#[tokio::test(start_paused = true)]
+async fn a_call_a_catch_error_took_over_is_saved_as_abandoned_and_replays_to_nothing_more() {
     // Once the failure is handled, the journal says the call was abandoned.
     let (world, host) = (World::new(), Host::new());
     let mut keeper = Keeper::new();
@@ -646,10 +765,12 @@ fn words(world: &Arc<World>) -> Pipe {
     feed_with_words(world).build_pipe(def).unwrap()
 }
 
-#[tokio::test]
-async fn two_stream_operators_in_a_row_are_both_saved_by_position_and_survive_any_kill() {
-    let world = World::new();
-    assert_eq!(words(&world).saves_every_item(), []);
+#[test]
+fn two_stream_operators_in_a_row_are_both_saved_by_position() {
+    assert_eq!(words(&World::new()).saves_every_item(), []);
+}
+
+async fn words_sweep(shard: Shard) {
     let input: Vec<Value> = (1..=3)
         .map(|n| json!({ "seq": n, "pages": n + 1 }))
         .collect();
@@ -660,23 +781,30 @@ async fn two_stream_operators_in_a_row_are_both_saved_by_position_and_survive_an
         caller.outs
     };
     assert_eq!(want.len(), 3 * (2 + 3 + 4));
-    for k1 in 1..events {
-        for k2 in [1, events / 2, events - 1] {
-            let world = World::new();
-            let mut caller = Caller::new();
-            run_with_kills(|| words(&world), &input, &mut caller, &[k1, k2]).await;
-            assert_eq!(caller.outs, want, "kills {k1}, {k2}");
-            for n in 1..=3 {
-                assert_eq!(world.count(&format!("feed.pages {n} from 0")), 1);
-            }
-            assert!(
-                caller.largest <= 700,
-                "kills {k1}, {k2}: {} bytes",
-                caller.largest
-            );
+    let plans = singles_then_pairs([], 1..events, [1, events / 2, events - 1]);
+    for kills in shard.take(plans) {
+        let world = World::new();
+        let mut caller = Caller::new();
+        run_with_kills(|| words(&world), &input, &mut caller, &kills).await;
+        assert_eq!(caller.outs, want, "kills {kills:?}");
+        for n in 1..=3 {
+            assert_eq!(world.count(&format!("feed.pages {n} from 0")), 1);
         }
+        assert!(
+            caller.largest <= 700,
+            "kills {kills:?}: {} bytes",
+            caller.largest
+        );
     }
 }
+
+sweep_tests!(
+    two_stream_operators_in_a_row_survive_any_kill: words_sweep,
+    shard_0 = 0,
+    shard_1 = 1,
+    shard_2 = 2,
+    shard_3 = 3,
+);
 
 // ------------------------------------------------------------ the checker
 

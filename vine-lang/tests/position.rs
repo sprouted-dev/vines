@@ -5,6 +5,7 @@
 #![cfg(test)]
 
 mod fake;
+mod sweep;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -17,6 +18,7 @@ use fake::feed::{
 use fake::restart::{assert_forward, events_in, run, run_with_kills, started, Caller, End};
 use fake::World;
 use futures::{stream, StreamExt};
+use sweep::{singles_then_pairs, sweep_tests, Kills, Shard};
 use vine_lang::pipe::{
     buffer_count, call, concat_map, emit, emit_with, exhaust_map, finalize, fork, last, pipe,
     split, switch_map, take, tap, timeout, use_vine, Operator, Pipe, PipeDef,
@@ -103,41 +105,71 @@ async fn uninterrupted(build: Build, input: &[Value]) -> (Caller, Vec<String>, u
     (caller, world.log(), events)
 }
 
-/// Kill `build`'s vine after each count in `kills`, then run it to the
-/// end, and check it did what an uninterrupted run does: each operator once,
-/// each output once and in order, the position only forward, and the
-/// bookmark no bigger than `bound` lines.
-async fn check_kills(build: Build, input: &[Value], kills: &[usize], bound: usize) {
-    let (want, want_log, _) = uninterrupted(build, input).await;
-    let world = World::new();
-    let mut caller = Caller::new();
-    let repeats = run_with_kills(|| build(&world), input, &mut caller, kills).await;
-    assert_eq!(caller.outs, want.outs, "kills {kills:?}");
-    assert_eq!(
-        started(world.log()),
-        started(want_log.clone()),
-        "kills {kills:?}"
-    );
-    assert_forward(&caller.throughs);
-    assert_eq!(caller.position(), input.len() as u64, "kills {kills:?}");
-    assert!(caller.bookmark().is_empty(), "kills {kills:?}");
-    assert!(
-        caller.most <= bound,
-        "kills {kills:?}: {} lines",
-        caller.most
-    );
-    assert!(repeats <= kills.len());
+/// A vine, its input, and what its uninterrupted run gives, which every
+/// killed run of it must match.
+struct Baseline {
+    build: Build,
+    input: Vec<Value>,
+    /// The bookmark holds at most this many lines.
+    bound: usize,
+    want: Caller,
+    want_log: Vec<String>,
+    events: usize,
 }
 
-/// Every single kill point, and every pair of kill points in a row.
-async fn check_every_kill(build: Build, input: &[Value], bound: usize) {
-    let (_, _, events) = uninterrupted(build, input).await;
-    for k in 1..events {
-        check_kills(build, input, &[k], bound).await;
+impl Baseline {
+    async fn of(build: Build, input: Vec<Value>, bound: usize) -> Baseline {
+        let (want, want_log, events) = uninterrupted(build, &input).await;
+        Baseline {
+            build,
+            input,
+            bound,
+            want,
+            want_log,
+            events,
+        }
     }
-    for k1 in 1..events {
-        for k2 in 1..events {
-            check_kills(build, input, &[k1, k2], bound).await;
+
+    /// Kill the vine after each count in `kills`, then run it to the end,
+    /// and check it did what the uninterrupted run did: each operator once,
+    /// each output once and in order, the position only forward, and the
+    /// bookmark no bigger than `bound` lines.
+    async fn check(&self, kills: &[usize]) {
+        let world = World::new();
+        let mut caller = Caller::new();
+        let repeats =
+            run_with_kills(|| (self.build)(&world), &self.input, &mut caller, kills).await;
+        assert_eq!(caller.outs, self.want.outs, "kills {kills:?}");
+        assert_eq!(
+            started(world.log()),
+            started(self.want_log.clone()),
+            "kills {kills:?}"
+        );
+        assert_forward(&caller.throughs);
+        assert_eq!(
+            caller.position(),
+            self.input.len() as u64,
+            "kills {kills:?}"
+        );
+        assert!(caller.bookmark().is_empty(), "kills {kills:?}");
+        assert!(
+            caller.most <= self.bound,
+            "kills {kills:?}: {} lines",
+            caller.most
+        );
+        assert!(repeats <= kills.len());
+    }
+
+    /// Every single kill point, and every pair of kill points in a row.
+    fn every_kill_once_or_twice(&self) -> Vec<Kills> {
+        let points = 1..self.events;
+        singles_then_pairs(points.clone(), points.clone(), points)
+    }
+
+    /// Check `shard` of every single kill point and every pair.
+    async fn check_every_kill(&self, shard: Shard) {
+        for kills in shard.take(self.every_kill_once_or_twice()) {
+            self.check(&kills).await;
         }
     }
 }
@@ -253,28 +285,88 @@ async fn no_output_is_handed_out_for_an_item_the_position_has_passed() {
 
 // -------------------------------------------------------------- kill points
 
-#[tokio::test]
-async fn a_per_item_vine_killed_anywhere_once_or_twice_acts_and_hands_out_once() {
-    check_every_kill(relay, &events(1, 8), 2).await;
+#[test]
+fn the_shards_of_a_sweep_hold_each_kill_plan_exactly_once() {
+    for events in [0, 1, 2, 7, 40] {
+        let points = 1..events;
+        let sweep = singles_then_pairs(points.clone(), points.clone(), points);
+        for of in 1..=8 {
+            let mut joined: Vec<Kills> = (0..of)
+                .flat_map(|index| Shard::new(index, of).take(sweep.clone()))
+                .collect();
+            joined.sort();
+            let mut want = sweep.clone();
+            want.sort();
+            assert_eq!(joined, want, "{events} events in {of} shards");
+        }
+    }
 }
 
-#[tokio::test]
-async fn a_batching_vine_killed_anywhere_once_or_twice_stores_each_batch_once() {
-    check_every_kill(backup, &events(1, 12), 2).await;
+async fn relay_sweep(shard: Shard) {
+    Baseline::of(relay, events(1, 8), 2)
+        .await
+        .check_every_kill(shard)
+        .await;
 }
 
-#[tokio::test]
-async fn a_vine_with_a_side_batch_killed_anywhere_once_or_twice_calls_once() {
+sweep_tests!(
+    a_per_item_vine_killed_anywhere_once_or_twice_acts_and_hands_out_once: relay_sweep,
+    shard_0 = 0,
+    shard_1 = 1,
+);
+
+async fn batching_sweep(shard: Shard) {
+    Baseline::of(backup, events(1, 12), 2)
+        .await
+        .check_every_kill(shard)
+        .await;
+}
+
+sweep_tests!(
+    a_batching_vine_killed_anywhere_once_or_twice_stores_each_batch_once: batching_sweep,
+    shard_0 = 0,
+);
+
+async fn side_batch_sweep(shard: Shard) {
     // A batch of 3 has 3 archives and one store in flight at most.
-    check_every_kill(archive_and_batch, &events(1, 7), 8).await;
+    Baseline::of(archive_and_batch, events(1, 7), 8)
+        .await
+        .check_every_kill(shard)
+        .await;
 }
 
-#[tokio::test]
-async fn a_stream_operator_vine_killed_anywhere_once_or_twice_gives_each_page_once() {
+sweep_tests!(
+    a_vine_with_a_side_batch_killed_anywhere_once_or_twice_calls_once: side_batch_sweep,
+    shard_0 = 0,
+    shard_1 = 1,
+    shard_2 = 2,
+    shard_3 = 3,
+);
+
+async fn pages_sweep(shard: Shard) {
     // The most pages one event has is 4: its start, 4 pages, its end, 5
     // handed outputs, and the start of the next event.
-    check_every_kill(pages, &paged(1, 5), 12).await;
+    Baseline::of(pages, paged(1, 5), 12)
+        .await
+        .check_every_kill(shard)
+        .await;
 }
+
+sweep_tests!(
+    a_stream_operator_vine_killed_anywhere_once_or_twice_gives_each_page_once: pages_sweep,
+    shard_0 = 0,
+    shard_1 = 1,
+    shard_2 = 2,
+    shard_3 = 3,
+    shard_4 = 4,
+    shard_5 = 5,
+    shard_6 = 6,
+    shard_7 = 7,
+    shard_8 = 8,
+    shard_9 = 9,
+    shard_10 = 10,
+    shard_11 = 11,
+);
 
 #[tokio::test]
 async fn a_restart_mid_stream_asks_the_operator_to_go_on_after_the_pages_it_saved() {
@@ -323,28 +415,42 @@ async fn a_restart_mid_stream_asks_the_operator_to_go_on_after_the_pages_it_save
 
 // ------------------------------------------------------------- long streams
 
+/// Kill `build`'s vine halfway through a long input, then run it to the
+/// end, and check the bookmark stayed within `bound` lines and small when
+/// saved.
+async fn check_stays_bounded(build: Build, input: Vec<Value>, bound: usize) {
+    let world = World::new();
+    let mut caller = Caller::new();
+    let len = input.len() as u64;
+    let halfway = events_in(&build(&World::new()), &input).await / 2;
+    run(&build(&world), &input, &mut caller, Some(halfway)).await;
+    let saved = caller.saved.to_string().len();
+    assert!(caller.position() > len / 3, "{}", caller.position());
+    run(&build(&world), &input, &mut caller, None).await;
+    assert!(caller.most <= bound, "{} lines", caller.most);
+    assert!(saved < 2_000, "the saved bookmark is {saved} bytes");
+    assert_eq!(caller.position(), len);
+    assert_forward(&caller.throughs);
+}
+
 #[tokio::test]
-async fn what_the_caller_keeps_stays_bounded_over_thousands_of_events() {
-    for (build, input, bound) in [
-        (relay as Build, events(1, 5000), 2),
-        (backup, events(1, 5000), 2),
-        (archive_and_batch, events(1, 3000), 8),
-        (pages, paged(1, 2000), 12),
-    ] {
-        let world = World::new();
-        let mut caller = Caller::new();
-        let len = input.len() as u64;
-        // Kill halfway through, then run to the end.
-        let halfway = events_in(&build(&World::new()), &input).await / 2;
-        run(&build(&world), &input, &mut caller, Some(halfway)).await;
-        let saved = caller.saved.to_string().len();
-        assert!(caller.position() > len / 3, "{}", caller.position());
-        run(&build(&world), &input, &mut caller, None).await;
-        assert!(caller.most <= bound, "{} lines", caller.most);
-        assert!(saved < 2_000, "the saved bookmark is {saved} bytes");
-        assert_eq!(caller.position(), len);
-        assert_forward(&caller.throughs);
-    }
+async fn what_the_caller_keeps_for_a_per_item_vine_stays_bounded_over_thousands_of_events() {
+    check_stays_bounded(relay, events(1, 5000), 2).await;
+}
+
+#[tokio::test]
+async fn what_the_caller_keeps_for_a_batching_vine_stays_bounded_over_thousands_of_events() {
+    check_stays_bounded(backup, events(1, 5000), 2).await;
+}
+
+#[tokio::test]
+async fn what_the_caller_keeps_for_a_side_batch_stays_bounded_over_thousands_of_events() {
+    check_stays_bounded(archive_and_batch, events(1, 3000), 8).await;
+}
+
+#[tokio::test]
+async fn what_the_caller_keeps_for_a_stream_operator_stays_bounded_over_thousands_of_events() {
+    check_stays_bounded(pages, paged(1, 2000), 12).await;
 }
 
 // ----------------------------------------------------------------- failures
@@ -425,10 +531,9 @@ async fn a_caught_failure_is_one_output_and_the_position_moves_past_it() {
 
 #[tokio::test]
 async fn a_caught_failure_survives_a_kill_at_every_point() {
-    let input = with_bad(4);
-    let (_, _, events) = uninterrupted(relay_caught, &input).await;
-    for k in 1..events {
-        check_kills(relay_caught, &input, &[k], 2).await;
+    let base = Baseline::of(relay_caught, with_bad(4), 2).await;
+    for k in 1..base.events {
+        base.check(&[k]).await;
     }
 }
 
