@@ -17,8 +17,8 @@ use std::sync::Arc;
 use fake::desk::{desk_registry, job, job_event, jobs, step, Desk};
 use futures::{stream, StreamExt};
 use vine_lang::pipe::{
-    call, concat_map, emit_with, filter, fork, last, merge_map, pipe, split, use_vine, Operator,
-    Pipe, PipeDef,
+    buffer_count, call, concat_map, emit_with, filter, fork, last, merge_map, op, pipe, split,
+    use_vine, Operator, Pipe, PipeDef,
 };
 use vine_lang::{
     json, Bookmark, Event, Journal, OutputId, PipeOutput, Progress, Registry, Shape, Ty, Value,
@@ -61,6 +61,33 @@ fn twice_over_a_stream() -> PipeDef {
         .input(Shape::new().required("job", Ty::Object))
         .output("noted", id_shape())
         .operators([merging(twice_work())])
+}
+
+/// A stream of jobs side by side. Each waits its `secs`, then its `gap`,
+/// then its `secs` again, one after the other with the same step, and is
+/// noted after each wait.
+fn twice_with_a_gap() -> PipeDef {
+    pipe("twice_gap")
+        .input(Shape::new().required("job", Ty::Object))
+        .output("noted", id_shape())
+        .operators([merge_map(vec![
+            op(
+                "set",
+                json!({
+                    "job": "$item.job",
+                    "waits": ["$item.job.secs", "$item.job.gap", "$item.job.secs"],
+                }),
+            ),
+            split("$item.waits").into("wait"),
+            concat_map([
+                call(
+                    "work.step",
+                    json!({ "id": "$item.job.id", "step": "wait", "secs": "$item.wait" }),
+                ),
+                emit_with("noted", json!({ "id": "$item.id" })),
+            ]),
+        ])
+        .concurrent(3)])
 }
 
 /// `twice_over_jobs` run by `use`, its notes passed on.
@@ -123,6 +150,42 @@ fn summaries() -> PipeDef {
                 ]),
                 last(),
                 emit_with("all", json!({ "group": "$item.group" })),
+            ]),
+        ])
+}
+
+/// Groups of jobs side by side, the jobs of each side by side within it,
+/// then `last` and one summary per group. The value `last` picks is lifted
+/// out of the groups of its own pipe, and stays in its group of jobs.
+fn summaries_side_by_side() -> PipeDef {
+    pipe("summaries")
+        .input(Shape::new().required("groups", Ty::List))
+        .output("all", Shape::new().required("group", Ty::List))
+        .operators([
+            split("$item.groups").into("group"),
+            merging(vec![
+                split("$item.group").into("job"),
+                merging(vec![step("one", json!("$item.job.secs"))]),
+                last(),
+                emit_with("all", json!({ "group": "$item.group" })),
+            ]),
+        ])
+}
+
+/// The jobs side by side, each splitting its work in three and batching
+/// it in twos inside its own group.
+fn batches_in_groups() -> PipeDef {
+    pipe("batches")
+        .input(Shape::new().required("jobs", Ty::List))
+        .output("batch", Shape::open())
+        .operators([
+            split("$item.jobs").into("job"),
+            merging(vec![
+                step("one", json!("$item.job.secs")),
+                op("set", json!({ "id": "$item.job.id", "parts": [1, 2, 3] })),
+                split("$item.parts").into("part"),
+                buffer_count(2),
+                emit_with("batch", json!({ "items": "$item.items" })),
             ]),
         ])
 }
@@ -365,6 +428,27 @@ async fn an_id_is_the_same_after_a_kill_inside_groups_of_a_merge() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn an_item_keeps_counting_its_outputs_while_others_finish_around_it() {
+    let event = |id: &str, gap: u64| json!({ "job": { "id": id, "secs": 1, "gap": gap } });
+    // Item 2 is done at two seconds, as item 1's third wait starts; the
+    // position passes items 1 and 2 at four, during item 3's second wait,
+    // which ends at five. Each wait is the same step, so it is counted,
+    // and saved, after the ones before it.
+    let input = [event("a", 2), event("b", 0), event("c", 4)];
+    let got = run(
+        Mode::Position,
+        &built(twice_with_a_gap()),
+        &input,
+        &mut fresh(Mode::Position),
+        None,
+    )
+    .await;
+    assert_eq!(got.outs.len(), 9);
+    assert_unique(&got.outs, "items finishing around one another");
+    ids_hold_at_every_kill(Mode::Position, || built(twice_with_a_gap()), &input).await;
+}
+
+#[tokio::test(start_paused = true)]
 async fn an_id_is_the_same_after_a_kill_inside_a_vine_run_by_use() {
     for mode in [Mode::Journal, Mode::Position] {
         let again = ids_hold_at_every_kill(mode, || built(using_twice()), &three_jobs()).await;
@@ -388,6 +472,15 @@ async fn an_id_is_the_same_after_a_kill_for_outputs_saved_by_position() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn an_id_is_the_same_after_a_kill_for_batches_inside_groups_of_a_merge() {
+    for mode in [Mode::Journal, Mode::Position] {
+        let again =
+            ids_hold_at_every_kill(mode, || built(batches_in_groups()), &three_jobs()).await;
+        assert!(again > 0, "{mode:?}");
+    }
+}
+
+#[tokio::test(start_paused = true)]
 async fn a_summary_whose_line_was_dropped_does_not_shift_the_ids_after_it() {
     let input = vec![json!({ "groups": [
         [job("a", 2), job("b", 1)],
@@ -395,6 +488,18 @@ async fn a_summary_whose_line_was_dropped_does_not_shift_the_ids_after_it() {
     ] })];
     for mode in [Mode::Journal, Mode::Position] {
         ids_hold_at_every_kill(mode, || built(summaries()), &input).await;
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_summary_of_each_group_side_by_side_keeps_its_id_at_every_kill() {
+    // The second group finishes first.
+    let input = vec![json!({ "groups": [
+        [job("a", 2), job("b", 3)],
+        [job("c", 1)],
+    ] })];
+    for mode in [Mode::Journal, Mode::Position] {
+        ids_hold_at_every_kill(mode, || built(summaries_side_by_side()), &input).await;
     }
 }
 

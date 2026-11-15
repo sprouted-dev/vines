@@ -321,11 +321,11 @@ pub(super) struct Ledger {
 
 impl Ledger {
     /// A ledger for a run that resumes after `position`, where the items
-    /// in `done` past it are done already.
+    /// in `done`, all past it, are done already.
     pub(super) fn after(position: u64, done: impl IntoIterator<Item = u64>) -> Ledger {
         let mut ledger = Ledger {
             position,
-            done: done.into_iter().filter(|&n| n > position).collect(),
+            done: done.into_iter().collect(),
             ..Ledger::default()
         };
         ledger.advance();
@@ -397,9 +397,9 @@ impl Ledger {
         }
     }
 
-    /// Items `first` to `last` are done together.
-    fn join(&mut self, first: u64, last: u64) {
-        let (mut first, mut last) = (first.max(self.position + 1), last);
+    /// Items `first` to `last` are done together. They are all past the
+    /// position: a batch holds their tags, so none of them is done.
+    fn join(&mut self, mut first: u64, mut last: u64) {
         if first >= last {
             return;
         }

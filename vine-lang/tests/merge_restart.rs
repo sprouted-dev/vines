@@ -25,7 +25,7 @@ use fake::restart::{
 use futures::{stream, StreamExt};
 use tokio::time::Instant;
 use vine_lang::pipe::{
-    call, concat_map, emit_with, fork, fork_join, last, use_vine, Pipe, PipeDef,
+    call, concat_map, emit_with, filter, fork, fork_join, last, op, split, use_vine, Pipe, PipeDef,
 };
 use vine_lang::{json, Bookmark, Entry, Event, Journal, Progress, RunError, Value};
 
@@ -525,6 +525,66 @@ async fn a_merge_after_a_stream_operator_saved_by_position_stays_small_and_resum
     }
 }
 
+#[tokio::test(start_paused = true)]
+async fn a_line_keeps_counting_its_calls_while_the_lines_before_it_finish() {
+    // Line `n` of a job waits `n` seconds three times with the same step,
+    // its lines side by side. Line 1's work ends at three seconds, which
+    // moves the call's position past it, between line 2's second and third
+    // waits; that third wait is counted, and saved, as the third.
+    let def = || {
+        jobs_vine([concat_map(vec![
+            call(
+                "work.lines",
+                json!({ "id": "$item.job.id", "lines": "$item.job.secs" }),
+            )
+            .into("line"),
+            merge_jobs(
+                Some(2),
+                vec![
+                    op(
+                        "set",
+                        json!({
+                            "job": "$item.job",
+                            "waits": ["$item.line.line", "$item.line.line", "$item.line.line"],
+                        }),
+                    ),
+                    split("$item.waits").into("wait"),
+                    concat_map([
+                        call(
+                            "work.step",
+                            json!({ "id": "$item.job.id", "step": "wait", "secs": "$item.wait" }),
+                        ),
+                        emit_with("done", json!({ "id": "$item.id" })),
+                    ]),
+                ],
+            ),
+        ])])
+    };
+    let input = vec![jobs(&[("a", 2)])];
+    let vine = built(&Desk::new(), def());
+    assert!(
+        vine.saves_every_item().is_empty(),
+        "{:?}",
+        vine.saves_every_item()
+    );
+    let clean = outputs_saved(&vine, &input).await;
+    assert_eq!(clean.len(), 6);
+    let points = events_saved(&built(&Desk::new(), def()), &input).await;
+    for k in 1..=points {
+        let desk = Desk::new();
+        let mut keeper = Keeper::new();
+        run_saved_with_kills_where(
+            || built(&desk, def()),
+            &input,
+            &mut keeper,
+            &[k],
+            Repeat::Later,
+        )
+        .await;
+        assert_eq!(sorted(&keeper.outs), sorted(&clean), "kill at {k}");
+    }
+}
+
 // ------------------------------------------------------- the end of all
 
 fn summed() -> PipeDef {
@@ -665,6 +725,51 @@ async fn the_position_waits_for_an_early_item_that_finishes_last_and_never_goes_
     }
     // e1 takes seven seconds; e2, e3 and e4 finish before it.
     assert_eq!(seen, ["done 2", "done 3", "done 4", "through 4"]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_item_is_told_done_past_the_position_only_while_the_position_is_before_it() {
+    // Items that emit nothing are done inside the run, several at a time.
+    let quiet = |concurrent| {
+        job_stream_vine([merge_jobs(
+            Some(concurrent),
+            vec![
+                step("one", json!("$item.job.secs")),
+                filter("$item.job.keep"),
+                emit_with("done", json!({ "id": "$item.job.id" })),
+            ],
+        )])
+    };
+    for (slow, quick, concurrent) in [(1, 1, 2), (1, 3, 2), (1, 3, 4), (2, 3, 3), (6, 3, 2)] {
+        let vine = built(&Desk::new(), stream_vine(concurrent));
+        let mut run = vine.run_from(stream::iter(events(slow, quick)), Bookmark::new());
+        let mut position = 0;
+        while let Some(p) = run.next().await {
+            match p.unwrap() {
+                Progress::Through(n) => position = n,
+                Progress::Done(n) => assert!(
+                    n > position,
+                    "{slow}s, {quick} quick, {concurrent} at once: done {n} at position {position}"
+                ),
+                _ => {}
+            }
+        }
+        assert_eq!(position, quick as u64 + 1);
+        let vine = built(&Desk::new(), quiet(concurrent));
+        let mut run = vine.run_from(stream::iter(events(slow, quick)), Bookmark::new());
+        let mut position = 0;
+        while let Some(p) = run.next().await {
+            match p.unwrap() {
+                Progress::Through(n) => position = n,
+                Progress::Done(n) => assert!(
+                    n > position,
+                    "{slow}s, {quick} quick, {concurrent} at once: done {n} at position {position}"
+                ),
+                _ => {}
+            }
+        }
+        assert_eq!(position, quick as u64 + 1);
+    }
 }
 
 #[tokio::test(start_paused = true)]

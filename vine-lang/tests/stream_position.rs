@@ -22,7 +22,7 @@ use futures::{stream, StreamExt};
 use sweep::{singles_then_pairs, sweep_tests, Shard};
 use vine_lang::pipe::{
     buffer_count, call, catch_error, concat_map, emit, emit_with, filter, finalize, fork, last,
-    pipe, retry, take, tap, use_vine, Operator, PipeDef,
+    pipe, retry, take, tap, timeout, use_vine, Operator, PipeDef,
 };
 use vine_lang::{
     json, Bookmark, Ending, Entry, Event, Journal, Line, OpError, OperatorSpec, Part, Pipe,
@@ -943,6 +943,17 @@ fn the_checker_saves_a_call_item_by_item_where_a_later_item_could_not_rebuild_th
             "pipe[1] is a `retry`",
         ),
         (
+            // Past a `timeout` over the call, in the pipe of the whole stream.
+            events_vine([
+                fetch(),
+                timeout(std::time::Duration::from_secs(1)),
+                buffer_count(2),
+                emit("out"),
+            ]),
+            "pipe[0]",
+            "pipe[2] is a `bufferCount`",
+        ),
+        (
             // A batch after a `catchError` that runs the operator holds many items' calls.
             events_vine([
                 call("archive.put", json!({ "seq": "$item.seq", "body": "x" })),
@@ -992,6 +1003,13 @@ fn the_checker_saves_a_call_by_position_where_every_operator_after_it_can_be_reb
                 emit("out"),
             ]),
         ]),
+        // Past a `timeout` over the call inside one item's work.
+        events_vine([concat_map([
+            fetch(),
+            timeout(std::time::Duration::from_secs(1)),
+            buffer_count(2),
+            emit("out"),
+        ])]),
         // A batch over the whole stream of events, before the call.
         events_vine([buffer_count(2), filter("$item.count"), emit("out")]),
     ] {
@@ -1278,6 +1296,14 @@ async fn a_journal_saved_by_position_that_does_not_fit_the_run_is_a_run_error() 
     };
     let p = misfit(&replay(&again, vec![started(), stop.clone(), stop]).await);
     assert!(p.contains("a stop for `pipe[0]#0`"), "{p}");
+    // More outputs handed out past the position than the call makes again.
+    let handed = Entry::Through {
+        at: "pipe[0]#0".into(),
+        items: 0,
+        handed: 9,
+    };
+    let p = misfit(&replay(&again, vec![started(), handed]).await);
+    assert!(p.contains("says 6 more outputs were handed out"), "{p}");
     // A call saved by position, and an operator that now saves every item.
     let p = misfit(
         &replay(

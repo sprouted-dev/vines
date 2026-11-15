@@ -21,8 +21,8 @@ use futures::{stream, StreamExt};
 use sweep::{singles_then_pairs, sweep_tests, Kills, Shard};
 use vine_lang::journal::BookmarkError;
 use vine_lang::pipe::{
-    buffer_count, call, concat_map, emit, emit_with, exhaust_map, finalize, fork, last, pipe,
-    split, switch_map, take, tap, timeout, use_vine, Operator, Pipe, PipeDef,
+    buffer_count, call, concat_map, emit, emit_with, exhaust_map, filter, finalize, fork, last,
+    pipe, split, switch_map, take, tap, timeout, use_vine, Operator, Pipe, PipeDef,
 };
 use vine_lang::{
     json, Bookmark, Entry, Event, Journal, Line, OperatorSpec, Progress, RunError, Shape, Ty, Value,
@@ -839,6 +839,25 @@ fn items_done_past_the_position_are_kept_until_the_position_passes_them() {
     bookmark.record(&Progress::Through(3));
     assert_eq!(bookmark.done().collect::<Vec<_>>(), [4]);
     assert_eq!(Bookmark::from_json(&bookmark.to_json()).unwrap(), bookmark);
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_position_is_reported_as_soon_as_it_moves_while_the_input_stays_open() {
+    let world = World::new();
+    let vine = feed_registry(&world)
+        .build_pipe(events_vine([filter("$item.seq == 0"), emit("out")]))
+        .unwrap();
+    // Three items that each emit nothing, then input that never comes.
+    let input = stream::iter(events(1, 3)).chain(stream::pending());
+    let mut run = vine.run_from(input, Bookmark::new());
+    let mut bookmark = Bookmark::new();
+    while bookmark.position() < 3 {
+        let next = tokio::time::timeout(Duration::from_hours(1), run.next()).await;
+        let Ok(Some(progress)) = next else {
+            panic!("no progress past position {}", bookmark.position());
+        };
+        bookmark.record(&progress.unwrap());
+    }
 }
 
 #[tokio::test]
