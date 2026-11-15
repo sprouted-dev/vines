@@ -27,4 +27,38 @@ exclude_re = [
   # handles it and moves on before this test, so i is never c there, and
   # `i <= c` decides the same for every pipe.
   "replace < with <= in Checker<'_>::pipe",
+  # vine-lang's Book forgets what a run counted for items that are done:
+  # input items at or before the position (passed), an input item done past
+  # it (finished), and the items of a stream operator call through its
+  # position (moved). None of those items runs again in that run, so no key
+  # or output id is ever made from those counts again. Keeping them, as
+  # these mutants do, costs memory and changes nothing a caller sees. The
+  # mutants that forget the counts of items still running are caught.
+  'replace > with >= in Book::(moved|passed)',
+  'replace Book::(passed|finished) with \(\)',
+  # vine-lang's Tag::batch gives a batch the scope and item of its newest
+  # value when that value came from a stream operator call, or has no
+  # scope, and otherwise takes them from the newest value as it is. The
+  # newest value of a batch is its latest item: a call gives its items in
+  # order, and values from different groups keep their groups' scopes. So
+  # the first two arms give what the last one does, and these mutants,
+  # which send a batch to the last arm, change nothing.
+  'delete match arm \(Some\(call\), Some\(count\)\) in Tag::batch',
+  'replace match guard newest.scope.is_empty\(\) with false in Tag::batch',
+  # vine-lang's StreamRun saves, when dropped, that a call saved by
+  # position was abandoned, unless the call is done, never started, or its
+  # stop is saved. A call is done with no stop saved only when it failed
+  # the run, by a hard failure or a cancellation, which the run hands out
+  # last. So the mutant that turns `done || !started` into `done && !started`
+  # saves a line no caller ever reads. The other `||` on that line is
+  # caught, and has the same name, so this names the mutant by its place:
+  # if the line moves, the mutant shows up as missed again.
+  'stream_call\.rs:182:22: replace \|\| with && in <impl Drop for StreamRun>::drop',
+  # vine-lang's Fault::of makes a failure hold its item's tag, so the item
+  # is not done while the failure is in flight. A failure reaches the
+  # caller, and ends the run, in the same poll that makes it, and the one
+  # operator that holds a failure back, finalize, holds the item's tag
+  # itself while its cleanup runs. So a failure that holds no tag, as with
+  # this mutant, changes nothing a caller sees.
+  'replace Tag::or with \(\)',
 ]

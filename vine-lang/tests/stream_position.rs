@@ -627,6 +627,14 @@ async fn checked_run_sweep(shard: Shard) {
         let mut keeper = Keeper::new();
         run_saved_with_kills(|| checked_run(&world, &host), &[job()], &mut keeper, &kills).await;
         assert_eq!(keeper.outs, want, "kills {kills:?}");
+        // What the runs left replays to nothing more.
+        let mut again = Keeper {
+            saved: keeper.saved.clone(),
+            ..Keeper::new()
+        };
+        let end = run_saved(&checked_run(&world, &host), &[job()], &mut again, None).await;
+        assert!(matches!(end, End::Ended), "kills {kills:?}: {end:?}");
+        assert!(again.outs.is_empty(), "kills {kills:?}: {:?}", again.outs);
         // Each line was checked once, so every operator ran once.
         assert_eq!(
             calls_done(world.log()),
@@ -754,6 +762,67 @@ async fn a_result_that_breaks_its_shape_fails_the_run_again_after_a_restart() {
             "{run}: {end:?}"
         );
     }
+    assert!(
+        !keeper
+            .journal()
+            .entries()
+            .iter()
+            .any(|e| matches!(e, Entry::Stopped { .. })),
+        "{:?}",
+        keeper.journal()
+    );
+}
+
+/// `cut.pages { seq }` gives `{ page }` 1, then fails as cancelled, and
+/// can give its pages again.
+fn cut_pages(world: &Arc<World>) -> Pipe {
+    let mut reg = feed_registry_again(world);
+    let w = world.clone();
+    register_stream(
+        &mut reg,
+        Gives::Again,
+        OperatorSpec::new("cut.pages")
+            .settings(Shape::new().required("seq", Ty::Int))
+            .returns(Shape::new().required("page", Ty::Int))
+            .touches(["feed"]),
+        move |v, cx| {
+            w.note(format!("cut.pages {} from {}", v["seq"], cx.resume_from()));
+            let parts = [
+                Ok(Part::Item(json!({ "page": 1 }))),
+                Err(OpError::cancelled("the host went away")),
+            ];
+            let from = usize::try_from(cx.resume_from()).unwrap();
+            stream::iter(parts.into_iter().skip(from))
+        },
+    );
+    let def = pipe("cut")
+        .input(Shape::new().required("seq", Ty::Int))
+        .output("page", Shape::open())
+        .operators([
+            call("cut.pages", json!({ "seq": "$item.seq" })).into("page"),
+            emit_with("page", json!({ "page": "$item.page.page" })),
+        ]);
+    reg.build_pipe(def).unwrap()
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_cancelled_call_is_not_saved_as_stopped_and_cancels_the_run_again_after_a_restart() {
+    let world = World::new();
+    let input = [json!({ "seq": 1 })];
+    let mut keeper = Keeper::new();
+    for run in ["first", "restart"] {
+        let end = run_saved(&cut_pages(&world), &input, &mut keeper, None).await;
+        assert!(
+            matches!(end, End::Failed(RunError::Cancelled { .. })),
+            "{run}: {end:?}"
+        );
+    }
+    assert_eq!(keeper.outs.len(), 1, "{:?}", keeper.outs);
+    assert_eq!(
+        world.log(),
+        ["cut.pages 1 from 0", "cut.pages 1 from 1"],
+        "the restart calls it again after the page it gave"
+    );
     assert!(
         !keeper
             .journal()

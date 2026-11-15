@@ -165,7 +165,10 @@ fn summaries_side_by_side() -> PipeDef {
             split("$item.groups").into("group"),
             merging(vec![
                 split("$item.group").into("job"),
-                merging(vec![step("one", json!("$item.job.secs"))]),
+                merging(vec![
+                    step("one", json!("$item.job.secs")),
+                    step("two", json!("$item.job.two")),
+                ]),
                 last(),
                 emit_with("all", json!({ "group": "$item.group" })),
             ]),
@@ -493,10 +496,13 @@ async fn a_summary_whose_line_was_dropped_does_not_shift_the_ids_after_it() {
 
 #[tokio::test(start_paused = true)]
 async fn a_summary_of_each_group_side_by_side_keeps_its_id_at_every_kill() {
-    // The second group finishes first.
+    // The first group's job takes four seconds, the second's two and then
+    // three. A kill at three, after the second group's first step is saved,
+    // makes it finish first after the restart, though it finished last
+    // before.
     let input = vec![json!({ "groups": [
-        [job("a", 2), job("b", 3)],
-        [job("c", 1)],
+        [{ "id": "a", "secs": 4, "two": 0 }],
+        [{ "id": "b", "secs": 2, "two": 3 }],
     ] })];
     for mode in [Mode::Journal, Mode::Position] {
         ids_hold_at_every_kill(mode, || built(summaries_side_by_side()), &input).await;

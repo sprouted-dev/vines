@@ -373,7 +373,9 @@ impl Ledger {
         if let Some(notify) = self.notify.as_ref().filter(|_| self.position > before) {
             lock(&notify.moves).push_back((notify.call.clone(), self.position));
         }
-        if self.notify.is_none() && n > self.position {
+        // Told even when the position passed it just now: next_finished
+        // drops what the position passed before the caller hears of it.
+        if self.notify.is_none() {
             self.tell_finished(n);
         }
     }

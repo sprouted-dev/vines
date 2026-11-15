@@ -477,27 +477,28 @@ async fn a_stream_operator_inside_a_merge_resumes_from_its_position_at_every_kil
     assert!(resumed > 0, "no call was asked to go on from a position");
 }
 
+/// The lines of each job's call side by side in a `mergeMap`. Each output
+/// names its group, and the position drops the outputs of lines it passed.
+fn lines_side_by_side() -> PipeDef {
+    jobs_vine([concat_map(vec![
+        call(
+            "work.lines",
+            json!({ "id": "$item.job.id", "lines": "$item.job.secs" }),
+        )
+        .into("line"),
+        merge_jobs(
+            Some(2),
+            vec![emit_with(
+                "line",
+                json!({ "id": "$item.job.id", "line": "$item.line.line" }),
+            )],
+        ),
+    ])])
+}
+
 #[tokio::test(start_paused = true)]
 async fn a_merge_after_a_stream_operator_saved_by_position_stays_small_and_resumes() {
-    // The lines of one call go side by side into the `mergeMap`. Each output
-    // names its group, and the position drops the outputs of lines it
-    // passed.
-    let def = || {
-        jobs_vine([concat_map(vec![
-            call(
-                "work.lines",
-                json!({ "id": "$item.job.id", "lines": "$item.job.secs" }),
-            )
-            .into("line"),
-            merge_jobs(
-                Some(2),
-                vec![emit_with(
-                    "line",
-                    json!({ "id": "$item.job.id", "line": "$item.line.line" }),
-                )],
-            ),
-        ])])
-    };
+    let def = lines_side_by_side;
     let input = vec![jobs(&[("a", 30), ("b", 20)])];
     let desk = Desk::new();
     let vine = built(&desk, def());
@@ -582,6 +583,84 @@ async fn a_line_keeps_counting_its_calls_while_the_lines_before_it_finish() {
         )
         .await;
         assert_eq!(sorted(&keeper.outs), sorted(&clean), "kill at {k}");
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_calls_position_is_saved_each_time_it_moves_and_only_then() {
+    let vine = built(&Desk::new(), lines_side_by_side());
+    let events: Vec<Event> = vine
+        .run_saved(stream::iter([jobs(&[("a", 4), ("b", 3)])]), Journal::new())
+        .map(Result::unwrap)
+        .collect()
+        .await;
+    let mut through: BTreeMap<String, Vec<u64>> = BTreeMap::new();
+    for event in events {
+        if let Event::Save(Entry::Through { at, items, .. }) = event {
+            through.entry(at).or_default().push(items);
+        }
+    }
+    assert_eq!(through.len(), 2, "{through:?}");
+    for (at, items) in through {
+        assert!(items.windows(2).all(|w| w[0] < w[1]), "{at}: {items:?}");
+    }
+}
+
+/// One run that keeps its journal with [`Journal::push`], which drops
+/// nothing: the outputs it handed out, and how it ended.
+async fn pushed_run(
+    vine: &Pipe,
+    input: &[Value],
+    journal: &mut Journal,
+    kill: Option<usize>,
+) -> (Vec<vine_lang::PipeOutput>, Option<RunError>) {
+    let mut run = vine.run_saved(stream::iter(input.to_vec()), journal.clone());
+    let (mut outs, mut seen) = (Vec::new(), 0);
+    while let Some(event) = run.next().await {
+        match event {
+            Ok(Event::Output(o)) => outs.push(o),
+            Ok(Event::Save(entry)) => journal.push(entry),
+            Err(e) => return (outs, Some(e)),
+        }
+        seen += 1;
+        if Some(seen) == kill {
+            break;
+        }
+    }
+    (outs, None)
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_journal_kept_whole_resumes_at_every_kill_as_one_kept_small_does() {
+    let input = vec![jobs(&[("a", 3), ("b", 2)])];
+    let clean = outputs_saved(&built(&Desk::new(), lines_side_by_side()), &input).await;
+    let points = events_saved(&built(&Desk::new(), lines_side_by_side()), &input).await;
+    for k in 1..=points {
+        let desk = Desk::new();
+        let mut journal = Journal::new();
+        let (before, err) = pushed_run(
+            &built(&desk, lines_side_by_side()),
+            &input,
+            &mut journal,
+            Some(k),
+        )
+        .await;
+        assert!(err.is_none(), "kill at {k}: {err:?}");
+        let (after, err) = pushed_run(
+            &built(&desk, lines_side_by_side()),
+            &input,
+            &mut journal,
+            None,
+        )
+        .await;
+        assert!(err.is_none(), "kill at {k}: {err:?}");
+        // An output handed out right before the kill comes again by its id.
+        let mut by_id = BTreeMap::new();
+        for o in before.into_iter().chain(after) {
+            by_id.insert(o.id, (o.name, o.payload));
+        }
+        let got: Outs = by_id.into_values().collect();
+        assert_eq!(sorted(&got), sorted(&clean), "kill at {k}");
     }
 }
 
