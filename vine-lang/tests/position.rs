@@ -851,6 +851,9 @@ async fn the_position_is_reported_as_soon_as_it_moves_while_the_input_stays_open
     let input = stream::iter(events(1, 3)).chain(stream::pending());
     let mut run = vine.run_from(input, Bookmark::new());
     let mut bookmark = Bookmark::new();
+    // The clock is paused and moves only when nothing can run, so a run
+    // that waits to be woken before it reports shows as time passing.
+    let started = tokio::time::Instant::now();
     while bookmark.position() < 3 {
         let next = tokio::time::timeout(Duration::from_hours(1), run.next()).await;
         let Ok(Some(progress)) = next else {
@@ -858,6 +861,7 @@ async fn the_position_is_reported_as_soon_as_it_moves_while_the_input_stays_open
         };
         bookmark.record(&progress.unwrap());
     }
+    assert_eq!(started.elapsed(), Duration::ZERO, "the position waited");
 }
 
 #[tokio::test]
