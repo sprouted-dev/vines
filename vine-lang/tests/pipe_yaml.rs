@@ -658,8 +658,11 @@ fn retry_and_timeout_read_their_times() {
         "{err}"
     );
     let world = World::new();
-    let doc = "vine: v\ninput: { n: int }\noutputs: { out: { n: int } }\npipe:\n  - set: { n: $item.n }\n  - retry: { count: 2, delay: 5s }\n  - timeout: 30s\n  - emit: out\n";
-    registry(&world).load_pipe(doc).unwrap();
+    for (delay, limit) in [("500ms", "30s"), ("5s", "2m"), ("1h", "1h")] {
+        let doc = format!("vine: v\ninput: {{ n: int }}\noutputs: {{ out: {{ n: int }} }}\npipe:\n  - set: {{ n: $item.n }}\n  - retry: {{ count: 2, delay: {delay} }}\n  - timeout: {limit}\n  - emit: out\n");
+        let loaded = registry(&world).load_pipe(&doc);
+        assert!(loaded.is_ok(), "{delay}, {limit}: {:?}", loaded.err());
+    }
 }
 
 #[test]

@@ -116,6 +116,20 @@ fn built(desk: &Arc<Desk>, def: PipeDef) -> Pipe {
 /// The desk's operators, and `timed_job`: one job's timed work as a vine of
 /// its own, for `use`.
 fn registry(desk: &Arc<Desk>) -> Registry {
+    registry_with(desk, timed_work())
+}
+
+/// One job's work without its timeout, and so without the `catchError`
+/// that turns a timeout into `failed`.
+fn untimed_work() -> Vec<Operator> {
+    timed_work()
+        .into_iter()
+        .filter(|s| !matches!(s, Operator::Timeout(_) | Operator::CatchError(_)))
+        .collect()
+}
+
+/// The desk's operators, and `timed_job` doing `work`.
+fn registry_with(desk: &Arc<Desk>, work: Vec<Operator>) -> Registry {
     let mut reg = desk_registry(desk);
     let id = || Shape::new().required("id", Ty::Text);
     let inner = pipe("timed_job")
@@ -123,7 +137,7 @@ fn registry(desk: &Arc<Desk>) -> Registry {
         .output("stepped", id().required("step", Ty::Text))
         .output("done", id())
         .output("failed", id().required("code", Ty::Text))
-        .operators(timed_work());
+        .operators(work);
     let inner = reg.build_pipe(inner).unwrap();
     reg.add_vine(inner).unwrap();
     reg
@@ -923,12 +937,6 @@ async fn a_journal_saved_before_timeouts_were_saved_resumes_as_it_did() {
 
 #[tokio::test(start_paused = true)]
 async fn a_journal_or_bookmark_saved_before_a_timeout_was_added_is_refused_before_any_operator() {
-    let untimed_work = || -> Vec<Operator> {
-        timed_work()
-            .into_iter()
-            .filter(|s| !matches!(s, Operator::Timeout(_) | Operator::CatchError(_)))
-            .collect()
-    };
     // Saved partway through by the vine without its timeout.
     let jobs = jobs_input(&three());
     let mut journal = Caller::new(Mode::Journal);
@@ -944,9 +952,16 @@ async fn a_journal_or_bookmark_saved_before_a_timeout_was_added_is_refused_befor
         .run(&built(&Desk::new(), before), &events, Some(3))
         .await
         .unwrap();
+    // And by a vine it runs by `use`, before the timeout was added there.
+    let mut used = Caller::new(Mode::Journal);
+    let before = registry_with(&Desk::new(), untimed_work())
+        .build_pipe(jobs_vine(used_operators()))
+        .unwrap();
+    used.run(&before, &jobs, Some(3)).await.unwrap();
     for (mut caller, def, input) in [
         (journal, timed_jobs(), &jobs),
         (bookmark, timed_stream(), &events),
+        (used, jobs_vine(used_operators()), &jobs),
     ] {
         let desk = Desk::new();
         let got = caller.run(&built(&desk, def), input, None).await;

@@ -636,15 +636,50 @@ fn an_emit_in_a_side_pipe_does_not_count_as_the_main_pipe_emitting() {
 }
 
 #[test]
-fn finalize_may_not_hold_a_fork_that_emits() {
-    let err = refused([
-        emit("out"),
-        finalize([fork([vec![emit("a")]]), op("set", json!({}))]),
-    ]);
-    assert!(
-        matches!(err, LoadError::Malformed { ref path, .. } if path == "pipe[1].finalize"),
-        "{err}"
-    );
+fn finalize_may_not_hold_an_operator_that_emits() {
+    let mut reg = counting().1;
+    let inner = reg
+        .build_pipe(
+            pipe("inner")
+                .input(Shape::new().required("n", Ty::Int))
+                .output("out", Shape::open())
+                .operators([emit("out")]),
+        )
+        .unwrap();
+    reg.add_vine(inner).unwrap();
+    let cleanups: Vec<(&str, Vec<Operator>)> = vec![
+        (
+            "a fork",
+            vec![fork([vec![emit("a")]]), op("set", json!({}))],
+        ),
+        ("a concatMap", vec![concat_map([emit("a")])]),
+        (
+            "a branch case",
+            vec![branch("$item.n", [("1", [emit("a")])], None)],
+        ),
+        (
+            "a branch's otherwise",
+            vec![branch(
+                "$item.n",
+                [("1", [op("set", json!({}))])],
+                Some(vec![emit("a")]),
+            )],
+        ),
+        (
+            "a use",
+            vec![use_vine("inner", None).on("out", [emit("a")])],
+        ),
+    ];
+    for (what, cleanup) in cleanups {
+        let err = reg
+            .build_pipe(numbers([emit("out"), finalize(cleanup)]))
+            .unwrap_err();
+        assert!(
+            matches!(err, LoadError::Malformed { ref path, ref problem }
+                if path == "pipe[1].finalize" && problem.contains("may not emit")),
+            "{what}: {err}"
+        );
+    }
 }
 
 // --------------------------------------------------------- last, collect
