@@ -1112,6 +1112,25 @@ fn through(at: &str, items: u64) -> Entry {
 }
 
 #[test]
+fn pushing_an_entry_drops_nothing_where_recording_it_would() {
+    let entries = [done("pipe[1]#0@2/pipe[3]#0"), through("pipe[1]#0", 2)];
+    let mut pushed = Journal::new();
+    assert!(pushed.is_empty());
+    for entry in entries.clone() {
+        pushed.push(entry);
+    }
+    assert_eq!(pushed.entries(), entries);
+    assert_eq!((pushed.len(), pushed.is_empty()), (2, false));
+    assert_eq!(entries.iter().cloned().collect::<Journal>(), pushed);
+
+    let mut recorded = Journal::new();
+    for entry in entries.clone() {
+        recorded.record(&Event::Save(entry));
+    }
+    assert_eq!(recorded.entries(), [through("pipe[1]#0", 2)]);
+}
+
+#[test]
 fn recording_a_through_replaces_the_last_one_and_drops_the_lines_of_the_items_it_passed() {
     let mut journal = Journal::new();
     for entry in [

@@ -19,6 +19,7 @@ use fake::restart::{assert_forward, events_in, run, run_with_kills, started, Cal
 use fake::World;
 use futures::{stream, StreamExt};
 use sweep::{singles_then_pairs, sweep_tests, Kills, Shard};
+use vine_lang::journal::BookmarkError;
 use vine_lang::pipe::{
     buffer_count, call, concat_map, emit, emit_with, exhaust_map, finalize, fork, last, pipe,
     split, switch_map, take, tap, timeout, use_vine, Operator, Pipe, PipeDef,
@@ -781,6 +782,25 @@ fn a_bookmark_survives_json_and_one_that_is_not_one_is_refused() {
 }
 
 #[test]
+fn a_bookmark_reads_done_runs_and_refuses_one_backwards_or_not_past_the_position() {
+    let with =
+        |done: Value| Bookmark::from_json(&json!({ "position": 2, "lines": [], "done": done }));
+    let read = with(json!([[4, 5], [7, 7]])).unwrap();
+    assert_eq!(read.done().collect::<Vec<_>>(), [4, 5, 7]);
+    for (done, err) in [
+        (json!([[5, 4]]), BookmarkError::MisplacedRun { index: 0 }),
+        (
+            json!([[4, 5], [2, 3]]),
+            BookmarkError::MisplacedRun { index: 1 },
+        ),
+        (json!([[4]]), BookmarkError::BadRun { index: 0 }),
+        (json!(3), BookmarkError::DoneNotAList),
+    ] {
+        assert_eq!(with(done.clone()), Err(err), "{done}");
+    }
+}
+
+#[test]
 fn recording_the_position_drops_the_lines_it_passed() {
     let line = |item| {
         Progress::Save(Line {
@@ -801,6 +821,24 @@ fn recording_the_position_drops_the_lines_it_passed() {
         bookmark.lines().iter().map(|l| l.item).collect::<Vec<_>>(),
         [3]
     );
+    assert!(!bookmark.is_empty());
+}
+
+#[test]
+fn items_done_past_the_position_are_kept_until_the_position_passes_them() {
+    let mut bookmark = Bookmark::at(1);
+    for p in [Progress::Done(1), Progress::Done(3), Progress::Done(4)] {
+        bookmark.record(&p);
+    }
+    // Item 1 is at the position, so it is done already, not done past it.
+    assert_eq!(bookmark.done().collect::<Vec<_>>(), [3, 4]);
+    let done: Vec<bool> = (1..=5).map(|n| bookmark.is_done(n)).collect();
+    assert_eq!(done, [true, false, true, true, false]);
+
+    // A position inside a run of done items keeps the rest of the run.
+    bookmark.record(&Progress::Through(3));
+    assert_eq!(bookmark.done().collect::<Vec<_>>(), [4]);
+    assert_eq!(Bookmark::from_json(&bookmark.to_json()).unwrap(), bookmark);
 }
 
 #[tokio::test]

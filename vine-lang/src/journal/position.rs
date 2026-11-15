@@ -187,12 +187,9 @@ impl Bookmark {
     }
 
     /// Keep items `first` to `last` as done, joined to the runs of numbers
-    /// they touch.
-    fn mark_done(&mut self, first: u64, last: u64) {
-        let (mut first, mut last) = (first.max(self.position + 1), last);
-        if first > last {
-            return;
-        }
+    /// they touch. Both callers hand a run past the position, first to
+    /// last.
+    fn mark_done(&mut self, mut first: u64, mut last: u64) {
         let touching: Vec<(u64, u64)> = self
             .done
             .range(..=last.saturating_add(1))
