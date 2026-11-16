@@ -226,4 +226,4 @@ Time-dependent tests run under `tokio::time::pause` and are deterministic.
 
 ## License
 
-MIT OR Apache-2.0.
+Licensed under either of the [Apache License, Version 2.0](LICENSE-APACHE) or the [MIT license](LICENSE-MIT), at your option.
